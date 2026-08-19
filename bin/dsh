@@ -1,3 +1,13 @@
 #!/bin/sh
 set -eu
-exec node --import tsx/esm /app/dsh/apps/cli/lib/bin.js "$@"
+
+for loader in \
+  /app/dsh/node_modules/tsx/dist/loader.mjs \
+  /app/dsh/node_modules/tsx/dist/esm/index.mjs \
+  /app/dsh/node_modules/tsx; do
+  if [ -e "$loader" ]; then
+    exec node --import "$loader" /app/dsh/apps/cli/lib/bin.js "$@"
+  fi
+done
+
+exec node /app/dsh/apps/cli/lib/bin.js "$@"
