@@ -4,12 +4,18 @@ set -eu
 if [ "$(id -u)" = "0" ]; then
   chown -R node:node /data /workspace
   chmod -R u+rwX,g+rwX /data /workspace
+  find /data -name "*credentials*" -exec chmod 600 {} + 2>/dev/null || true
+  find /data -name ".*credentials*" -exec chmod 600 {} + 2>/dev/null || true
   if [ -d "$HOME/.ssh" ]; then
     chmod 700 "$HOME/.ssh"
     find "$HOME/.ssh" -type f -exec chmod 600 {} + 2>/dev/null || true
     find "$HOME/.ssh" -type f -name "*.pub" -exec chmod 644 {} + 2>/dev/null || true
     find "$HOME/.ssh" -type f -name "known_hosts*" -exec chmod 644 {} + 2>/dev/null || true
   fi
+fi
+
+if [ -f "$DSH_HOME/.credentials.yaml" ]; then
+  chmod 600 "$DSH_HOME/.credentials.yaml" 2>/dev/null || true
 fi
 
 if [ ! -f "$DSH_HOME/cordis.patch.yml" ]; then
