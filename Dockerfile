@@ -12,7 +12,7 @@ WORKDIR /app/dsh
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates python3 make g++ \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g pnpm@11.7.0
+    && npm install -g pnpm@11.7.0 esbuild@0.25.0
 
 RUN git clone --depth 1 -b ${UPSTREAM_REF} ${UPSTREAM_REPO} .
 
@@ -38,10 +38,12 @@ RUN grep -q 'connection\.isLoopback ? "host" : "memory"' packages/client/ui-sett
     && sed -i 's/connection\.isLoopback ? "host" : "memory"/"host"/' packages/client/ui-settings/lib/client.js \
     && node --check packages/client/ui-settings/lib/client.js
 
+COPY bin/compile-libs.mjs /tmp/compile-libs.mjs
 COPY bin/flatten-modules.mjs /tmp/flatten-modules.mjs
-RUN node /tmp/flatten-modules.mjs \
+RUN node /tmp/compile-libs.mjs \
+    && node /tmp/flatten-modules.mjs \
     && find packages vendor apps -mindepth 3 -maxdepth 5 -type d -name "node_modules" -prune -exec rm -rf {} + \
-    && rm -rf /tmp/flatten-modules.mjs .git docs .agents examples test* **/*.tsbuildinfo node_modules/.cache
+    && rm -rf /tmp/compile-libs.mjs /tmp/flatten-modules.mjs .git docs .agents examples test* **/*.tsbuildinfo node_modules/.cache
 
 FROM ${NODE_IMAGE} AS runtime
 
