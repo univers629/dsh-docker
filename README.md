@@ -145,6 +145,25 @@ docker compose up -d --build
 
 ---
 
+## 🔧 核心技术解密：公网/反代下插件与设置页面空白的根治方案
+
+### 1. 痛点根源
+DeepSeek Harness 官方前端在 `packages/client/ui-settings/lib/client.js` 中包含一段回环检测逻辑：
+```javascript
+// 官方原生判断：
+settingsScope: connection.isLoopback ? "host" : "memory"
+```
+当通过 **公网域名、外部 IP 或面板反向代理** 访问时，`connection.isLoopback` 返回 `false`，导致设置作用域被强制降级为纯内存态（`"memory"`）。
+- **严重影响**：设置页面直接白屏/空白、输入的 API Key 无法持久化保存、插件配置面板无法加载。
+
+### 2. 本项目的“双保险”根治方案
+1. **代码级持久化补丁（Code-level Patch）**：
+   在 `Dockerfile` 构建阶段自动将前端产物中的 `connection.isLoopback ? "host" : "memory"` 强制修正为 `"host"`，确保任何网络环境下设置均落盘至 `/data/dsh/settings.yaml`；
+2. **网络级回环伪装屏障（Network-level Reverse Proxy）**：
+   容器内置 Nginx 将外部请求无感伪装为 `Host: 127.0.0.1:3081` 与 `Origin: http://127.0.0.1:3081`，使得后端核心引擎的安全断言 100% 通过。
+
+---
+
 ## 🔌 子智能体 CLI 与 MCP 服务器扩展指南
 
 ### 1. 安装子 Agent CLI 工具（容器重建不丢失）

@@ -137,6 +137,22 @@ docker compose up -d --build
 
 ---
 
+## 🔧 Technical Deep Dive: Solving the Blank Settings Page Under Reverse Proxy
+
+### 1. Root Cause Analysis
+Upstream frontend contains an explicit loopback check in `packages/client/ui-settings/lib/client.js`:
+```javascript
+settingsScope: connection.isLoopback ? "host" : "memory"
+```
+When accessing DSH through **public domains, external IPs, or reverse proxy panels**, `connection.isLoopback` evaluates to `false`, causing the settings scope to downgrade to volatile memory mode (`"memory"`).
+- **Symptoms**: Blank settings UI, inability to persist API keys, and failing plugin configurations.
+
+### 2. Dual-Layer Resolution
+1. **Code-level Patch**: During Docker build, `connection.isLoopback ? "host" : "memory"` is patched directly to `"host"`, enforcing persistence to `/data/dsh/settings.yaml`.
+2. **Network-level Loopback Shield**: In-container Nginx rewrites incoming request headers to `Host: 127.0.0.1:3081` and `Origin: http://127.0.0.1:3081`, ensuring all backend loopback assertions pass seamlessly.
+
+---
+
 ## 🔌 Subagent CLI & MCP Server Ecosystem Guide
 
 ### 1. Persistent Subagent CLIs
