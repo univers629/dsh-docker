@@ -1,0 +1,24 @@
+# Persistence directories (track folder with .gitkeep, ignore data contents)
+data/*
+!data/agents
+!data/agents/.gitkeep
+!data/dsh
+!data/dsh/.gitkeep
+!data/mcp
+!data/mcp/.gitkeep
+!data/home
+!data/home/.gitkeep
+workspace/*
+!workspace/.gitkeep
+
+# Cloned source & local artifacts
+deepseek-harness/
+scratch_repos/
+*.zip
+*.log
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

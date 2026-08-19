@@ -1,0 +1,31 @@
+services:
+  dsh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dsh:local
+    container_name: dsh
+    hostname: dsh
+    restart: unless-stopped
+    ports:
+      - "3080:3080"
+    environment:
+      DSH_HOME: /data/dsh
+      DSH_AGENTS_HOME: /data/agents
+      DSH_PERMISSION_MODE: "danger-full-access"
+      DSH_WEB_PORT: "3081"
+    volumes:
+      - ./data/dsh:/data/dsh
+      - ./data/agents:/data/agents
+      - ./data/mcp:/data/mcp
+      - ./data/home:/data/home
+      - ./workspace:/workspace
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
