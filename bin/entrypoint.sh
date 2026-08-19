@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+export NODE_PATH="/app/dsh/node_modules:/data/dsh/profiles/node_modules:${NODE_PATH:-}"
+
 if [ "$(id -u)" = "0" ]; then
   chown -R node:node /data /workspace
   chmod -R u+rwX,g+rwX /data /workspace

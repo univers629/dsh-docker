@@ -51,7 +51,7 @@ function findPackages(dir) {
 const allPackages = findPackages(appDir);
 console.log(`[build-fix] Discovered ${allPackages.length} workspace packages.`);
 
-// 3. 为所有缺失入口的包编译 lib/index.js 和 lib/invariant.js
+// 3. 无条件为所有包编译自包含的 lib/index.js 和 lib/invariant.js，并生成根 index.js 兜底
 let compiled = 0;
 for (const item of allPackages) {
   const d = item.dir;
@@ -59,8 +59,9 @@ for (const item of allPackages) {
   const libIndex = path.join(d, 'lib/index.js');
   const srcInv = path.join(d, 'src/invariant.ts');
   const libInv = path.join(d, 'lib/invariant.js');
+  const rootIndex = path.join(d, 'index.js');
 
-  if (fs.existsSync(srcIndex) && !fs.existsSync(libIndex)) {
+  if (fs.existsSync(srcIndex)) {
     fs.mkdirSync(path.join(d, 'lib'), { recursive: true });
     try {
       buildSync({
@@ -78,7 +79,7 @@ for (const item of allPackages) {
     }
   }
 
-  if (fs.existsSync(srcInv) && !fs.existsSync(libInv)) {
+  if (fs.existsSync(srcInv)) {
     fs.mkdirSync(path.join(d, 'lib'), { recursive: true });
     try {
       buildSync({
@@ -92,8 +93,15 @@ for (const item of allPackages) {
       });
     } catch {}
   }
+
+  // 生成根 index.js 兜底（以防任何 resolver 执行 legacy 查找）
+  if (fs.existsSync(libIndex)) {
+    try {
+      fs.writeFileSync(rootIndex, "export * from './lib/index.js';\nexport { default } from './lib/index.js';\n");
+    } catch {}
+  }
 }
-console.log(`[build-fix] Compiled ${compiled} missing workspace library entrypoints.`);
+console.log(`[build-fix] Compiled ${compiled} workspace library entrypoints.`);
 
 // 4. 平铺所有 .pnpm 第三方依赖到 /app/dsh/node_modules
 const pnpmDir = path.join(rootModules, '.pnpm');
