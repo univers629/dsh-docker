@@ -26,8 +26,10 @@ exit /b 0
 
 :start_and_open
 echo [1/3] 正在启动 DeepSeek Harness 容器...
-docker compose up -d --build
+docker compose up -d --build --force-recreate
 if errorlevel 1 goto :error
+docker image prune -f >nul 2>&1
+docker builder prune -f >nul 2>&1
 echo [2/3] 服务正在就绪...
 timeout /t 3 /nobreak >nul
 echo [3/3] 正在打开浏览器访问 http://127.0.0.1:3080 ...
@@ -43,15 +45,18 @@ pause
 exit /b 0
 
 :start
-docker compose up -d --build
+docker compose up -d --build --force-recreate
+docker image prune -f >nul 2>&1
+docker builder prune -f >nul 2>&1
 exit /b %errorlevel%
 
 :update
 echo ==> 从官方源码重新拉取并构建最新镜像...
 docker compose build --no-cache dsh
 if errorlevel 1 goto :error
-docker compose up -d
-docker image prune -f
+docker compose up -d --force-recreate
+docker image prune -f >nul 2>&1
+docker builder prune -f >nul 2>&1
 echo ==> 更新构建完成！
 exit /b 0
 
