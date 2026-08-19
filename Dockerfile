@@ -12,7 +12,7 @@ WORKDIR /app/dsh
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates python3 make g++ \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g pnpm@11.7.0 esbuild@0.25.0
+    && npm install -g pnpm@11.7.0
 
 RUN git clone --depth 1 -b ${UPSTREAM_REF} ${UPSTREAM_REPO} .
 
@@ -68,14 +68,14 @@ RUN apt-get update \
     && npm cache clean --force
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-COPY --from=builder /app/dsh /app/dsh
+COPY --chown=node:node --from=builder /app/dsh /app/dsh
 COPY bin/dsh /usr/local/bin/dsh
 COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY dsh-home/ /etc/dsh-home/
 COPY nginx/dsh-nginx.conf /etc/dsh/nginx.conf
 
 RUN mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
-    && chown -R node:node /opt /app/dsh /data /workspace \
+    && chown -R node:node /opt /data /workspace \
     && chmod +x /usr/local/bin/dsh /usr/local/bin/entrypoint.sh
 
 ENV DSH_HOME=/data/dsh \
