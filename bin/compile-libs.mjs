@@ -1,9 +1,48 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildSync } from 'esbuild';
 
 const appDir = '/app/dsh';
 const roots = ['packages', 'vendor', 'apps'].map(x => path.join(appDir, x));
+
+// 动态定位 esbuild
+let buildSync = null;
+try {
+  const es = await import('esbuild');
+  buildSync = es.buildSync;
+} catch {
+  const possiblePaths = [
+    '/app/dsh/node_modules/esbuild/lib/main.js',
+    '/app/dsh/node_modules/tsdown/node_modules/esbuild/lib/main.js',
+    '/app/dsh/node_modules/tsx/node_modules/esbuild/lib/main.js',
+  ];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      try {
+        const es = await import(p);
+        buildSync = es.buildSync;
+        break;
+      } catch {}
+    }
+  }
+  if (!buildSync) {
+    const pnpmDir = '/app/dsh/node_modules/.pnpm';
+    if (fs.existsSync(pnpmDir)) {
+      const entry = fs.readdirSync(pnpmDir).find(d => d.startsWith('esbuild@'));
+      if (entry) {
+        const p = path.join(pnpmDir, entry, 'node_modules/esbuild/lib/main.js');
+        if (fs.existsSync(p)) {
+          const es = await import(p);
+          buildSync = es.buildSync;
+        }
+      }
+    }
+  }
+}
+
+if (!buildSync) {
+  console.error('[Compile-Libs] Warning: esbuild not found in standard paths');
+  process.exit(1);
+}
 
 let compiledCount = 0;
 
