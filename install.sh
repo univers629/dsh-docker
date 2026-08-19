@@ -26,6 +26,9 @@ if [ ! -d "$TARGET_DIR" ]; then
     mkdir -p "$TARGET_DIR"
     curl -fsSL https://github.com/univers629/dsh-docker-dev/archive/refs/heads/main.tar.gz | tar -xz -C "$TARGET_DIR" --strip-components=1
   fi
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    chown -R "$SUDO_USER:$SUDO_USER" "$TARGET_DIR" 2>/dev/null || true
+  fi
 fi
 
 cd "$TARGET_DIR"
@@ -33,6 +36,11 @@ chmod +x dsh.sh 2>/dev/null || true
 
 echo "==> [2/2] 正在本地构建并启动 DeepSeek Harness 容器..."
 DOCKER compose up -d --build
+
+if DOCKER network inspect dpanel-local >/dev/null 2>&1; then
+  echo "==> 检测到 dpanel 面板环境，已自动打通 dpanel 容器反代网桥！"
+  DOCKER network connect --alias dsh.pod.dpanel.local dpanel-local dsh 2>/dev/null || true
+fi
 
 echo
 echo "==================================================="
