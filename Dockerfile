@@ -25,7 +25,11 @@ RUN git clone --depth 1 -b ${UPSTREAM_REF} ${UPSTREAM_REPO} .
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 
-RUN sed -i 's/if (!(WIDER_MODES\[effectiveMode\]/if (effectiveMode === mode) return mode as SandboxMode; if (!(WIDER_MODES[effectiveMode]/' \
+COPY patches/ /tmp/dsh-patches/
+RUN git apply --unidiff-zero --check /tmp/dsh-patches/*.patch \
+    && git apply --unidiff-zero /tmp/dsh-patches/*.patch \
+    && rm -rf /tmp/dsh-patches \
+    && sed -i 's/if (!(WIDER_MODES\[effectiveMode\]/if (effectiveMode === mode) return mode as SandboxMode; if (!(WIDER_MODES[effectiveMode]/' \
         packages/sandbox/sandbox/src/escalation.ts \
     && sed -i 's/if (justification !== undefined && justification.trim().length === 0)/if (justification !== undefined \&\& justification.trim().length === 0 \&\& sandboxPermissions !== "danger-full-access")/' \
         packages/sandbox/sandbox/src/escalation.ts \
@@ -42,7 +46,7 @@ RUN sed -i 's/if (!(WIDER_MODES\[effectiveMode\]/if (effectiveMode === mode) ret
 
 ENV NODE_OPTIONS="--max-old-space-size=2048"
 RUN --mount=type=cache,target=/app/dsh/node_modules/.cache \
-    pnpm run build
+    pnpm run build:official
 
 RUN grep -q 'connection\.isLoopback ? "host" : "memory"' packages/client/ui-settings/lib/client.js \
     && sed -i 's/connection\.isLoopback ? "host" : "memory"/"host"/' packages/client/ui-settings/lib/client.js \
