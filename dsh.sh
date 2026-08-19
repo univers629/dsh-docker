@@ -21,11 +21,18 @@ ENSURE_NETWORKS() {
   fi
 }
 
+CLEANUP_BUILD_LEFTOVERS() {
+  echo "==> [自动清理] 清理临时构建层与悬空镜像（100% 保留 APT 与 pnpm 持久化包缓存）..."
+  DOCKER image prune -f >/dev/null 2>&1 || true
+  DOCKER builder prune -f >/dev/null 2>&1 || true
+}
+
 case "$ACTION" in
   start|up)
     echo "==> 启动 DeepSeek Harness 容器..."
     DOCKER compose up -d --build --force-recreate
     ENSURE_NETWORKS
+    CLEANUP_BUILD_LEFTOVERS
     echo "==> Web UI: http://127.0.0.1:3080"
     ;;
   update)
@@ -34,8 +41,8 @@ case "$ACTION" in
     echo "==> [2/3] 重启服务..."
     DOCKER compose up -d --force-recreate
     ENSURE_NETWORKS
-    echo "==> [3/3] 自动清理临时构建缓存..."
-    DOCKER image prune -f
+    echo "==> [3/3] 自动清理临时构建缓存与垃圾镜像..."
+    CLEANUP_BUILD_LEFTOVERS
     echo "==> 更新构建完成！"
     ;;
   stop|down)
