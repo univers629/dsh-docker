@@ -12,7 +12,7 @@ WORKDIR /app/dsh
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates python3 make g++ \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g pnpm@11.7.0
+    && npm install -g pnpm@11.7.0 esbuild
 
 RUN git clone --depth 1 -b ${UPSTREAM_REF} ${UPSTREAM_REPO} .
 
@@ -39,8 +39,8 @@ RUN grep -q 'connection\.isLoopback ? "host" : "memory"' packages/client/ui-sett
     && node --check packages/client/ui-settings/lib/client.js
 
 COPY bin/build-fix.mjs /tmp/build-fix.mjs
-RUN node /tmp/build-fix.mjs \
-    && find packages vendor apps -mindepth 3 -maxdepth 5 -type d -name "node_modules" -prune -exec rm -rf {} + \
+RUN NODE_PATH=/usr/local/lib/node_modules node /tmp/build-fix.mjs \
+    && find packages vendor apps native -mindepth 3 -maxdepth 6 -type d -name "node_modules" -prune -exec rm -rf {} + \
     && rm -rf /tmp/build-fix.mjs .git docs .agents examples test* **/*.tsbuildinfo node_modules/.cache
 
 FROM ${NODE_IMAGE} AS runtime
