@@ -24,11 +24,12 @@ if [ -f "$DSH_HOME/.credentials.yaml" ]; then
   chmod 600 "$DSH_HOME/.credentials.yaml" 2>/dev/null || true
 fi
 
-# 关键：建立 profiles 到 /app/dsh/node_modules 的 ESM 向上遍历软链通道
+# 关键：以绝对路径映射建立所有工作区包及依赖的 ESM 软链通道
 mkdir -p "$DSH_HOME/profiles"
-ln -sfn /app/dsh/node_modules "$DSH_HOME/profiles/node_modules"
-ln -sfn /app/dsh/node_modules "$DSH_HOME/node_modules"
 find "$DSH_HOME/profiles" -mindepth 2 -maxdepth 2 -name "node_modules" -exec rm -rf {} + 2>/dev/null || true
+if [ -f /usr/local/bin/link-modules.mjs ]; then
+  node /usr/local/bin/link-modules.mjs || true
+fi
 
 if [ ! -f "$DSH_HOME/cordis.patch.yml" ]; then
   install -o node -g node -m 600 /etc/dsh-home/cordis.patch.yml "$DSH_HOME/cordis.patch.yml"
