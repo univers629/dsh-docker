@@ -1,6 +1,6 @@
 ---
 name: container-environment
-description: Use whenever the user asks to install, update, remove, or manage DSH plugins (e.g. dsh-better-sidebar, dsh-vision-router, MCP tools, profile bundles); or when configuring/running MCP servers (Model Context Protocol); or when installing toolchains/subagent CLIs (python, uv, uvx, node, npm, rust, claude-cli, aider); or when querying container system version, architecture, environment variables, directory standards, persistence, permissions, and restarting.
+description: "Use whenever the user asks to install, update, remove, or manage DSH plugins (e.g. dsh-better-sidebar, dsh-vision-router, MCP tools, profile bundles); or when configuring/running MCP servers (Model Context Protocol); or when installing toolchains/subagent CLIs (python, uv, uvx, node, npm, rust, claude-cli, aider); or when querying container system version, architecture, environment variables, directory standards, persistence, permissions, and restarting."
 ---
 
 # Container Environment Specification & Autonomous SOP
@@ -18,6 +18,7 @@ You run inside a production Docker container for DeepSeek Harness (DSH). This do
 | **Node.js** | **v24 (LTS)** | `/usr/local/bin/node`, npm & pnpm 11 built-in |
 | **Python** | **Python 3.13** | `/usr/bin/python3`, `/usr/local/bin/python`, pip3, venv |
 | **Tool Runner** | **uv & uvx** | `/usr/local/bin/uv`, `/usr/local/bin/uvx` (Ultrafast Python package & MCP runner) |
+| **Process Manager**| **procps** | `pkill`, `pgrep`, `ps`, `kill` built-in |
 | **Reverse Proxy** | **Nginx 1.26+** | Built-in loopback rewrite proxy listening on `0.0.0.0:3080` forwarding to `127.0.0.1:3081` |
 
 ---
@@ -64,7 +65,7 @@ To guarantee that your work, toolchains, and user data survive container restart
 ```
 
 ### 🚫 Anti-Patterns (Forbidden Placement)
-- **NEVER** write persistent user tools to `/usr`, `/root`, or `/var` (these are in the ephemeral container image layer and will be wiped on `update.sh` / `update.bat`).
+- **NEVER** write persistent user tools to `/usr`, `/root`, or `/var` (these are in the ephemeral container image layer and will be wiped on updates).
 - **NEVER** install Python tools with `sudo` — always use `uv tool install <pkg>`, `pip install --user <pkg>`, or create a virtual environment in `/data/mcp/` or `/workspace/`.
 
 ---
@@ -126,16 +127,16 @@ Whenever the user asks to install, update, or remove a DSH plugin:
 
 1. **Step 1 - Install package**:
    ```sh
-   dsh plugin --profile web add <package-name>
+   cd /data/dsh/profiles/web && pnpm add <package-name> --ignore-scripts
    ```
 2. **Step 2 - Verify configuration**:
    ```sh
    dsh --profile web --dump-config
    ```
 3. **Step 3 - Remind User & Trigger Auto-Restart**:
-   - Output message: `Web 界面将短暂中断，请稍后刷新页面（约 15 秒，会话历史与持久化数据完全保留）。`
+   - Output message: `Web 界面将短暂中断，请稍后刷新页面（约 5~10 秒，会话历史与持久化数据完全保留）。`
    - Reload process:
      ```sh
-     pkill -f "apps/cli/lib/bin.js"
+     pkill -f "apps/cli/lib/bin.js" 2>/dev/null || kill -9 $(pidof node 2>/dev/null) 2>/dev/null || true
      ```
 4. **Step 4 - Complete**: The Docker container automatically restarts and brings up the new plugin.
