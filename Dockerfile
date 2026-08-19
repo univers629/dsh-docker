@@ -48,6 +48,7 @@ LABEL org.opencontainers.image.title="DeepSeek Harness Docker" \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        bash \
+       procps \
        git \
        ca-certificates \
        curl \
