@@ -4,6 +4,10 @@ set -eu
 export NODE_PATH="/app/dsh/node_modules:/data/dsh/profiles/node_modules:${NODE_PATH:-}"
 
 if [ "$(id -u)" = "0" ]; then
+  mkdir -p /data/home/tmp /workspace
+  rm -rf /home/node 2>/dev/null || true
+  ln -sfn /data/home /home/node
+  chown -h node:node /home/node 2>/dev/null || true
   chown -R node:node /data /workspace
   chmod -R u+rwX,g+rwX /data /workspace
   find /data -name "*credentials*" -exec chmod 600 {} + 2>/dev/null || true
