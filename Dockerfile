@@ -31,8 +31,17 @@ RUN sed -i 's/if (!(WIDER_MODES\[effectiveMode\]/if (effectiveMode === mode) ret
         packages/sandbox/sandbox-local/src/profiles.ts
 
 ENV NODE_OPTIONS="--max-old-space-size=2048"
-RUN pnpm --filter @deepseek-ai/dsh-web-frontend run build \
-    && rm -rf .git docs .agents examples test* **/*.tsbuildinfo
+RUN --mount=type=cache,target=/app/dsh/node_modules/.cache \
+    pnpm run build
+
+RUN grep -q 'connection\.isLoopback ? "host" : "memory"' packages/client/ui-settings/lib/client.js \
+    && sed -i 's/connection\.isLoopback ? "host" : "memory"/"host"/' packages/client/ui-settings/lib/client.js \
+    && node --check packages/client/ui-settings/lib/client.js
+
+COPY bin/build-fix.mjs /tmp/build-fix.mjs
+RUN node /tmp/build-fix.mjs \
+    && find packages vendor apps -mindepth 3 -maxdepth 5 -type d -name "node_modules" -prune -exec rm -rf {} + \
+    && rm -rf /tmp/build-fix.mjs .git docs .agents examples test* **/*.tsbuildinfo node_modules/.cache
 
 FROM ${NODE_IMAGE} AS runtime
 
@@ -70,7 +79,7 @@ RUN mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
 ENV DSH_HOME=/data/dsh \
     DSH_AGENTS_HOME=/data/agents \
     HOME=/data/home \
-    NODE_PATH=/app/dsh/node_modules \
+    NODE_PATH=/app/dsh/node_modules:/data/dsh/profiles/node_modules \
     PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:${PATH}
 
 WORKDIR /workspace
