@@ -6,6 +6,19 @@ const appModules = path.join(appDir, 'node_modules');
 const dataProfiles = '/data/dsh/profiles';
 const dataModules = path.join(dataProfiles, 'node_modules');
 
+// 0. 动态修补 app-boot 的模块软链解析，确保返回物理真实路径而非嵌套相对软链
+const appBootLib = path.join(appDir, 'packages/boot/app-boot/lib/index.js');
+if (fs.existsSync(appBootLib)) {
+  try {
+    let code = fs.readFileSync(appBootLib, 'utf8');
+    if (code.includes('return candidate') && !code.includes('realpathSync(candidate)')) {
+      code = code.replace(/return candidate/g, 'return realpathSync(candidate)');
+      fs.writeFileSync(appBootLib, code);
+      console.log('[link-modules] Patched app-boot realpath resolution.');
+    }
+  } catch {}
+}
+
 // 1. 递归扫描 /app/dsh 发现所有工作区包
 function findPackages(dir) {
   let results = [];
