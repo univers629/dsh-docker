@@ -35,6 +35,8 @@ RUN sed -i 's/if (!(WIDER_MODES\[effectiveMode\]/if (effectiveMode === mode) ret
         packages/sandbox/sandbox-local/src/profiles.ts \
     && sed -i "s/args\.push('--tmpfs', '\/tmp')/args.push('--tmpfs', '\/tmp'); args.push('--bind', '\/data', '\/data')/" \
         packages/sandbox/sandbox-local/src/profiles.ts \
+    && sed -i "s/readlinkSync, symlinkSync/readlinkSync, realpathSync, symlinkSync/" \
+        packages/boot/app-boot/src/profile.ts \
     && sed -i "s/return candidate/return realpathSync(candidate)/" \
         packages/boot/app-boot/src/profile.ts
 
