@@ -40,7 +40,7 @@ try {
 }
 
 if (!buildSync) {
-  console.error('[Compile-Libs] Warning: esbuild not found in standard paths');
+  console.error('[Compile-Libs] Fatal: esbuild not found');
   process.exit(1);
 }
 
@@ -57,35 +57,24 @@ for (const r of roots) {
     for (const d of dirs) {
       const p = path.join(d, 'package.json');
       if (fs.existsSync(p)) {
-        const srcDir = path.join(d, 'src');
-        const libDir = path.join(d, 'lib');
-        if (fs.existsSync(srcDir)) {
-          const files = fs.readdirSync(srcDir, { recursive: true, withFileTypes: true })
-            .filter(f => f.isFile() && (f.name.endsWith('.ts') || f.name.endsWith('.js')))
-            .map(f => {
-              const base = f.parentPath || f.path || srcDir;
-              return path.join(base, f.name);
+        const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+        const srcIndex = path.join(d, 'src/index.ts');
+        const libIndex = path.join(d, 'lib/index.js');
+        if (fs.existsSync(srcIndex) && !fs.existsSync(libIndex)) {
+          fs.mkdirSync(path.join(d, 'lib'), { recursive: true });
+          try {
+            buildSync({
+              entryPoints: [srcIndex],
+              outfile: libIndex,
+              format: 'esm',
+              platform: 'node',
+              target: 'es2024',
+              bundle: true,
+              packages: 'external',
             });
-
-          for (const file of files) {
-            const rel = path.relative(srcDir, file);
-            const outFile = path.join(libDir, rel.replace(/\.tsx?$/, '.js'));
-            if (!fs.existsSync(outFile)) {
-              fs.mkdirSync(path.dirname(outFile), { recursive: true });
-              try {
-                buildSync({
-                  entryPoints: [file],
-                  outfile: outFile,
-                  format: 'esm',
-                  platform: 'node',
-                  target: 'es2024',
-                  bundle: false,
-                });
-                compiledCount++;
-              } catch (e) {
-                // ignore
-              }
-            }
+            compiledCount++;
+          } catch (e) {
+            console.error(`[Compile-Libs] Failed to compile ${pkg.name}:`, e);
           }
         }
       }
@@ -93,4 +82,4 @@ for (const r of roots) {
   }
 }
 
-console.log(`[Compile-Libs] Successfully compiled ${compiledCount} missing library files.`);
+console.log(`[Compile-Libs] Successfully compiled ${compiledCount} missing library packages.`);
