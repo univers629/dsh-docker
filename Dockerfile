@@ -9,13 +9,19 @@ ARG UPSTREAM_REF=master
 ENV CI=true
 WORKDIR /app/dsh
 
-RUN apt-get update \
+# 开启 APT 持久化缓存：不删除 .deb 安装包，挂载本地持久缓存
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates python3 make g++ \
-    && rm -rf /var/lib/apt/lists/* \
     && npm install -g pnpm@11.7.0 esbuild
 
 RUN git clone --depth 1 -b ${UPSTREAM_REF} ${UPSTREAM_REPO} .
 
+# 挂载 pnpm 本地持久化 store 缓存
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 
@@ -48,7 +54,13 @@ FROM ${NODE_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="DeepSeek Harness Docker" \
       org.opencontainers.image.licenses="MIT"
 
-RUN apt-get update \
+# 开启 runtime 阶段 APT 持久化缓存
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
     && apt-get install -y --no-install-recommends \
        bash \
        procps \
@@ -60,7 +72,6 @@ RUN apt-get update \
        python3 \
        python3-pip \
        python3-venv \
-    && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/bin/python3 /usr/local/bin/python \
     && npm install -g pnpm@11.7.0 \
     && npm cache clean --force
