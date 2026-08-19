@@ -38,67 +38,10 @@ RUN grep -q 'connection\.isLoopback ? "host" : "memory"' packages/client/ui-sett
     && sed -i 's/connection\.isLoopback ? "host" : "memory"/"host"/' packages/client/ui-settings/lib/client.js \
     && node --check packages/client/ui-settings/lib/client.js
 
-# 平铺所有 .pnpm 第三方依赖，链接所有工作区核心包，并清除所有嵌套干扰 node_modules
-RUN node -e '
-import fs from "node:fs";
-import path from "node:path";
-
-const pnpmDir = "/app/dsh/node_modules/.pnpm";
-if (fs.existsSync(pnpmDir)) {
-  fs.readdirSync(pnpmDir, { withFileTypes: true }).forEach(entry => {
-    if (!entry.isDirectory()) return;
-    const subModules = path.join(pnpmDir, entry.name, "node_modules");
-    if (fs.existsSync(subModules)) {
-      fs.readdirSync(subModules, { withFileTypes: true }).forEach(pkg => {
-        const pkgPath = path.join(subModules, pkg.name);
-        if (pkg.name.startsWith("@")) {
-          const scopeDir = path.join("/app/dsh/node_modules", pkg.name);
-          try { fs.mkdirSync(scopeDir, { recursive: true }); } catch {}
-          fs.readdirSync(pkgPath, { withFileTypes: true }).forEach(scopedPkg => {
-            const dest = path.join(scopeDir, scopedPkg.name);
-            if (!fs.existsSync(dest)) {
-              try { fs.symlinkSync(path.join(pkgPath, scopedPkg.name), dest); } catch {}
-            }
-          });
-        } else {
-          const dest = path.join("/app/dsh/node_modules", pkg.name);
-          if (!fs.existsSync(dest)) {
-            try { fs.symlinkSync(pkgPath, dest); } catch {}
-          }
-        }
-      });
-    }
-  });
-}
-
-const scopeDir = "/app/dsh/node_modules/@deepseek-ai";
-try { fs.mkdirSync(scopeDir, { recursive: true }); } catch {}
-
-["packages", "vendor", "apps"].forEach(r => {
-  if (!fs.existsSync(r)) return;
-  fs.readdirSync(r, { withFileTypes: true }).forEach(g => {
-    if (!g.isDirectory()) return;
-    const gp = path.join(r, g.name);
-    const dirs = fs.existsSync(path.join(gp, "package.json")) ? [gp] : fs.readdirSync(gp, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => path.join(gp, d.name));
-    dirs.forEach(d => {
-      const p = path.join(d, "package.json");
-      if (fs.existsSync(p)) {
-        try {
-          const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
-          if (pkg.name && pkg.name.startsWith("@deepseek-ai/")) {
-            const name = pkg.name.replace("@deepseek-ai/", "");
-            const link = path.join(scopeDir, name);
-            try { fs.rmSync(link, { recursive: true, force: true }); } catch {}
-            fs.symlinkSync(path.resolve(d), link);
-          }
-        } catch {}
-      }
-    });
-  });
-});
-' \
+COPY bin/flatten-modules.mjs /tmp/flatten-modules.mjs
+RUN node /tmp/flatten-modules.mjs \
     && find packages vendor apps -mindepth 3 -maxdepth 5 -type d -name "node_modules" -prune -exec rm -rf {} + \
-    && rm -rf .git docs .agents examples test* **/*.tsbuildinfo node_modules/.cache
+    && rm -rf /tmp/flatten-modules.mjs .git docs .agents examples test* **/*.tsbuildinfo node_modules/.cache
 
 FROM ${NODE_IMAGE} AS runtime
 
