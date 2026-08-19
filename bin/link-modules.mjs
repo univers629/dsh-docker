@@ -33,21 +33,62 @@ function findPackages(dir) {
 
 const allPkgs = findPackages(appDir);
 
-// 2. 确保在 /data/dsh/profiles/node_modules 中建立全量模块通道
-try { fs.mkdirSync(dataModules, { recursive: true }); } catch {}
+// 2. 为每个工作区包生成根 index.js 兜底（以防 Node 旧版 Legacy Resolver 查找根 index.js）
+for (const pkg of allPkgs) {
+  const libIndex = path.join(pkg.dir, 'lib/index.js');
+  const rootIndex = path.join(pkg.dir, 'index.js');
+  if (fs.existsSync(libIndex) && !fs.existsSync(rootIndex)) {
+    try {
+      fs.writeFileSync(rootIndex, "export * from './lib/index.js';\nexport { default } from './lib/index.js';\n");
+    } catch {}
+  }
+}
 
-// 链接所有第三方依赖从 /app/dsh/node_modules 到 /data/dsh/profiles/node_modules
+// 3. 平铺所有 .pnpm 第三方依赖到 /app/dsh/node_modules 和 /data/dsh/profiles/node_modules
+function flattenPnpm(targetDir) {
+  const pnpmDir = path.join(appModules, '.pnpm');
+  if (!fs.existsSync(pnpmDir)) return;
+  try { fs.mkdirSync(targetDir, { recursive: true }); } catch {}
+  for (const entry of fs.readdirSync(pnpmDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const sub = path.join(pnpmDir, entry.name, 'node_modules');
+    if (!fs.existsSync(sub)) continue;
+    for (const pkg of fs.readdirSync(sub, { withFileTypes: true })) {
+      const pkgPath = path.join(sub, pkg.name);
+      if (pkg.name.startsWith('@')) {
+        const scopeDest = path.join(targetDir, pkg.name);
+        try { fs.mkdirSync(scopeDest, { recursive: true }); } catch {}
+        for (const scopedPkg of fs.readdirSync(pkgPath, { withFileTypes: true })) {
+          const dest = path.join(scopeDest, scopedPkg.name);
+          const src = path.join(pkgPath, scopedPkg.name);
+          try { fs.rmSync(dest, { recursive: true, force: true }); } catch {}
+          try { fs.symlinkSync(src, dest); } catch {}
+        }
+      } else {
+        const dest = path.join(targetDir, pkg.name);
+        try { fs.rmSync(dest, { recursive: true, force: true }); } catch {}
+        try { fs.symlinkSync(pkgPath, dest); } catch {}
+      }
+    }
+  }
+}
+
+flattenPnpm(appModules);
+flattenPnpm(dataModules);
+
+// 4. 链接所有普通第三方模块到 profiles
 if (fs.existsSync(appModules)) {
   for (const entry of fs.readdirSync(appModules, { withFileTypes: true })) {
     if (entry.name === '@deepseek-ai') continue;
     const src = path.join(appModules, entry.name);
     const dest = path.join(dataModules, entry.name);
-    try { fs.rmSync(dest, { recursive: true, force: true }); } catch {}
-    try { fs.symlinkSync(src, dest); } catch {}
+    if (!fs.existsSync(dest)) {
+      try { fs.symlinkSync(src, dest); } catch {}
+    }
   }
 }
 
-// 3. 在 /app/dsh/node_modules/@deepseek-ai 和 /data/dsh/profiles/node_modules/@deepseek-ai 建立绝对路径软链
+// 5. 在 /app/dsh/node_modules/@deepseek-ai 和 /data/dsh/profiles/node_modules/@deepseek-ai 建立绝对路径软链
 const appScope = path.join(appModules, '@deepseek-ai');
 const dataScope = path.join(dataModules, '@deepseek-ai');
 try { fs.mkdirSync(appScope, { recursive: true }); } catch {}
@@ -64,4 +105,4 @@ for (const pkg of allPkgs) {
   }
 }
 
-console.log(`[link-modules] Successfully mapped ${allPkgs.length} packages with absolute paths.`);
+console.log(`[link-modules] Successfully mapped ${allPkgs.length} workspace packages and all flattened pnpm dependencies.`);
