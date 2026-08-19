@@ -24,7 +24,7 @@ for (const r of roots) {
           const files = fs.readdirSync(srcDir, { recursive: true, withFileTypes: true })
             .filter(f => f.isFile() && (f.name.endsWith('.ts') || f.name.endsWith('.js')))
             .map(f => {
-              const base = f.parentPath || (f as any).path || srcDir;
+              const base = f.parentPath || f.path || srcDir;
               return path.join(base, f.name);
             });
 
