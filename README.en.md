@@ -43,6 +43,11 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1
 curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash
 ```
 
+> [!TIP]
+> **⏱️ Build Duration Note**:
+> - **Initial Clean Build**: Because the build compiles the complete DSH monorepo, web frontend, and native extensions from scratch, it typically takes **300 ~ 360 seconds (5~6 minutes)** on standard VPS or ARM64 instances (e.g. Oracle ARM). Please allow it to complete.
+> - **Subsequent Runs & Restarts**: Thanks to Docker BuildKit cache layers and persistent storage, daily starts and restarts take only **1 ~ 3 seconds**!
+
 ---
 
 ## 💡 Design Philosophy
@@ -50,14 +55,14 @@ curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/inst
 This project delivers a solid, zero-friction, production-grade deployment runtime for **DeepSeek Harness (DSH)** based on four core design principles:
 
 1. **Immutable OS & Two-Root Persistence**:
-   - Base system libraries (Debian 13 + Node 24 + Python 3.13 + uv) are baked into an immutable container layer.
+   - Base system libraries (Debian 13 + Node 24 + Python 3.13 + uv + procps) are baked into an immutable container layer.
    - All user assets and toolchains live strictly under `./data` (environment/sessions/configs/MCP/subagents) and `./workspace` (project code). Host backup and migration only require archiving these two directories.
 2. **100% Local Self-Contained Build**:
    - Free from external pre-built registry dependencies. Docker builds straight from upstream official source with automated sandbox patches.
 3. **Transparent Loopback Shield**:
    - Built-in Nginx proxy automatically rewrites external host headers to local loopback (`127.0.0.1`), eliminating blank settings pages and credential persistence issues on public domains.
-4. **Autonomous Agent Governance**:
-   - Container startup automatically corrects mount volume permissions (running securely as `node` via `gosu`). Sandboxes are whitelisted to give agents 100% authority to clean old sessions, install toolchains, and configure MCP servers.
+4. **Autonomous Agent Governance & Security Guard**:
+   - Container startup automatically corrects mount volume permissions (running securely as `node` via `gosu`), guards `.credentials.yaml` (`600`) and SSH key permissions, preinstalls `procps` (`pkill`/`pgrep`), and whitelists `/data` in all sandboxes.
 
 ---
 
@@ -106,26 +111,39 @@ graph TD
 ```text
 dsh_docker/
 ├── 📄 docker-compose.yml     # Compose definition (static ports, persistence mounts, healthcheck)
-├── 📄 Dockerfile             # Debian 13 + Python 3 + uv + multi-stage lean build
+├── 📄 Dockerfile             # Debian 13 + Python 3 + uv + procps + multi-stage lean build
 ├── 🚀 dsh.bat                # Windows unified manager (double-click default start & open browser)
 ├── 🚀 dsh.sh                 # Linux / macOS unified management script
 ├── ⚡ install.ps1            # Windows 1-line instant installer
 ├── ⚡ install.sh             # Linux / macOS 1-line instant installer
 ├── 📂 bin/
 │   ├── dsh                   # DSH core CLI wrapper
-│   └── entrypoint.sh         # Entrypoint (permission guard, SSH fix, gosu drop-privileges)
+│   └── entrypoint.sh         # Entrypoint (permission guard, credentials 600 lock, SSH fix)
 ├── 📂 dsh-home/
 │   ├── cordis.patch.yml      # Machine-level network and config overrides
 │   └── skills/               # Preinstalled skills (container-environment SOP)
 ├── 📂 nginx/
 │   └── dsh-nginx.conf        # Built-in loopback rewrite reverse proxy config
 ├── 📂 data/                  # 💾 Persistent data roots (gitignored)
-│   ├── dsh/                  # Sessions history (sessions/), profiles, settings.yaml
+│   ├── dsh/                  # Sessions history (sessions/), profiles, .credentials.yaml, settings.yaml
 │   ├── home/                 # Linux user home (~/.local, ~/.npm-global, ~/.ssh, ~/.cache)
 │   ├── mcp/                  # 🌟 Custom MCP server source code, venvs, and data
 │   └── agents/               # Subagent shared memory & state
 └── 📂 workspace/             # 💻 Project development workspace
 ```
+
+---
+
+## 🔐 Production-Grade Permission Guard & Process Management
+
+Lessons learned from real-world deployments and integrated out of the box:
+
+### 1. Strict Credential File Protection (Mode 600 Guard)
+- **Official Assertion**: `@deepseek-ai/dsh-credentials-local` strictly enforces that `/data/dsh/.credentials.yaml` must not be readable beyond its owner. If permissions are `660`, DSH refuses to start;
+- **Automated Guard Lock**: [`bin/entrypoint.sh`](bin/entrypoint.sh) corrects host volume ownership while **strictly locking all `*credentials*.yaml` files to `600`**, satisfying DSH security assertions seamlessly on every boot.
+
+### 2. Preinstalled `procps` (`pkill` / `pgrep`)
+- `procps` is preinstalled in the runtime image. When subagents or users trigger hot-reloads via `pkill -f "apps/cli/lib/bin.js"`, the command executes reliably without missing package errors.
 
 ---
 
@@ -182,6 +200,11 @@ The container includes preconfigured `PATH`: `$HOME/.local/bin` and `$HOME/.npm-
 ### 1. Fixing dpanel Re-forwarding After Rebuilds
 - **Recommended**: Point dpanel forward address to host static port: **`http://127.0.0.1:3080`**.
 - **Principle**: Host port 3080 is static. Regardless of container rebuilds, the forward rule remains permanently valid.
+
+> 💡 **dpanel 1-Line Reconnection**: If using `dsh.pod.dpanel.local` and encountering 502 after recreating a container, reconnect the bridge in 1 second:
+> ```bash
+> sudo docker network connect --alias dsh.pod.dpanel.local dpanel-local dsh
+> ```
 
 ### 2. Standard Host Nginx Configuration
 

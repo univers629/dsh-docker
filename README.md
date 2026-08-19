@@ -43,6 +43,11 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1
 curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash
 ```
 
+> [!TIP]
+> **⏱️ 构建耗时提示 (Build Duration Note)**：
+> - **初次全新构建**：由于需要从官方源码全量编译 Monorepo、前端产物及原生扩展，在普通 VPS 或 ARM 实例（如 Oracle ARM）上耗时通常约为 **300 ~ 360 秒（5~6 分钟）**，请耐心等待构建完成；
+> - **后续日常启动与重启**：得益于 BuildKit 完整缓存和持久化卷，后续启动 **仅需 1 ~ 3 秒即可极速就绪**！
+
 ---
 
 ## 💡 设计理念 (Design Philosophy)
@@ -50,14 +55,14 @@ curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/inst
 本项目旨在为 **DeepSeek Harness (DSH)** 提供一个极其稳固、开箱即用且高度自主的生产级运行底座，核心遵循四大设计准则：
 
 1. **不可变系统与两根持久化 (Immutable OS & Two-Root Persistence)**：
-   - 操作系统、基础运行库（Debian 13 + Node 24 + Python 3.13 + uv）封装为不可变容器层；
+   - 操作系统、基础运行库（Debian 13 + Node 24 + Python 3.13 + uv + procps）封装为不可变容器层；
    - 用户的所有资产与数据仅集中在 `./data`（环境/会话/配置/MCP/子智能体）与 `./workspace`（项目代码）中，宿主机无任何散碎系统垃圾，备份迁移只需打包两个目录。
 2. **纯本地自主闭环构建 (100% Local Self-Contained Build)**：
    - 彻底摆脱对第三方镜像仓库的依赖，本地 Docker 自动抓取官方最新源码、自动注入沙箱补丁并完成编译，确保代码链路 100% 纯净可审计。
 3. **无感回环安全反代屏障 (Transparent Loopback Shield)**：
    - 容器内部内置轻量级反代机制，自动将外部域名/IP 请求头伪装为合法的本地回环（`127.0.0.1`），彻底消除公网访问时设置空白与凭据受限问题。
-4. **智能体全权限数据治理 (Autonomous Agent Governance)**：
-   - 容器启动自动纠正数据卷属主权限（`gosu node` 降权安全运行），沙箱白名单完全放行持久化目录，Agent 拥有对自身会话历史（`sessions/`）、工具链、MCP 服务和插件的 100% 自主管理权限。
+4. **智能体全权限数据治理与安全守护 (Agent Governance & Security Guard)**：
+   - 容器启动自动纠正数据卷属主权限（`gosu node` 降权安全运行），严格守护 `.credentials.yaml`（`600`）与 SSH 密钥权限，预装 `procps`（`pkill`/`pgrep`），沙箱白名单完全放行持久化目录。
 
 ---
 
@@ -96,7 +101,7 @@ graph TD
 | **一行流极速安装** | **Linux / macOS** | `curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh \| bash` | 自动下载并后台启动容器 |
 | **日常管理 (启动/停止/日志)** | **Windows** | 双击 **`dsh.bat`** 或 `.\dsh.bat [start\|stop\|logs]` | 统一高颜值管理 CLI |
 | **日常管理 (启动/停止/日志)** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | 统一高颜值管理 CLI |
-| **同步官方最新源码** | **全平台** | `.\dsh.bat update` 或 `./dsh.sh update` | 在线拉取官方最新 Commit，本地秒级重新编译，自动清理垃圾缓存 |
+| **同步官方最新源码** | **全平台** | `.\dsh.bat update` 或 `./dsh.sh update` | 在线拉取官方最新 Commit，秒级重新编译，自动清理垃圾缓存 |
 | **面板反代管理 (dpanel/1Panel)** | **全平台** | 目标填写 `http://127.0.0.1:3080` | 走宿主机静态映射端口，容器无论如何更新重建，**反代永远不失效** |
 
 ---
@@ -106,26 +111,39 @@ graph TD
 ```text
 dsh_docker/
 ├── 📄 docker-compose.yml     # 容器编排定义（固定端口、持久化挂载、健康检查）
-├── 📄 Dockerfile             # Debian 13 + Python 3 + uv + 多阶段极致瘦身编译
+├── 📄 Dockerfile             # Debian 13 + Python 3 + uv + procps + 多阶段编译
 ├── 🚀 dsh.bat                # Windows 统一管理脚本（双击默认启动并打开浏览器）
 ├── 🚀 dsh.sh                 # Linux / macOS 统一管理脚本
 ├── ⚡ install.ps1            # Windows 一行流安装器
 ├── ⚡ install.sh             # Linux / macOS 一行流安装器
 ├── 📂 bin/
 │   ├── dsh                   # DSH 核心 CLI 包装脚本
-│   └── entrypoint.sh         # 容器入口（权限守护、SSH 权限修正、配置初始化、降权启动）
+│   └── entrypoint.sh         # 容器入口（权限守护、密钥600保护、SSH守护、降权启动）
 ├── 📂 dsh-home/
 │   ├── cordis.patch.yml      # 机器级网络与服务覆盖配置
 │   └── skills/               # 预置技能库（内置 container-environment SOP）
 ├── 📂 nginx/
 │   └── dsh-nginx.conf        # 容器内轻量回环伪装反向代理配置
 ├── 📂 data/                  # 💾 核心数据持久化目录（Git 忽略数据内容）
-│   ├── dsh/                  # 会话历史 (sessions/)、插件 (profiles/)、settings.yaml
+│   ├── dsh/                  # 会话历史 (sessions/)、插件 (profiles/)、.credentials.yaml、settings.yaml
 │   ├── home/                 # Linux 用户家目录 (~/.local, ~/.npm-global, ~/.ssh, ~/.cache)
 │   ├── mcp/                  # 🌟 自定义 MCP 服务器源码、独立虚拟环境与数据
 │   └── agents/               # 智能体共享存储与记忆
 └── 📂 workspace/             # 💻 Agent 项目开发工作区（挂载宿主代码）
 ```
+
+---
+
+## 🔐 生产级权限保护与进程管理实战总结
+
+在长期的生产环境部署中，本项目积累并预置了以下核心防御措施：
+
+### 1. 密钥安全断言守护（Mode 600 严格隔离）
+- **官方断言机制**：DSH `@deepseek-ai/dsh-credentials-local` 对 `/data/dsh/.credentials.yaml` 实施了严格的安全断言，如果文件权限超出所有者可读写（例如 `660`），系统将**硬性拒绝启动**以防密钥泄漏；
+- **自动纠偏锁**：[`bin/entrypoint.sh`](bin/entrypoint.sh) 在容器每次启动时，会自动对全盘 `/data` 进行属主纠正的同时，**强制锁定所有的 `*credentials*.yaml` 为 `600`**，既保证了多用户挂载不冲突，又完全满足官方严苛的安全断言。
+
+### 2. 内置 `procps` 进程管理套件（`pkill` / `pgrep`）
+- 容器运行时原生集成了 `procps` 工具包。当智能体在容器内部自主执行热重载、插件生命周期管理或服务平滑重启时，调用 `pkill -f "apps/cli/lib/bin.js"` 不会发生 `command not found` 错误。
 
 ---
 
@@ -187,6 +205,11 @@ environment:
 在各种 Docker 管理面板中添加反向代理时：
 - **强烈推荐做法**：代理目标直接填写 **`http://127.0.0.1:3080`**（宿主机本地回环与静态端口）；
 - **原理**：本项目已固化宿主机映射端口 `3080:3080`。容器无论怎么重建、销毁、升级，宿主机端口永远固定，**面板反代一次配置终身有效**！
+
+> 💡 **dpanel 专属一键连网命令**：若使用 `dsh.pod.dpanel.local` 并在重构容器后遇到 502，只需执行单行命令立即打通网桥：
+> ```bash
+> sudo docker network connect --alias dsh.pod.dpanel.local dpanel-local dsh
+> ```
 
 ### 2. 标准 Nginx 反向代理配置
 
