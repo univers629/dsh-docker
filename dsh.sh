@@ -24,7 +24,7 @@ ENSURE_NETWORKS() {
 case "$ACTION" in
   start|up)
     echo "==> 启动 DeepSeek Harness 容器..."
-    DOCKER compose up -d --build
+    DOCKER compose up -d --build --force-recreate
     ENSURE_NETWORKS
     echo "==> Web UI: http://127.0.0.1:3080"
     ;;
@@ -32,7 +32,7 @@ case "$ACTION" in
     echo "==> [1/3] 从官方源码构建最新镜像..."
     DOCKER compose build --no-cache dsh
     echo "==> [2/3] 重启服务..."
-    DOCKER compose up -d
+    DOCKER compose up -d --force-recreate
     ENSURE_NETWORKS
     echo "==> [3/3] 自动清理临时构建缓存..."
     DOCKER image prune -f
