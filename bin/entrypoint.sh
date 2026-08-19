@@ -20,6 +20,9 @@ if [ -f "$DSH_HOME/.credentials.yaml" ]; then
   chmod 600 "$DSH_HOME/.credentials.yaml" 2>/dev/null || true
 fi
 
+# 自动清理子 profile 中多余的局部 node_modules 遮挡，确保全局 @deepseek-ai/* 模块无缝加载
+find "$DSH_HOME/profiles" -mindepth 2 -maxdepth 2 -name "node_modules" -exec rm -rf {} + 2>/dev/null || true
+
 if [ ! -f "$DSH_HOME/cordis.patch.yml" ]; then
   install -o node -g node -m 600 /etc/dsh-home/cordis.patch.yml "$DSH_HOME/cordis.patch.yml"
 fi
