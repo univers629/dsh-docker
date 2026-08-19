@@ -1,3 +1,4 @@
 #!/bin/sh
 set -eu
-exec node /app/dsh/apps/cli/lib/bin.js "$@"
+cd /app/dsh
+exec node --import /app/dsh/node_modules/tsx/dist/loader.mjs apps/cli/src/bin.ts "$@"
