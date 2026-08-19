@@ -1,0 +1,12 @@
+.git
+**/.git
+**/node_modules
+data/
+workspace/
+deepseek-harness/
+scratch_repos/
+*.zip
+*.log
+.env
+.DS_Store
+Thumbs.db
