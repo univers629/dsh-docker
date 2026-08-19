@@ -4,23 +4,44 @@
 
 <p align="center">
   <b>Production Docker containerization & local build solution for DeepSeek Harness</b><br>
-  1-Click Local Build · Multi-Arch · Full Persistence · Zero-Tunnel Proxy · Debian 13 + Python 3 + uv/MCP
+  1-Line Instant Installer · Multi-Arch · Full Persistence · Zero-Tunnel Proxy · Debian 13 + Python 3 + uv/MCP
 </p>
 
+[![Status](https://img.shields.io/badge/Status-Unverified_Community_Edition-orange.svg?style=flat-square)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 [![Debian](https://img.shields.io/badge/Debian-13_(Trixie)-A81D33?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-24_(LTS)-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![uv/MCP](https://img.shields.io/badge/uv%2FMCP-Builtin-5C4EE5?style=flat-square&logo=astral&logoColor=white)](https://astral.sh/uv)
 [![Docker](https://img.shields.io/badge/Docker-Multi--Arch_(x64%2FARM64)-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
-[![Architecture](https://img.shields.io/badge/Build-100%25_Local_Source-blueviolet?style=flat-square)]()
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://github.com/smallsinger/dsh-docker/pulls)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://github.com/univers629/dsh-docker-dev/pulls)
 
 <p align="center">
   <a href="README.md"><b>简体中文</b></a> | <a href="README.en.md"><b>English</b></a>
 </p>
 
 </div>
+
+---
+
+> [!NOTE]
+> **Disclaimer**: This is an independent, community-driven production containerization project for DeepSeek Harness (Unverified Community Edition), and is not officially affiliated with or endorsed by DeepSeek. It builds from official open-source repositories and is licensed under the MIT License.
+
+---
+
+## ⚡ 1-Line Instant Installation (Recommended)
+
+No manual repository cloning required. Copy and paste one command to automatically download, build, and launch:
+
+### 🪟 Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1 | iex
+```
+
+### 🐧 Linux / 🍏 macOS (Bash)
+```bash
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash
+```
 
 ---
 
@@ -71,10 +92,11 @@ graph TD
 
 | User Scenario | OS | Recommended Action | Notes |
 |---|---|---|---|
-| **First Launch / Daily Run** | **Windows** | Double-click **`start.bat`** | Auto-checks Docker, builds locally, runs container, and opens browser |
-| **First Launch / Daily Run** | **Linux / macOS** | Run **`./start.sh`** | Auto-builds locally and starts container in background |
-| **Sync Official Upstream Updates** | **Windows** | Double-click **`update.bat`** | Pulls latest official master, rebuilds smoothly, preserves all sessions |
-| **Sync Official Upstream Updates** | **Linux / macOS** | Run **`./update.sh`** | 1-click rebuild without cache, cleans up dangling build cache |
+| **1-Line Instant Install** | **Windows** | `irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1 \| iex` | Auto-downloads, builds locally, runs container, opens browser |
+| **1-Line Instant Install** | **Linux / macOS** | `curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh \| bash` | Auto-downloads and starts container in background |
+| **Daily Management** | **Windows** | Double-click **`dsh.bat`** or `.\dsh.bat [start\|stop\|logs]` | Unified management CLI |
+| **Daily Management** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | Unified management CLI |
+| **Sync Official Updates** | **All OS** | `.\dsh.bat update` or `./dsh.sh update` | Pulls latest master, rebuilds locally in seconds, prunes cache |
 | **Reverse Proxy (dpanel/1Panel)** | **All OS** | Target: `http://127.0.0.1:3080` | Forward to host static port: proxy **never breaks across rebuilds** |
 
 ---
@@ -85,10 +107,10 @@ graph TD
 dsh_docker/
 ├── 📄 docker-compose.yml     # Compose definition (static ports, persistence mounts, healthcheck)
 ├── 📄 Dockerfile             # Debian 13 + Python 3 + uv + multi-stage lean build
-├── 🚀 start.bat              # Windows 1-click build & launch (auto browser popup)
-├── 🚀 start.sh               # Linux / macOS 1-click launch script
-├── 🔄 update.bat             # Windows 1-click upstream update & rebuild
-├── 🔄 update.sh              # Linux / macOS 1-click upstream update & rebuild
+├── 🚀 dsh.bat                # Windows unified manager (double-click default start & open browser)
+├── 🚀 dsh.sh                 # Linux / macOS unified management script
+├── ⚡ install.ps1            # Windows 1-line instant installer
+├── ⚡ install.sh             # Linux / macOS 1-line instant installer
 ├── 📂 bin/
 │   ├── dsh                   # DSH core CLI wrapper
 │   └── entrypoint.sh         # Entrypoint (permission guard, SSH fix, gosu drop-privileges)
@@ -107,36 +129,6 @@ dsh_docker/
 
 ---
 
-## 🚀 Quick Start
-
-### Windows Users
-1. Download or clone this repository.
-2. Double-click **`start.bat`**.
-3. Browser will automatically open `http://127.0.0.1:3080`.
-
-### Linux / macOS Users
-```bash
-git clone https://github.com/smallsinger/dsh-docker.git
-cd dsh-docker
-./start.sh
-```
-
-Or directly:
-```bash
-docker compose up -d --build
-```
-
----
-
-## 🔄 1-Click Upstream Source Updates
-
-- **Windows Users**: Double-click **`update.bat`**.
-- **Linux / macOS Users**: Run **`./update.sh`**.
-
-> **Reliability Guarantee**: Scripts pull latest official master code, build cleanly, hot-replace the container, and prune temporary build caches. **All your sessions, profiles, and MCP configurations are 100% preserved.**
-
----
-
 ## 🔧 Technical Deep Dive: Solving the Blank Settings Page Under Reverse Proxy
 
 ### 1. Root Cause Analysis
@@ -150,6 +142,18 @@ When accessing DSH through **public domains, external IPs, or reverse proxy pane
 ### 2. Dual-Layer Resolution
 1. **Code-level Patch**: During Docker build, `connection.isLoopback ? "host" : "memory"` is patched directly to `"host"`, enforcing persistence to `/data/dsh/settings.yaml`.
 2. **Network-level Loopback Shield**: In-container Nginx rewrites incoming request headers to `Host: 127.0.0.1:3081` and `Origin: http://127.0.0.1:3081`, ensuring all backend loopback assertions pass seamlessly.
+
+---
+
+## 🛡️ Sandbox Permission Modes & Error-Free Guarantee
+
+In `docker-compose.yml`:
+```yaml
+environment:
+  DSH_PERMISSION_MODE: "danger-full-access"
+```
+- **Upstream Issue**: By default in `workspace-write` mode, writes to `/data/dsh/profiles` or `$HOME` throw `PermissionDenied` or `not strictly wider` escalation errors.
+- **Deep Whitelisting**: This image patches Landlock, bwrap, and in-process fs-fences so `/data` is natively included in allowed writable roots. Even under standard `workspace-write` mode, **plugin installs, session prunes, and MCP server deployment run 100% error-free.**
 
 ---
 

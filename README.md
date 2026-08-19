@@ -4,23 +4,44 @@
 
 <p align="center">
   <b>DeepSeek Harness 生产级 Docker 容器化本地构建与自主数据治理方案</b><br>
-  本地一键构建 · 跨平台多架构 · 全数据持久化 · 反代免隧道 · Debian 13 + Python 3 + uv/MCP
+  一行流极速安装 · 本地一键构建 · 全数据持久化 · 反代免隧道 · Debian 13 + Python 3 + uv/MCP
 </p>
 
+[![Status](https://img.shields.io/badge/Status-Unverified_Community_Edition-orange.svg?style=flat-square)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 [![Debian](https://img.shields.io/badge/Debian-13_(Trixie)-A81D33?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-24_(LTS)-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![uv/MCP](https://img.shields.io/badge/uv%2FMCP-Builtin-5C4EE5?style=flat-square&logo=astral&logoColor=white)](https://astral.sh/uv)
 [![Docker](https://img.shields.io/badge/Docker-Multi--Arch_(x64%2FARM64)-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
-[![Architecture](https://img.shields.io/badge/Build-100%25_Local_Source-blueviolet?style=flat-square)]()
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://github.com/smallsinger/dsh-docker/pulls)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://github.com/univers629/dsh-docker-dev/pulls)
 
 <p align="center">
   <a href="README.md"><b>简体中文</b></a> | <a href="README.en.md"><b>English</b></a>
 </p>
 
 </div>
+
+---
+
+> [!NOTE]
+> **免责声明 (Disclaimer)**：本项目为社区独立维护的 DeepSeek Harness 生产级容器化运行环境（Unverified Community Edition），与 DeepSeek 官方无官方直接隶属关系。代码基于官方开源仓库构建，遵循 MIT 开源协议。
+
+---
+
+## ⚡ 一行流极速安装 (推荐)
+
+无需手动克隆完整仓库，复制单行命令即可全自动安装、本地构建并启动服务：
+
+### 🪟 Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1 | iex
+```
+
+### 🐧 Linux / 🍏 macOS (Bash)
+```bash
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash
+```
 
 ---
 
@@ -71,10 +92,11 @@ graph TD
 
 | 用户场景 | 操作系统 | 推荐操作 | 说明 |
 |---|---|---|---|
-| **首次启动 / 常规运行** | **Windows** | 双击 **`start.bat`** | 自动检查 Docker、本地编译镜像、启动容器并自动打开浏览器 |
-| **首次启动 / 常规运行** | **Linux / macOS** | 运行 **`./start.sh`** | 自动完成本地构建并后台启动容器 |
-| **同步官方最新源码** | **Windows** | 双击 **`update.bat`** | 在线拉取官方最新 Commit，本地重新编译并秒级重启，自动清理临时缓存 |
-| **同步官方最新源码** | **Linux / macOS** | 运行 **`./update.sh`** | 一键无缓存编译更新，自动保留全部会话与配置，清理悬空镜像 |
+| **一行流极速安装** | **Windows** | `irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1 \| iex` | 自动下载、本地编译镜像、启动容器并自动打开浏览器 |
+| **一行流极速安装** | **Linux / macOS** | `curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh \| bash` | 自动下载并后台启动容器 |
+| **日常管理 (启动/停止/日志)** | **Windows** | 双击 **`dsh.bat`** 或 `.\dsh.bat [start\|stop\|logs]` | 统一高颜值管理 CLI |
+| **日常管理 (启动/停止/日志)** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | 统一高颜值管理 CLI |
+| **同步官方最新源码** | **全平台** | `.\dsh.bat update` 或 `./dsh.sh update` | 在线拉取官方最新 Commit，本地秒级重新编译，自动清理垃圾缓存 |
 | **面板反代管理 (dpanel/1Panel)** | **全平台** | 目标填写 `http://127.0.0.1:3080` | 走宿主机静态映射端口，容器无论如何更新重建，**反代永远不失效** |
 
 ---
@@ -85,10 +107,10 @@ graph TD
 dsh_docker/
 ├── 📄 docker-compose.yml     # 容器编排定义（固定端口、持久化挂载、健康检查）
 ├── 📄 Dockerfile             # Debian 13 + Python 3 + uv + 多阶段极致瘦身编译
-├── 🚀 start.bat              # Windows 1 键本地构建与启动（带浏览器自动唤起）
-├── 🚀 start.sh               # Linux / macOS 1 键启动脚本
-├── 🔄 update.bat             # Windows 1 键同步官方源码更新构建
-├── 🔄 update.sh              # Linux / macOS 1 键同步官方源码更新构建
+├── 🚀 dsh.bat                # Windows 统一管理脚本（双击默认启动并打开浏览器）
+├── 🚀 dsh.sh                 # Linux / macOS 统一管理脚本
+├── ⚡ install.ps1            # Windows 一行流安装器
+├── ⚡ install.sh             # Linux / macOS 一行流安装器
 ├── 📂 bin/
 │   ├── dsh                   # DSH 核心 CLI 包装脚本
 │   └── entrypoint.sh         # 容器入口（权限守护、SSH 权限修正、配置初始化、降权启动）
@@ -104,44 +126,6 @@ dsh_docker/
 │   └── agents/               # 智能体共享存储与记忆
 └── 📂 workspace/             # 💻 Agent 项目开发工作区（挂载宿主代码）
 ```
-
----
-
-## 🚀 极简快速上手
-
-### Windows 用户
-
-1. 下载或克隆本仓库到本地；
-2. 双击运行 **`start.bat`**；
-3. 脚本会自动进行本地 Docker 镜像构建，并在构建完成后自动打开浏览器：`http://127.0.0.1:3080`。
-
-### Linux / macOS 用户
-
-```bash
-# 1. 克隆本仓库
-git clone https://github.com/smallsinger/dsh-docker.git
-cd dsh-docker
-
-# 2. 一键启动
-./start.sh
-```
-
-或使用标准 Docker Compose 命令：
-
-```bash
-docker compose up -d --build
-```
-
----
-
-## 🔄 官方源码一键同步与更新
-
-当 DeepSeek 官方发布新功能或 Bug 修复时：
-
-- **Windows 用户**：直接双击运行 **`update.bat`**；
-- **Linux / macOS 用户**：终端执行 **`./update.sh`**。
-
-> **自动化保障**：脚本会自动使用 `--no-cache` 抓取官方 master 分支最新代码重新编译，无缝热替换容器，并自动回收所有临时编译垃圾！**您的所有会话、插件、MCP 配置 100% 完整保留**。
 
 ---
 
@@ -161,6 +145,18 @@ settingsScope: connection.isLoopback ? "host" : "memory"
    在 `Dockerfile` 构建阶段自动将前端产物中的 `connection.isLoopback ? "host" : "memory"` 强制修正为 `"host"`，确保任何网络环境下设置均落盘至 `/data/dsh/settings.yaml`；
 2. **网络级回环伪装屏障（Network-level Reverse Proxy）**：
    容器内置 Nginx 将外部请求无感伪装为 `Host: 127.0.0.1:3081` 与 `Origin: http://127.0.0.1:3081`，使得后端核心引擎的安全断言 100% 通过。
+
+---
+
+## 🛡️ 沙箱权限模式与插件报错解决机制
+
+在 `docker-compose.yml` 中：
+```yaml
+environment:
+  DSH_PERMISSION_MODE: "danger-full-access"
+```
+- **原生沙箱痛点**：官方原生在 `workspace-write` 模式下仅允许写入 `/workspace` 和 `/tmp`，导致 Agent 自主安装插件（写入 `/data/dsh/profiles`）或管理历史会话时抛出 `PermissionDenied` / `not strictly wider` 异常；
+- **底层穿透保障**：本项目在构建时已深度打通了底层沙箱白名单（将 `/data` 原生纳入合法写权限集合）。即使切换为标准 `workspace-write` 模式，**插件安装、会话清理、MCP 部署也依然 100% 畅通无阻**。
 
 ---
 
