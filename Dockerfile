@@ -46,7 +46,6 @@ RUN grep -q 'connection\.isLoopback ? "host" : "memory"' packages/client/ui-sett
 
 COPY bin/build-fix.mjs /tmp/build-fix.mjs
 RUN NODE_PATH=/usr/local/lib/node_modules node /tmp/build-fix.mjs \
-    && find packages vendor apps native -mindepth 3 -maxdepth 6 -type d -name "node_modules" -prune -exec rm -rf {} + \
     && rm -rf /tmp/build-fix.mjs .git docs .agents examples test* **/*.tsbuildinfo node_modules/.cache
 
 FROM ${NODE_IMAGE} AS runtime
