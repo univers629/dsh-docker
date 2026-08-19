@@ -20,8 +20,10 @@ if [ -f "$DSH_HOME/.credentials.yaml" ]; then
   chmod 600 "$DSH_HOME/.credentials.yaml" 2>/dev/null || true
 fi
 
-# 清理旧的 profile node_modules 损坏链接
-rm -rf "$DSH_HOME/profiles/node_modules" 2>/dev/null || true
+# 关键：建立 profiles 到 /app/dsh/node_modules 的 ESM 向上遍历软链通道
+mkdir -p "$DSH_HOME/profiles"
+ln -sfn /app/dsh/node_modules "$DSH_HOME/profiles/node_modules"
+ln -sfn /app/dsh/node_modules "$DSH_HOME/node_modules"
 find "$DSH_HOME/profiles" -mindepth 2 -maxdepth 2 -name "node_modules" -exec rm -rf {} + 2>/dev/null || true
 
 if [ ! -f "$DSH_HOME/cordis.patch.yml" ]; then
