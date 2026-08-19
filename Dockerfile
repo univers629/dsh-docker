@@ -76,6 +76,7 @@ RUN mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
 ENV DSH_HOME=/data/dsh \
     DSH_AGENTS_HOME=/data/agents \
     HOME=/data/home \
+    NODE_PATH=/app/dsh/node_modules:/data/dsh/profiles/node_modules \
     PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:${PATH}
 
 WORKDIR /workspace
