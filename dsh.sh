@@ -15,10 +15,17 @@ else
   DOCKER() { sudo docker "$@"; }
 fi
 
+ENSURE_NETWORKS() {
+  if DOCKER network inspect dpanel-local >/dev/null 2>&1; then
+    DOCKER network connect --alias dsh.pod.dpanel.local dpanel-local dsh 2>/dev/null || true
+  fi
+}
+
 case "$ACTION" in
   start|up)
     echo "==> 启动 DeepSeek Harness 容器..."
     DOCKER compose up -d --build
+    ENSURE_NETWORKS
     echo "==> Web UI: http://127.0.0.1:3080"
     ;;
   update)
@@ -26,6 +33,7 @@ case "$ACTION" in
     DOCKER compose build --no-cache dsh
     echo "==> [2/3] 重启服务..."
     DOCKER compose up -d
+    ENSURE_NETWORKS
     echo "==> [3/3] 自动清理临时构建缓存..."
     DOCKER image prune -f
     echo "==> 更新构建完成！"
@@ -37,6 +45,7 @@ case "$ACTION" in
   restart)
     echo "==> 重启服务..."
     DOCKER compose restart dsh
+    ENSURE_NETWORKS
     ;;
   logs)
     DOCKER compose logs -f dsh
