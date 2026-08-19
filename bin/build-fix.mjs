@@ -36,7 +36,12 @@ if (!buildSync) {
   }
 }
 
-// 2. 编译所有缺失的 lib/index.js 与 lib/invariant.js
+if (!buildSync) {
+  console.error('[build-fix] Fatal: esbuild not found');
+  process.exit(1);
+}
+
+// 2. 编译所有源码包的 lib/index.js 与 lib/invariant.js
 const roots = ['packages', 'vendor', 'apps'].map(x => path.join(appDir, x));
 let compiled = 0;
 
@@ -56,38 +61,36 @@ for (const r of roots) {
         const srcInv = path.join(d, 'src/invariant.ts');
         const libInv = path.join(d, 'lib/invariant.js');
 
-        if (buildSync) {
-          if (fs.existsSync(srcIndex) && !fs.existsSync(libIndex)) {
-            fs.mkdirSync(path.join(d, 'lib'), { recursive: true });
-            try {
-              buildSync({
-                entryPoints: [srcIndex],
-                outfile: libIndex,
-                format: 'esm',
-                platform: 'node',
-                target: 'es2024',
-                bundle: true,
-                packages: 'external',
-              });
-              compiled++;
-            } catch (e) {
-              console.error(`Failed compiling ${d}:`, e);
-            }
+        if (fs.existsSync(srcIndex)) {
+          fs.mkdirSync(path.join(d, 'lib'), { recursive: true });
+          try {
+            buildSync({
+              entryPoints: [srcIndex],
+              outfile: libIndex,
+              format: 'esm',
+              platform: 'node',
+              target: 'es2024',
+              bundle: true,
+              packages: 'external',
+            });
+            compiled++;
+          } catch (e) {
+            console.error(`Failed compiling ${d}:`, e);
           }
-          if (fs.existsSync(srcInv) && !fs.existsSync(libInv)) {
-            fs.mkdirSync(path.join(d, 'lib'), { recursive: true });
-            try {
-              buildSync({
-                entryPoints: [srcInv],
-                outfile: libInv,
-                format: 'esm',
-                platform: 'node',
-                target: 'es2024',
-                bundle: true,
-                packages: 'external',
-              });
-            } catch {}
-          }
+        }
+        if (fs.existsSync(srcInv)) {
+          fs.mkdirSync(path.join(d, 'lib'), { recursive: true });
+          try {
+            buildSync({
+              entryPoints: [srcInv],
+              outfile: libInv,
+              format: 'esm',
+              platform: 'node',
+              target: 'es2024',
+              bundle: true,
+              packages: 'external',
+            });
+          } catch {}
         }
       }
     }
