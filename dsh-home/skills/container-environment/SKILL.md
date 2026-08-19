@@ -33,6 +33,7 @@ DSH_HOME=/data/dsh
 DSH_AGENTS_HOME=/data/agents
 DSH_PERMISSION_MODE=danger-full-access
 DSH_WEB_PORT=3081
+NODE_PATH=/app/dsh/node_modules:/data/dsh/profiles/node_modules
 PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
@@ -76,7 +77,7 @@ Because `$HOME/.local/bin`, `$HOME/bin`, and `$HOME/.npm-global/bin` are pre-set
 
 - **Python Subagent CLIs (e.g. `aider`, `goose`, `gpt-engineer`)**:
   ```sh
-  uv tool install aider-chat
+  uv tool install <package-name>
   # or
   pip install --user <package-name>
   ```
@@ -121,22 +122,16 @@ uv pip install mcp httpx
 
 ---
 
-## 7. Standard SOP for Installing DSH Plugins (Auto Hot-Reload)
+## 7. Standard SOP for Installing DSH Plugins (1-Step Atomic Execution)
 
-Whenever the user asks to install, update, or remove a DSH plugin:
+Whenever the user asks to install, update, or remove a DSH plugin (e.g. `dsh-better-sidebar`, `dsh-vision-router`):
 
-1. **Step 1 - Install package**:
-   ```sh
-   cd /data/dsh/profiles/web && pnpm add <package-name> --ignore-scripts
-   ```
-2. **Step 2 - Verify configuration**:
-   ```sh
-   dsh --profile web --dump-config
-   ```
-3. **Step 3 - Remind User & Trigger Auto-Restart**:
-   - Output message: `Web 界面将短暂中断，请稍后刷新页面（约 5~10 秒，会话历史与持久化数据完全保留）。`
-   - Reload process:
-     ```sh
-     pkill -f "apps/cli/lib/bin.js" 2>/dev/null || kill -9 $(pidof node 2>/dev/null) 2>/dev/null || true
-     ```
-4. **Step 4 - Complete**: The Docker container automatically restarts and brings up the new plugin.
+**DO NOT split into multiple inspection steps or wander around checking files.**
+Execute the entire operation in **ONE SINGLE BASH CALL** and immediately reply to the user:
+
+```sh
+cd /data/dsh/profiles/web && pnpm add <package-name> --ignore-scripts && dsh --profile web --dump-config >/dev/null && (pkill -f "apps/cli/lib/bin.js" 2>/dev/null || kill -9 $(pidof node 2>/dev/null) 2>/dev/null || true)
+```
+
+**Immediately return this short completion response**:
+> 🚀 插件 `<package-name>` 已成功安装并触发热重载！服务正在自动重启，请在 5 秒后刷新网页即可体验。
