@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+export NODE_PATH="/app/dsh/node_modules:/data/dsh/profiles/node_modules:${NODE_PATH:-}"
+
 if [ "$(id -u)" = "0" ]; then
   chown -R node:node /data /workspace
   chmod -R u+rwX,g+rwX /data /workspace
@@ -27,16 +29,16 @@ cp -f /etc/dsh-home/skills/container-environment/SKILL.md "$DSH_HOME/skills/cont
 chown -R node:node "$DSH_HOME/skills"
 
 if [ ! -f "$HOME/.npmrc" ]; then
-  printf 'prefix=%s/.npm-global\n' "$HOME" > "$HOME/.npmrc"
+  printf "prefix=%s/.npm-global\n" "$HOME" > "$HOME/.npmrc"
   chown node:node "$HOME/.npmrc"
 fi
 
 if [ "$(id -u)" = "0" ]; then
-  gosu node nginx -c /etc/dsh/nginx.conf -g 'daemon off;' &
+  gosu node nginx -c /etc/dsh/nginx.conf -g "daemon off;" &
   sleep 1
   exec gosu node /usr/local/bin/dsh "$@"
 else
-  nginx -c /etc/dsh/nginx.conf -g 'daemon off;' &
+  nginx -c /etc/dsh/nginx.conf -g "daemon off;" &
   sleep 1
   exec /usr/local/bin/dsh "$@"
 fi

@@ -14,6 +14,7 @@ services:
       DSH_AGENTS_HOME: /data/agents
       DSH_PERMISSION_MODE: "danger-full-access"
       DSH_WEB_PORT: "3081"
+      NODE_PATH: "/app/dsh/node_modules:/data/dsh/profiles/node_modules"
     volumes:
       - ./data/dsh:/data/dsh
       - ./data/agents:/data/agents
