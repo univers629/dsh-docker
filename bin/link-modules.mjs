@@ -57,7 +57,7 @@ for (const pkg of allPkgs) {
   }
 }
 
-// 3. 平铺所有 .pnpm 第三方依赖到 /app/dsh/node_modules 和 /data/dsh/profiles/node_modules
+// 3. 平铺所有 .pnpm 第三方依赖到 /app/dsh/node_modules
 function flattenPnpm(targetDir) {
   const pnpmDir = path.join(appModules, '.pnpm');
   if (!fs.existsSync(pnpmDir)) return;
@@ -87,35 +87,40 @@ function flattenPnpm(targetDir) {
 }
 
 flattenPnpm(appModules);
-flattenPnpm(dataModules);
 
-// 4. 链接所有普通第三方模块到 profiles
-if (fs.existsSync(appModules)) {
-  for (const entry of fs.readdirSync(appModules, { withFileTypes: true })) {
-    if (entry.name === '@deepseek-ai') continue;
-    const src = path.join(appModules, entry.name);
-    const dest = path.join(dataModules, entry.name);
-    if (!fs.existsSync(dest)) {
-      try { fs.symlinkSync(src, dest); } catch {}
-    }
-  }
-}
-
-// 5. 在 /app/dsh/node_modules/@deepseek-ai 和 /data/dsh/profiles/node_modules/@deepseek-ai 建立绝对路径软链
+// 4. 在 /app/dsh/node_modules/@deepseek-ai 建立绝对路径软链
 const appScope = path.join(appModules, '@deepseek-ai');
-const dataScope = path.join(dataModules, '@deepseek-ai');
 try { fs.mkdirSync(appScope, { recursive: true }); } catch {}
-try { fs.mkdirSync(dataScope, { recursive: true }); } catch {}
 
 for (const pkg of allPkgs) {
   if (pkg.name.startsWith('@deepseek-ai/')) {
     const shortName = pkg.name.replace('@deepseek-ai/', '');
-    for (const scopeDir of [appScope, dataScope]) {
-      const link = path.join(scopeDir, shortName);
-      try { fs.rmSync(link, { recursive: true, force: true }); } catch {}
-      try { fs.symlinkSync(pkg.dir, link); } catch {}
-    }
+    const link = path.join(appScope, shortName);
+    try { fs.rmSync(link, { recursive: true, force: true }); } catch {}
+    try { fs.symlinkSync(pkg.dir, link); } catch {}
   }
+}
+
+// 5. 让 profile 的模块回退始终指向镜像内的完整安装树。逐包链接会跨越
+// bind mount，Node 的内部 ESM loader 在并发加载插件时可能观察到不完整目录。
+fs.mkdirSync(dataProfiles, { recursive: true });
+let fallbackReady = false;
+try {
+  const stat = fs.lstatSync(dataModules);
+  if (stat.isSymbolicLink() && fs.readlinkSync(dataModules) === appModules) {
+    fallbackReady = true;
+  } else if (stat.isSymbolicLink()) {
+    fs.unlinkSync(dataModules);
+  } else {
+    fs.rmSync(dataModules, { recursive: true, force: true });
+  }
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
+if (!fallbackReady) fs.symlinkSync(appModules, dataModules, 'dir');
+
+if (fs.realpathSync(dataModules) !== fs.realpathSync(appModules)) {
+  throw new Error(`[link-modules] Failed to anchor ${dataModules} to ${appModules}.`);
 }
 
 console.log(`[link-modules] Successfully mapped ${allPkgs.length} workspace packages and all flattened pnpm dependencies.`);
