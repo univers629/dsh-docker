@@ -52,6 +52,28 @@ printf '%s\n' "$$" > /run/dsh.pid
 chmod 644 /run/dsh.pid
 
 if [ "$(id -u)" = "0" ]; then
+  # Nginx creates its temp directories as the configured worker user when they
+  # do not exist. This image runs the master and worker as `node`, while the
+  # distro default user is `nobody`; pre-create the paths explicitly so large
+  # proxied JS/assets never fail when Nginx spills a response to disk.
+  mkdir -p \
+    /tmp/nginx-body \
+    /tmp/nginx-proxy \
+    /tmp/nginx-fcgi \
+    /tmp/nginx-uwsgi \
+    /tmp/nginx-scgi
+  chown -R node:node \
+    /tmp/nginx-body \
+    /tmp/nginx-proxy \
+    /tmp/nginx-fcgi \
+    /tmp/nginx-uwsgi \
+    /tmp/nginx-scgi
+  chmod 700 \
+    /tmp/nginx-body \
+    /tmp/nginx-proxy \
+    /tmp/nginx-fcgi \
+    /tmp/nginx-uwsgi \
+    /tmp/nginx-scgi
   gosu node nginx -c /etc/dsh/nginx.conf -g "daemon off;" &
   sleep 1
   exec gosu node /usr/local/bin/dsh "$@"
