@@ -48,10 +48,6 @@ ENV NODE_OPTIONS="--max-old-space-size=2048"
 RUN --mount=type=cache,target=/app/dsh/node_modules/.cache \
     pnpm run build:official
 
-RUN grep -q 'connection\.isLoopback ? "host" : "memory"' packages/client/ui-settings/lib/client.js \
-    && sed -i 's/connection\.isLoopback ? "host" : "memory"/"host"/' packages/client/ui-settings/lib/client.js \
-    && node --check packages/client/ui-settings/lib/client.js
-
 COPY bin/build-fix.mjs /tmp/build-fix.mjs
 RUN NODE_PATH=/usr/local/lib/node_modules node /tmp/build-fix.mjs \
     && rm -rf /tmp/build-fix.mjs .git docs .agents examples test* **/*.tsbuildinfo node_modules/.cache

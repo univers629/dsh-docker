@@ -59,8 +59,8 @@ curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/inst
    - 用户的所有资产与数据仅集中在 `./data`（环境/会话/配置/MCP/子智能体）与 `./workspace`（项目代码）中，宿主机无任何散碎系统垃圾，备份迁移只需打包两个目录。
 2. **纯本地自主闭环构建 (100% Local Self-Contained Build)**：
    - 彻底摆脱对第三方镜像仓库的依赖，本地 Docker 自动抓取官方最新源码、自动注入沙箱补丁并完成编译，确保代码链路 100% 纯净可审计。
-3. **无感回环安全反代屏障 (Transparent Loopback Shield)**：
-   - 容器内部内置轻量级反代机制，自动将外部域名/IP 请求头伪装为合法的本地回环（`127.0.0.1`），彻底消除公网访问时设置空白与凭据受限问题。
+3. **保留请求边界的安全反代 (Boundary-Preserving Reverse Proxy)**：
+   - 容器内部内置轻量级反代机制，保留浏览器真实的 `Host`、`Origin` 与协议头，让 DSH 能正确区分回环请求和公网请求；trusted host 只用于明确允许的请求 authority，不会绕过远程设置权限。
 4. **智能体全权限数据治理与安全守护 (Agent Governance & Security Guard)**：
    - 容器启动自动纠正数据卷属主权限（`gosu node` 降权安全运行），严格守护 `.credentials.yaml`（`600`）与 SSH 密钥权限，预装 `procps`（`pkill`/`pgrep`），沙箱白名单完全放行持久化目录。
 
@@ -73,7 +73,7 @@ graph TD
     User["🌐 外部访问 (浏览器 / 公网域名 / dpanel / 局域网IP)"] -->|端口 3080| NGINX["🛡️ 容器内置 Nginx 反代 (端口 3080)"]
     
     subgraph DSH Docker 隔离容器
-        NGINX -->|自动改写 Header<br>Host & Origin: 127.0.0.1:3081| BACKEND["⚙️ DSH 核心引擎 (端口 3081)<br>(Debian 13 + Node 24 + Python 3.13 + uv)"]
+        NGINX -->|保留真实 Host / Origin<br>转发至 127.0.0.1:3081| BACKEND["⚙️ DSH 核心引擎 (端口 3081)<br>(Debian 13 + Node 24 + Python 3.13 + uv)"]
         
         BACKEND -->|读写会话/插件/设置| V1["/data/dsh ($DSH_HOME)"]
         BACKEND -->|读写用户工具链/Subagent CLI| V2["/data/home ($HOME)"]
@@ -123,7 +123,7 @@ dsh_docker/
 │   ├── cordis.patch.yml      # 机器级网络与服务覆盖配置
 │   └── skills/               # 预置技能库（内置 container-environment SOP）
 ├── 📂 nginx/
-│   └── dsh-nginx.conf        # 容器内轻量回环伪装反向代理配置
+│   └── dsh-nginx.conf        # 容器内保留请求边界的反向代理配置
 ├── 📂 data/                  # 💾 核心数据持久化目录（Git 忽略数据内容）
 │   ├── dsh/                  # 会话历史 (sessions/)、插件 (profiles/)、.credentials.yaml、settings.yaml
 │   ├── home/                 # Linux 用户家目录 (~/.local, ~/.npm-global, ~/.ssh, ~/.cache)
@@ -150,20 +150,15 @@ dsh_docker/
 
 ## 🔧 核心技术解密：公网/反代下插件与设置页面空白的根治方案
 
-### 1. 痛点根源
-DeepSeek Harness 官方前端在 `packages/client/ui-settings/lib/client.js` 中包含一段回环检测逻辑：
+### 1. 权限边界
+DeepSeek Harness 官方前端在 `packages/client/ui-settings/lib/client.js` 中根据连接是否回环选择设置作用域：
 ```javascript
 // 官方原生判断：
 settingsScope: connection.isLoopback ? "host" : "memory"
 ```
-当通过 **公网域名、外部 IP 或面板反向代理** 访问时，`connection.isLoopback` 返回 `false`，导致设置作用域被强制降级为纯内存态（`"memory"`）。
-- **严重影响**：设置页面直接白屏/空白、输入的 API Key 无法持久化保存、插件配置面板无法加载。
+回环访问可以使用 DSH 官方的 host settings；公网访问则按官方规则使用受限的 memory scope，不能通过反代伪装成回环来获得写权限。这样页面的可见性、写入权限和落盘结果保持一致，避免出现“页面能编辑但保存 readback-mismatch”的假成功。
 
-### 2. 本项目的“双保险”根治方案
-1. **代码级持久化补丁（Code-level Patch）**：
-   在 `Dockerfile` 构建阶段自动将前端产物中的 `connection.isLoopback ? "host" : "memory"` 强制修正为 `"host"`，确保任何网络环境下设置均落盘至 `/data/dsh/settings.yaml`；
-2. **网络级回环伪装屏障（Network-level Reverse Proxy）**：
-   容器内置 Nginx 将外部请求无感伪装为 `Host: 127.0.0.1:3081` 与 `Origin: http://127.0.0.1:3081`，使得后端核心引擎的安全断言 100% 通过。
+容器内 Nginx 只做转发，不改写为 `127.0.0.1`。Vision Router 的配置页通过自身的受控 `/vision-router-settings/*` RPC 显示能力与权限状态；这与 DSH 通用 settings API 是两条不同的权限边界。
 
 如果通过隧道或反向代理使用公网域名，请复制 `.env.example` 为 `.env`，填写 `DSH_TRUSTED_HOSTS`。该变量支持逗号分隔的多个 `host[:port]`，例如 `agent.example.com,admin.example.com`。这里的 trusted host 只解决浏览器请求的 authority 校验，不会自动开启插件的远程写设置权限；Vision Router 的“允许可信 Host 远程修改设置”仍由其设置页中的安全开关控制。仅通过回环地址访问时可以留空。
 
