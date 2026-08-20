@@ -142,6 +142,8 @@ manage-dsh-plugin restart
 
 该入口会校验 `/run/dsh.pid` 对应的确实是 DSH 主进程，并在当前 Agent 回合结束后只终止这个目标进程；容器现有的 `restart: unless-stopped` 策略会负责重新拉起它。不要在容器内执行 `docker compose`，也不要在前台 Bash 中使用 `pkill`、`kill` 或 `kill -9`。重启命令返回后应先用中文说明“已安排重启”，让当前回复正常结束，再在下一轮查看状态和最近 500 行日志确认结果。
 
+Vision Router 的 `allowRemoteSettings` 是用户明确控制的安全权限，不是插件安装或 trusted host 配置的一部分。除非用户在当前请求中明确要求开启或关闭它，否则 Agent 不得代为调用授权接口、修改 `/data/dsh/settings.yaml`，或声称该权限已经改变。`DSH_TRUSTED_HOSTS` 只声明允许的请求 authority，不等于远程设置授权。
+
 不要在前台 Bash 调用后追加 `pkill`、`kill` 或第二条重启命令。辅助脚本已经在回合边界后安排了一次精确的优雅重启。在前台调用内杀死 DSH 会让界面只显示“调用被中断，结果未知”。
 
 辅助脚本成功后，立即发送一条简短的中文完成回复，让当前回合结束并执行已安排的重启。例如：

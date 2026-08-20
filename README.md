@@ -167,6 +167,8 @@ settingsScope: connection.isLoopback ? "host" : "memory"
 
 如果通过隧道或反向代理使用公网域名，请复制 `.env.example` 为 `.env`，填写 `DSH_TRUSTED_HOSTS`。该变量支持逗号分隔的多个 `host[:port]`，例如 `agent.example.com,admin.example.com`。这里的 trusted host 只解决浏览器请求的 authority 校验，不会自动开启插件的远程写设置权限；Vision Router 的“允许可信 Host 远程修改设置”仍由其设置页中的安全开关控制。仅通过回环地址访问时可以留空。
 
+`allowRemoteSettings` 是用户授权项。Agent 不会替用户打开或关闭它；请通过运行 DSH 机器的回环地址或 SSH 隧道端口转发，在 Vision Router 设置页中明确操作。插件更新或 DSH 重启后若页面仍显示旧状态，请先关闭旧页面并重新加载最新页面，再确认该开关的写入结果。
+
 ---
 
 ## 🛡️ 沙箱权限模式与插件报错解决机制
