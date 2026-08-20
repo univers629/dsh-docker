@@ -59,8 +59,8 @@ This project delivers a solid, zero-friction, production-grade deployment runtim
    - All user assets and toolchains live strictly under `./data` (environment/sessions/configs/MCP/subagents) and `./workspace` (project code). Host backup and migration only require archiving these two directories.
 2. **100% Local Self-Contained Build**:
    - Free from external pre-built registry dependencies. Docker builds straight from upstream official source with automated sandbox patches.
-3. **Transparent Loopback Shield**:
-   - Built-in Nginx proxy automatically rewrites external host headers to local loopback (`127.0.0.1`), eliminating blank settings pages and credential persistence issues on public domains.
+3. **Boundary-Preserving Reverse Proxy**:
+   - Built-in Nginx forwards requests while preserving the browser's real `Host`, `Origin`, and protocol headers. Trusted hosts authorize request authority only; they do not bypass remote settings permissions.
 4. **Autonomous Agent Governance & Security Guard**:
    - Container startup automatically corrects mount volume permissions (running securely as `node` via `gosu`), guards `.credentials.yaml` (`600`) and SSH key permissions, preinstalls `procps` (`pkill`/`pgrep`), and whitelists `/data` in all sandboxes.
 
@@ -73,7 +73,7 @@ graph TD
     User["🌐 External Request (Browser / Public Domain / dpanel / LAN IP)"] -->|Port 3080| NGINX["🛡️ Builtin Nginx Proxy (Port 3080)"]
     
     subgraph DSH Docker Container
-        NGINX -->|Rewrites Header<br>Host & Origin: 127.0.0.1:3081| BACKEND["⚙️ DSH Engine (Port 3081)<br>(Debian 13 + Node 24 + Python 3.13 + uv)"]
+        NGINX -->|Preserves Host / Origin<br>proxies to 127.0.0.1:3081| BACKEND["⚙️ DSH Engine (Port 3081)<br>(Debian 13 + Node 24 + Python 3.13 + uv)"]
         
         BACKEND -->|Read/Write Sessions & Settings| V1["/data/dsh ($DSH_HOME)"]
         BACKEND -->|User Toolchain & Subagent CLIs| V2["/data/home ($HOME)"]
@@ -123,7 +123,7 @@ dsh_docker/
 │   ├── cordis.patch.yml      # Machine-level network and config overrides
 │   └── skills/               # Preinstalled skills (container-environment SOP)
 ├── 📂 nginx/
-│   └── dsh-nginx.conf        # Built-in loopback rewrite reverse proxy config
+│   └── dsh-nginx.conf        # Built-in boundary-preserving reverse proxy config
 ├── 📂 data/                  # 💾 Persistent data roots (gitignored)
 │   ├── dsh/                  # Sessions history (sessions/), profiles, .credentials.yaml, settings.yaml
 │   ├── home/                 # Linux user home (~/.local, ~/.npm-global, ~/.ssh, ~/.cache)
@@ -148,19 +148,16 @@ Lessons learned from real-world deployments and integrated out of the box:
 
 ---
 
-## 🔧 Technical Deep Dive: Solving the Blank Settings Page Under Reverse Proxy
+## 🔧 Technical Deep Dive: Settings Permissions Under a Reverse Proxy
 
-### 1. Root Cause Analysis
-Upstream frontend contains an explicit loopback check in `packages/client/ui-settings/lib/client.js`:
+### 1. Permission boundary
+The upstream frontend selects the settings scope based on whether the connection is loopback:
 ```javascript
 settingsScope: connection.isLoopback ? "host" : "memory"
 ```
-When accessing DSH through **public domains, external IPs, or reverse proxy panels**, `connection.isLoopback` evaluates to `false`, causing the settings scope to downgrade to volatile memory mode (`"memory"`).
-- **Symptoms**: Blank settings UI, inability to persist API keys, and failing plugin configurations.
+Loopback access can use the official host settings scope. Public access follows the upstream restricted memory scope and must not be made writable by spoofing loopback headers. Keeping visibility, authorization, and persistence aligned prevents a page from appearing editable while writes fail their readback check.
 
-### 2. Dual-Layer Resolution
-1. **Code-level Patch**: During Docker build, `connection.isLoopback ? "host" : "memory"` is patched directly to `"host"`, enforcing persistence to `/data/dsh/settings.yaml`.
-2. **Network-level Loopback Shield**: In-container Nginx rewrites incoming request headers to `Host: 127.0.0.1:3081` and `Origin: http://127.0.0.1:3081`, ensuring all backend loopback assertions pass seamlessly.
+The container Nginx only proxies traffic and preserves the caller's authority. Vision Router exposes its own controlled `/vision-router-settings/*` RPC for capability and permission status; that is separate from the DSH generic settings API.
 
 When using a public tunnel or reverse proxy, copy `.env.example` to `.env` and set `DSH_TRUSTED_HOSTS`. The variable accepts comma-separated `host[:port]` entries, for example `agent.example.com,admin.example.com`. This trusted-host list only satisfies the browser request authority fence; it does not enable remote plugin settings writes. Vision Router's "allow trusted Host remote settings" switch remains an explicit security setting in its own settings page. It can be left empty for loopback-only access.
 
