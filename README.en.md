@@ -102,7 +102,7 @@ graph TD
 | **Daily Management** | **Windows** | Double-click **`dsh.bat`** or `.\dsh.bat [start\|stop\|logs]` | Unified management CLI |
 | **Daily Management** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | Unified management CLI |
 | **Sync Official Updates** | **All OS** | `.\dsh.bat update` or `./dsh.sh update` | Pulls latest master, rebuilds locally in seconds, prunes cache |
-| **Reverse Proxy (dpanel/1Panel)** | **All OS** | Docker dpanel: `http://host.dpanel.local:3080`; host Nginx: `http://127.0.0.1:3080` | Forward to host static port: proxy **never breaks across rebuilds** |
+| **Reverse Proxy (dpanel/1Panel)** | **All OS** | Docker dpanel: host-gateway IP (usually `http://172.17.0.1:3080`); host Nginx: `http://127.0.0.1:3080` | Forward to host static port: proxy **never breaks across rebuilds** |
 
 ---
 
@@ -199,7 +199,7 @@ The container includes preconfigured `PATH`: `$HOME/.local/bin` and `$HOME/.npm-
 ## 🌐 Reverse Proxy & dpanel Stability Guide
 
 ### 1. Fixing dpanel Re-forwarding After Rebuilds
-- **Docker dpanel**: Point the proxy to **`http://host.dpanel.local:3080`**. Inside the dpanel container, `127.0.0.1` refers to dpanel itself, not the host running DSH; `host.dpanel.local` is dpanel's host-gateway alias.
+- **Docker dpanel**: Run `sudo docker exec dpanel getent hosts host.dpanel.local` to obtain the host-gateway IP, then point the proxy to port `3080` on that IP, for example **`http://172.17.0.1:3080`**. Inside the dpanel container, `127.0.0.1` refers to dpanel itself. Do not enter `host.dpanel.local` directly: dpanel's generated dynamic Nginx upstream uses Docker DNS and may not read this alias from `/etc/hosts`.
 - **Nginx/1Panel running directly on the host**: Point the proxy to **`http://127.0.0.1:3080`**.
 - **Principle**: Host port 3080 is static. Regardless of container rebuilds, the forward rule remains permanently valid.
 
