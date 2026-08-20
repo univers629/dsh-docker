@@ -102,7 +102,7 @@ graph TD
 | **日常管理 (启动/停止/日志)** | **Windows** | 双击 **`dsh.bat`** 或 `.\dsh.bat [start\|stop\|logs]` | 统一高颜值管理 CLI |
 | **日常管理 (启动/停止/日志)** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | 统一高颜值管理 CLI |
 | **同步官方最新源码** | **全平台** | `.\dsh.bat update` 或 `./dsh.sh update` | 在线拉取官方最新 Commit，秒级重新编译，自动清理垃圾缓存 |
-| **面板反代管理 (dpanel/1Panel)** | **全平台** | Docker 版 dpanel 填写 `http://host.dpanel.local:3080`；宿主机直接运行的 Nginx 填写 `http://127.0.0.1:3080` | 走宿主机静态映射端口，容器无论如何更新重建，**反代永远不失效** |
+| **面板反代管理 (dpanel/1Panel)** | **全平台** | Docker 版 dpanel 填写宿主机网关 IP（通常为 `http://172.17.0.1:3080`）；宿主机直接运行的 Nginx 填写 `http://127.0.0.1:3080` | 走宿主机静态映射端口，容器无论如何更新重建，**反代永远不失效** |
 
 ---
 
@@ -204,7 +204,7 @@ environment:
 ### 1. dpanel / 宝塔 / 1Panel 转发“重建后失效”的根治方案
 
 在各种 Docker 管理面板中添加反向代理时：
-- **Docker 版 dpanel**：代理目标填写 **`http://host.dpanel.local:3080`**。`127.0.0.1` 在 dpanel 容器内只代表 dpanel 自身，不能访问宿主机上的 DSH；`host.dpanel.local` 是 dpanel 提供的宿主机网关别名。
+- **Docker 版 dpanel**：先运行 `sudo docker exec dpanel getent hosts host.dpanel.local` 查询宿主机网关 IP，再把代理目标填写为该 IP 的 `3080` 端口，例如 **`http://172.17.0.1:3080`**。`127.0.0.1` 在 dpanel 容器内只代表 dpanel 自身；同时不要直接填写 `host.dpanel.local`，因为 dpanel 生成的动态 Nginx 上游使用 Docker DNS，可能不会读取 `/etc/hosts` 中的这个别名。
 - **宿主机直接运行的 Nginx/1Panel**：代理目标填写 **`http://127.0.0.1:3080`**。
 - **原理**：本项目已固化宿主机映射端口 `3080:3080`。容器无论怎么重建、销毁、升级，宿主机端口永远固定，**面板反代一次配置终身有效**！
 
