@@ -102,7 +102,7 @@ graph TD
 | **Daily Management** | **Windows** | Double-click **`dsh.bat`** or `.\dsh.bat [start\|stop\|logs]` | Unified management CLI |
 | **Daily Management** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | Unified management CLI |
 | **Sync Official Updates** | **All OS** | `.\dsh.bat update` or `./dsh.sh update` | Pulls latest master, rebuilds locally in seconds, prunes cache |
-| **Reverse Proxy (dpanel/1Panel)** | **All OS** | Target: `http://127.0.0.1:3080` | Forward to host static port: proxy **never breaks across rebuilds** |
+| **Reverse Proxy (dpanel/1Panel)** | **All OS** | Docker dpanel: `http://host.dpanel.local:3080`; host Nginx: `http://127.0.0.1:3080` | Forward to host static port: proxy **never breaks across rebuilds** |
 
 ---
 
@@ -199,7 +199,8 @@ The container includes preconfigured `PATH`: `$HOME/.local/bin` and `$HOME/.npm-
 ## 🌐 Reverse Proxy & dpanel Stability Guide
 
 ### 1. Fixing dpanel Re-forwarding After Rebuilds
-- **Recommended**: Point dpanel forward address to host static port: **`http://127.0.0.1:3080`**.
+- **Docker dpanel**: Point the proxy to **`http://host.dpanel.local:3080`**. Inside the dpanel container, `127.0.0.1` refers to dpanel itself, not the host running DSH; `host.dpanel.local` is dpanel's host-gateway alias.
+- **Nginx/1Panel running directly on the host**: Point the proxy to **`http://127.0.0.1:3080`**.
 - **Principle**: Host port 3080 is static. Regardless of container rebuilds, the forward rule remains permanently valid.
 
 > 💡 **dpanel 1-Line Reconnection**: If using `dsh.pod.dpanel.local` and encountering 502 after recreating a container, reconnect the bridge in 1 second:
