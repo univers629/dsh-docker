@@ -51,6 +51,14 @@ function findPackages(dir) {
 const allPackages = findPackages(appDir);
 console.log(`[build-fix] Discovered ${allPackages.length} workspace packages.`);
 
+// Keep workspace packages external when producing the compatibility bundles.
+// The harness relies on identity-bearing singletons (notably dsh-scope's
+// private scope tag and Cordis' Context symbols). Bundling each package entry
+// independently would create one copy per bundle, so an agent scope minted by
+// dsh-agent-loop would be invisible to dsh-agent-presets. Runtime linking below
+// provides the one canonical module instance for every workspace package.
+const workspaceExternals = allPackages.map(({ name }) => name);
+
 // 3. 无条件为所有包编译自包含的 lib/index.js 和 lib/invariant.js，并生成根 index.js 兜底
 let compiled = 0;
 for (const item of allPackages) {
@@ -72,6 +80,7 @@ for (const item of allPackages) {
         target: 'es2024',
         bundle: true,
         packages: 'external',
+        external: workspaceExternals,
       });
       compiled++;
     } catch (e) {
