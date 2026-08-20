@@ -17,6 +17,10 @@ if [ "$(id -u)" = "0" ]; then
     node /usr/local/bin/link-modules.mjs
   fi
 
+  if [ -f /usr/local/bin/patch-profile-plugins.mjs ]; then
+    node /usr/local/bin/patch-profile-plugins.mjs
+  fi
+
   if [ ! -f "$DSH_HOME/cordis.patch.yml" ]; then
     install -o node -g node -m 600 /etc/dsh-home/cordis.patch.yml "$DSH_HOME/cordis.patch.yml"
   fi
