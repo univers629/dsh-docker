@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  printf '%s\n' '用法：manage-dsh-plugin install|update|remove <package>' >&2
+  printf '%s\n' '用法：manage-dsh-plugin install|update|remove <package> | restart' >&2
   exit 2
 }
 
@@ -57,6 +57,49 @@ restart_after_turn() {
   restart_after_turn "$@"
   exit 0
 }
+
+schedule_restart() {
+  pid_file=${DSH_PID_FILE:-/run/dsh.pid}
+  [ -r "$pid_file" ] || fail "找不到 DSH 主进程记录：$pid_file"
+  target_pid=$(sed -n '1p' "$pid_file")
+  case "$target_pid" in ''|*[!0-9]*) fail "DSH 主进程记录无效：$target_pid" ;; esac
+  [ -r "/proc/$target_pid/stat" ] || fail "DSH 主进程不存在：$target_pid"
+  target_start=$(awk '{ print $22 }' "/proc/$target_pid/stat" 2>/dev/null || true)
+  case "$target_start" in ''|*[!0-9]*) fail '无法确认 DSH 主进程的启动标识。' ;; esac
+  command_line=$(tr '\000' ' ' < "/proc/$target_pid/cmdline" 2>/dev/null || true)
+  case "$command_line" in
+    */app/dsh/apps/cli/lib/bin.js*) ;;
+    *) fail "PID $target_pid 不是预期的 DSH 主进程。" ;;
+  esac
+
+  session_log=${DSH_SESSION_JSONL:-}
+  baseline_bytes=0
+  if [ -n "$session_log" ] && [ -f "$session_log" ]; then
+    baseline_bytes=$(wc -c < "$session_log" 2>/dev/null || printf '0')
+    case "$baseline_bytes" in *[!0-9]*|'') baseline_bytes=0 ;; esac
+  fi
+
+  case "$0" in
+    /*) self=$0 ;;
+    *) self=$(command -v "$0" 2>/dev/null || true) ;;
+  esac
+  [ -n "${self:-}" ] && [ -x "$self" ] || fail '找不到插件管理脚本自身，无法安排自动重启。'
+  setsid_bin=${DSH_SETSID_BIN:-/usr/bin/setsid}
+  [ -x "$setsid_bin" ] || fail "找不到 setsid：$setsid_bin"
+
+  "$setsid_bin" "$self" __restart-after-turn \
+    "$target_pid" "$target_start" "$session_log" "$baseline_bytes" \
+    </dev/null >/dev/null 2>&1 &
+}
+
+if [ "${1:-}" = restart ]; then
+  [ "$#" -eq 1 ] || usage
+  printf '%s\n' '【DSH】正在确认 DSH 主进程，并安排本轮回复结束后的优雅重启……'
+  schedule_restart
+  printf '%s\n' '【DSH】已安排重启：当前回复结束后只会重启 DSH 主进程，不会影响其他 Docker 容器。'
+  printf '%s\n' '【DSH】页面会短暂断开；服务恢复后再刷新。重启结果将在下一次检查中确认。'
+  exit 0
+fi
 
 [ "$#" -eq 2 ] || usage
 operation=$1
@@ -114,37 +157,7 @@ if ! dsh --profile web --dump-config >/dev/null; then
   fail "配置解析失败，未确认 ${target} 能随 web profile 启动；DSH 不会自动重启。"
 fi
 
-pid_file=${DSH_PID_FILE:-/run/dsh.pid}
-[ -r "$pid_file" ] || fail "找不到 DSH 主进程记录：$pid_file"
-target_pid=$(sed -n '1p' "$pid_file")
-case "$target_pid" in ''|*[!0-9]*) fail "DSH 主进程记录无效：$target_pid" ;; esac
-[ -r "/proc/$target_pid/stat" ] || fail "DSH 主进程不存在：$target_pid"
-target_start=$(awk '{ print $22 }' "/proc/$target_pid/stat" 2>/dev/null || true)
-case "$target_start" in ''|*[!0-9]*) fail '无法确认 DSH 主进程的启动标识。' ;; esac
-command_line=$(tr '\000' ' ' < "/proc/$target_pid/cmdline" 2>/dev/null || true)
-case "$command_line" in
-  *'/app/dsh/apps/cli/lib/bin.js'*) ;;
-  *) fail "PID $target_pid 不是预期的 DSH 主进程。" ;;
-esac
-
-session_log=${DSH_SESSION_JSONL:-}
-baseline_bytes=0
-if [ -n "$session_log" ] && [ -f "$session_log" ]; then
-  baseline_bytes=$(wc -c < "$session_log" 2>/dev/null || printf '0')
-  case "$baseline_bytes" in *[!0-9]*|'') baseline_bytes=0 ;; esac
-fi
-
-case "$0" in
-  /*) self=$0 ;;
-  *) self=$(command -v "$0" 2>/dev/null || true) ;;
-esac
-[ -n "${self:-}" ] && [ -x "$self" ] || fail '找不到插件管理脚本自身，无法安排自动重启。'
-setsid_bin=${DSH_SETSID_BIN:-/usr/bin/setsid}
-[ -x "$setsid_bin" ] || fail "找不到 setsid：$setsid_bin"
-
-"$setsid_bin" "$self" __restart-after-turn \
-  "$target_pid" "$target_start" "$session_log" "$baseline_bytes" \
-  </dev/null >/dev/null 2>&1 &
+schedule_restart
 
 printf '%s\n' '【DSH 插件】profile 配置解析通过；这只确认组合配置可启动，不代表插件前端已经生效。'
 printf '%s\n' '【DSH 插件】已安排自动重启：本轮回复结束后，DSH 将优雅重启并加载插件变更。'
