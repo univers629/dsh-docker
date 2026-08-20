@@ -164,6 +164,8 @@ When accessing DSH through **public domains, external IPs, or reverse proxy pane
 
 When using a public tunnel or reverse proxy, copy `.env.example` to `.env` and set `DSH_TRUSTED_HOSTS`. The variable accepts comma-separated `host[:port]` entries, for example `agent.example.com,admin.example.com`. This trusted-host list only satisfies the browser request authority fence; it does not enable remote plugin settings writes. Vision Router's "allow trusted Host remote settings" switch remains an explicit security setting in its own settings page. It can be left empty for loopback-only access.
 
+`allowRemoteSettings` is a user authorization choice. The Agent does not enable or disable it on the user's behalf; use the DSH machine's loopback UI or an SSH tunnel port forward to make that choice in Vision Router settings. After a plugin update or DSH restart, close stale pages and load the current page before checking whether the toggle persisted.
+
 ---
 
 ## 🛡️ Sandbox Permission Modes & Error-Free Guarantee
