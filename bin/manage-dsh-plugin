@@ -108,10 +108,10 @@ case "$operation" in
     ;;
 esac
 
-printf '【DSH 插件】%s成功：%s\n' "$verb" "$target"
+printf '【DSH 插件】包管理操作已完成并写入持久化 web profile：%s\n' "$target"
 printf '%s\n' '【DSH 插件】正在校验 web profile 的组合配置……'
 if ! dsh --profile web --dump-config >/dev/null; then
-  fail "配置校验失败，未确认 ${target} 的生效状态；DSH 不会自动重启。"
+  fail "配置解析失败，未确认 ${target} 能随 web profile 启动；DSH 不会自动重启。"
 fi
 
 pid_file=${DSH_PID_FILE:-/run/dsh.pid}
@@ -146,6 +146,6 @@ setsid_bin=${DSH_SETSID_BIN:-/usr/bin/setsid}
   "$target_pid" "$target_start" "$session_log" "$baseline_bytes" \
   </dev/null >/dev/null 2>&1 &
 
-printf '%s\n' '【DSH 插件】配置校验通过。'
+printf '%s\n' '【DSH 插件】profile 配置解析通过；这只确认组合配置可启动，不代表插件前端已经生效。'
 printf '%s\n' '【DSH 插件】已安排自动重启：本轮回复结束后，DSH 将优雅重启并加载插件变更。'
-printf '%s\n' '【DSH 插件】页面可能短暂断开；服务恢复后刷新页面即可。'
+printf '%s\n' '【DSH 插件】重启和前端效果尚未验证。页面恢复后，请按该插件自身的入口与功能进行检查。'
