@@ -165,6 +165,8 @@ settingsScope: connection.isLoopback ? "host" : "memory"
 2. **网络级回环伪装屏障（Network-level Reverse Proxy）**：
    容器内置 Nginx 将外部请求无感伪装为 `Host: 127.0.0.1:3081` 与 `Origin: http://127.0.0.1:3081`，使得后端核心引擎的安全断言 100% 通过。
 
+`docker-compose.yml` 同时通过 `dsh web --trusted-host agent.6296290.xyz` 声明公网入口。这里的 trusted host 只解决浏览器请求的 authority 校验，不会自动开启插件的远程写设置权限；Vision Router 的“允许可信 Host 远程修改设置”仍由其设置页中的安全开关控制。
+
 ---
 
 ## 🛡️ 沙箱权限模式与插件报错解决机制
@@ -263,6 +265,8 @@ Agent 会自动遵循预置 SOP：
 2. **配置校验**：自动校验 `cordis.patch.yml` 语法有效性；
 3. **数据管理**：直接进入 `/data/dsh/sessions/` 对过期归档文件执行清理；
 4. **生效**：向用户发出中文完成通知；当前回复结束后自动优雅重启 DSH，使插件组合变更生效。
+
+若需要单独重启 DSH，向 Agent 明确提出“重启 DSH”即可；内置 skill 会调用 `manage-dsh-plugin restart`，在当前回复结束后只重启 DSH 主进程，不会重启其他 Docker 容器。
 
 ---
 

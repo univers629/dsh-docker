@@ -134,6 +134,14 @@ manage-dsh-plugin update <package-name>@latest
 manage-dsh-plugin remove <package-name>
 ```
 
+当用户明确要求“重启 DSH”或“重启服务”时，使用通用重启入口：
+
+```sh
+manage-dsh-plugin restart
+```
+
+该入口会校验 `/run/dsh.pid` 对应的确实是 DSH 主进程，并在当前 Agent 回合结束后只终止这个目标进程；容器现有的 `restart: unless-stopped` 策略会负责重新拉起它。不要在容器内执行 `docker compose`，也不要在前台 Bash 中使用 `pkill`、`kill` 或 `kill -9`。重启命令返回后应先用中文说明“已安排重启”，让当前回复正常结束，再在下一轮查看状态和最近 500 行日志确认结果。
+
 不要在前台 Bash 调用后追加 `pkill`、`kill` 或第二条重启命令。辅助脚本已经在回合边界后安排了一次精确的优雅重启。在前台调用内杀死 DSH 会让界面只显示“调用被中断，结果未知”。
 
 辅助脚本成功后，立即发送一条简短的中文完成回复，让当前回合结束并执行已安排的重启。例如：

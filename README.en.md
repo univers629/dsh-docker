@@ -162,6 +162,8 @@ When accessing DSH through **public domains, external IPs, or reverse proxy pane
 1. **Code-level Patch**: During Docker build, `connection.isLoopback ? "host" : "memory"` is patched directly to `"host"`, enforcing persistence to `/data/dsh/settings.yaml`.
 2. **Network-level Loopback Shield**: In-container Nginx rewrites incoming request headers to `Host: 127.0.0.1:3081` and `Origin: http://127.0.0.1:3081`, ensuring all backend loopback assertions pass seamlessly.
 
+`docker-compose.yml` also declares the public authority with `dsh web --trusted-host agent.6296290.xyz`. This trusted-host entry only satisfies the browser request authority fence; it does not enable remote plugin settings writes. Vision Router's "allow trusted Host remote settings" switch remains an explicit security setting in its own settings page.
+
 ---
 
 ## 🛡️ Sandbox Permission Modes & Error-Free Guarantee
@@ -254,6 +256,8 @@ Agent will automatically:
 2. Validate `cordis.patch.yml` configuration;
 3. Manage session data in `/data/dsh/sessions/`;
 4. Send a clear completion notice; DSH restarts gracefully after the current reply finishes so profile bundle membership changes take effect.
+
+For an explicit DSH restart, tell the Agent "restart DSH". The bundled skill invokes `manage-dsh-plugin restart`, which restarts only the DSH process after the current reply and leaves other Docker containers untouched.
 
 ---
 

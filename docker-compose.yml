@@ -15,6 +15,7 @@ services:
       DSH_PERMISSION_MODE: "danger-full-access"
       DSH_WEB_PORT: "3081"
       NODE_PATH: "/app/dsh/node_modules:/data/dsh/profiles/node_modules"
+    command: ["web", "--trusted-host", "agent.6296290.xyz"]
     volumes:
       - ./data/dsh:/data/dsh
       - ./data/agents:/data/agents
