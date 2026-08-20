@@ -142,8 +142,9 @@ Lessons learned from real-world deployments and integrated out of the box:
 - **Official Assertion**: `@deepseek-ai/dsh-credentials-local` strictly enforces that `/data/dsh/.credentials.yaml` must not be readable beyond its owner. If permissions are `660`, DSH refuses to start;
 - **Automated Guard Lock**: [`bin/entrypoint.sh`](bin/entrypoint.sh) corrects host volume ownership while **strictly locking all `*credentials*.yaml` files to `600`**, satisfying DSH security assertions seamlessly on every boot.
 
-### 2. Preinstalled `procps` (`pkill` / `pgrep`)
-- `procps` is preinstalled in the runtime image. When subagents or users trigger hot-reloads via `pkill -f "apps/cli/lib/bin.js"`, the command executes reliably without missing package errors.
+### 2. Safe plugin lifecycle management
+- `procps` remains available for diagnostics, and `/usr/local/bin/manage-dsh-plugin` handles plugin installation, updates, removal, and profile validation.
+- The helper shows staged status around the package-manager and validation output, then precisely and gracefully restarts DSH after the current Agent turn is durable, avoiding an unexplained unknown tool outcome.
 
 ---
 
@@ -251,7 +252,7 @@ Agent will automatically:
 1. Run `dsh plugin --profile web add <pkg>`;
 2. Validate `cordis.patch.yml` configuration;
 3. Manage session data in `/data/dsh/sessions/`;
-4. Send completion notice and smoothly restart the service.
+4. Send a clear completion notice; DSH restarts gracefully after the current reply finishes so profile bundle membership changes take effect.
 
 ---
 

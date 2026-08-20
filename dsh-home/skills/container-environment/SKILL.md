@@ -122,16 +122,24 @@ uv pip install mcp httpx
 
 ---
 
-## 7. Standard SOP for Installing DSH Plugins (1-Step Atomic Execution)
+## 7. DSH 插件管理标准流程
 
-Whenever the user asks to install, update, or remove a DSH plugin (e.g. `dsh-better-sidebar`, `dsh-vision-router`):
+当用户要求安装、更新或删除 DSH 插件（例如 `dsh-better-sidebar`、`dsh-vision-router`）时：
 
-**DO NOT split into multiple inspection steps or wander around checking files.**
-Execute the entire operation in **ONE SINGLE BASH CALL** and immediately reply to the user:
+使用内置的 `/usr/local/bin/manage-dsh-plugin`。它会用中文标明每个阶段、保留 pnpm/DSH 的真实输出、校验组合后的 profile，并且只在当前 Agent 回合完成持久化后安排 DSH 重启。
 
 ```sh
-cd /data/dsh/profiles/web && pnpm add <package-name> --ignore-scripts && dsh --profile web --dump-config >/dev/null && (pkill -f "apps/cli/lib/bin.js" 2>/dev/null || kill -9 $(pidof node 2>/dev/null) 2>/dev/null || true)
+manage-dsh-plugin install <package-name>@latest
+manage-dsh-plugin update <package-name>@latest
+manage-dsh-plugin remove <package-name>
 ```
 
-**Immediately return this short completion response**:
-> 🚀 插件 `<package-name>` 已成功安装并触发热重载！服务正在自动重启，请在 5 秒后刷新网页即可体验。
+不要在前台 Bash 调用后追加 `pkill`、`kill` 或第二条重启命令。辅助脚本已经在回合边界后安排了一次精确的优雅重启。在前台调用内杀死 DSH 会让界面只显示“调用被中断，结果未知”。
+
+辅助脚本成功后，立即发送一条简短的中文完成回复，让当前回合结束并执行已安排的重启。例如：
+
+```text
+插件 `<package-name>` 已安装并通过配置校验。DSH 会在本轮回复结束后自动重启，页面短暂断开后刷新即可。
+```
+
+辅助脚本失败后，用中文报告失败行和命令输出。不要声称安装、删除、校验或重启成功；在确认当前安装状态前，不要重试有副作用的插件操作。

@@ -46,6 +46,11 @@ if [ ! -f "$HOME/.npmrc" ]; then
   chown node:node "$HOME/.npmrc" 2>/dev/null || true
 fi
 
+# Record the entrypoint PID before exec. The final dsh process keeps this PID,
+# allowing the plugin helper to signal only the intended DSH process.
+printf '%s\n' "$$" > /run/dsh.pid
+chmod 644 /run/dsh.pid
+
 if [ "$(id -u)" = "0" ]; then
   gosu node nginx -c /etc/dsh/nginx.conf -g "daemon off;" &
   sleep 1

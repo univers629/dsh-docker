@@ -86,6 +86,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 COPY --chown=node:node --from=builder /app/dsh /app/dsh
 COPY bin/dsh /usr/local/bin/dsh
+COPY bin/manage-dsh-plugin /usr/local/bin/manage-dsh-plugin
 COPY bin/link-modules.mjs /usr/local/bin/link-modules.mjs
 COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY dsh-home/ /etc/dsh-home/
@@ -93,7 +94,7 @@ COPY nginx/dsh-nginx.conf /etc/dsh/nginx.conf
 
 RUN mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
     && chown -R node:node /opt /data /workspace \
-    && chmod +x /usr/local/bin/dsh /usr/local/bin/entrypoint.sh
+    && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh
 
 ENV DSH_HOME=/data/dsh \
     DSH_AGENTS_HOME=/data/agents \

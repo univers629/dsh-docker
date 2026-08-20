@@ -142,8 +142,9 @@ dsh_docker/
 - **官方断言机制**：DSH `@deepseek-ai/dsh-credentials-local` 对 `/data/dsh/.credentials.yaml` 实施了严格的安全断言，如果文件权限超出所有者可读写（例如 `660`），系统将**硬性拒绝启动**以防密钥泄漏；
 - **自动纠偏锁**：[`bin/entrypoint.sh`](bin/entrypoint.sh) 在容器每次启动时，会自动对全盘 `/data` 进行属主纠正的同时，**强制锁定所有的 `*credentials*.yaml` 为 `600`**，既保证了多用户挂载不冲突，又完全满足官方严苛的安全断言。
 
-### 2. 内置 `procps` 进程管理套件（`pkill` / `pgrep`）
-- 容器运行时原生集成了 `procps` 工具包。当智能体在容器内部自主执行热重载、插件生命周期管理或服务平滑重启时，调用 `pkill -f "apps/cli/lib/bin.js"` 不会发生 `command not found` 错误。
+### 2. 安全的插件生命周期管理
+- 容器内置 `procps` 供诊断使用，同时提供 `/usr/local/bin/manage-dsh-plugin`，负责安装、更新、删除插件和校验 profile 配置。
+- 脚本会显示包管理与配置校验的阶段性中文信息，并在当前 Agent 回复持久化完成后精确、优雅地重启 DSH，避免只看到红色的“工具结果未知”。
 
 ---
 
@@ -260,7 +261,7 @@ Agent 会自动遵循预置 SOP：
 1. **安装**：自动在 `$DSH_HOME/profiles/web/package.json` 添加依赖并安全执行安装；
 2. **配置校验**：自动校验 `cordis.patch.yml` 语法有效性；
 3. **数据管理**：直接进入 `/data/dsh/sessions/` 对过期归档文件执行清理；
-4. **生效**：向用户发出完成通知并自动触发服务热重载。
+4. **生效**：向用户发出中文完成通知；当前回复结束后自动优雅重启 DSH，使插件组合变更生效。
 
 ---
 
