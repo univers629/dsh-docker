@@ -94,8 +94,12 @@ esac
 printf '【DSH 插件】开始%s：%s\n' "$verb" "$target"
 printf '%s\n' '【DSH 插件】正在执行包管理操作，下面会显示 pnpm/DSH 的实际输出。'
 case "$operation" in
-  install|update)
-    dsh plugin --profile web "$pnpm_verb" "$target" --ignore-scripts || \
+  install)
+    dsh plugin --profile web add "$target" --ignore-scripts || \
+      fail "${verb} ${target} 未完成；DSH 不会自动重启。"
+    ;;
+  update)
+    dsh plugin --profile web update "$target" || \
       fail "${verb} ${target} 未完成；DSH 不会自动重启。"
     ;;
   remove)
