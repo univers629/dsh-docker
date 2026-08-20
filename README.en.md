@@ -144,7 +144,7 @@ Lessons learned from real-world deployments and integrated out of the box:
 
 ### 2. Safe plugin lifecycle management
 - `procps` remains available for diagnostics, and `/usr/local/bin/manage-dsh-plugin` handles plugin installation, updates, removal, and profile validation.
-- The helper shows staged status around the package-manager and validation output, then precisely and gracefully restarts DSH after the current Agent turn is durable, avoiding an unexplained unknown tool outcome.
+- The helper shows staged status around the package-manager and validation output, then precisely and gracefully restarts DSH after the current Agent turn is durable, avoiding an unexplained unknown tool outcome. Its output distinguishes a persisted profile change, parse validation, a scheduled restart, and frontend behavior that still requires post-restart verification; it does not present generic config validation as proof that a plugin-specific settings page or button is live.
 
 ---
 
