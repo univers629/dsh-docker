@@ -232,17 +232,144 @@ if (opened) {
     return true
   })()`)
   assert.equal(configClicked, true, 'WebUI configuration editor button could not be clicked')
-  await sleep(1200)
+  await evaluate(`new Promise(resolve => {
+    const started = Date.now()
+    const check = () => {
+      if (document.querySelector('textarea[aria-label="编辑配置文件"], textarea[aria-label="Edit configuration file"]')
+        || document.querySelector('[data-dsh-config-editor-layer] [role="alert"]')) {
+        resolve(true)
+        return
+      }
+      if (Date.now() - started > 30000) {
+        resolve(false)
+        return
+      }
+      window.setTimeout(check, 100)
+    }
+    check()
+  })`)
   const configEditor = JSON.parse(await evaluate(`JSON.stringify({
     dialogs: document.querySelectorAll('[role="dialog"]').length,
     textarea: Boolean(document.querySelector('textarea[aria-label="编辑配置文件"], textarea[aria-label="Edit configuration file"]')),
     save: [...document.querySelectorAll('[role="dialog"] button')].some(button => /保存配置|Save configuration/i.test(button.innerText)),
+    editorLayer: Boolean(document.querySelector('[data-dsh-config-editor-layer]')),
+    backdropFilters: [...document.querySelectorAll('[data-dsh-config-editor-layer], [data-dsh-config-editor-layer] *')]
+      .filter(node => getComputedStyle(node).backdropFilter && getComputedStyle(node).backdropFilter !== 'none').length,
+    viewportBackdropFilters: [...document.querySelectorAll('*')].filter(node => {
+      const style = getComputedStyle(node)
+      if (!style.backdropFilter || style.backdropFilter === 'none') return false
+      const rect = node.getBoundingClientRect()
+      return rect.width >= innerWidth * 0.9 && rect.height >= innerHeight * 0.9
+    }).length,
     bodyText: document.body?.innerText?.slice(-1600) ?? '',
   })`))
   console.log(JSON.stringify({ phase: 'config-editor', configEditor, exceptions, consoleErrors }, null, 2))
-  assert.ok(configEditor.dialogs >= 2, 'configuration editor modal did not open over settings')
+  assert.ok(configEditor.dialogs >= 2, 'configuration editor dialog did not open over settings')
   assert.equal(configEditor.textarea, true, 'configuration editor textarea did not render')
   assert.equal(configEditor.save, true, 'configuration editor save action did not render')
+  assert.equal(configEditor.editorLayer, true, 'configuration editor layer did not render')
+  assert.equal(configEditor.backdropFilters, 0, 'configuration editor introduced a nested backdrop filter')
+  assert.equal(configEditor.viewportBackdropFilters, 1, 'configuration editor must preserve exactly the settings backdrop')
+
+  const scrollProbe = JSON.parse(await evaluate(`(() => {
+    const layer = document.querySelector('[data-dsh-config-editor-layer]')
+    const textarea = layer?.querySelector('textarea')
+    const settings = [...document.querySelectorAll('[role="dialog"]')].find(dialog => !dialog.closest('[data-dsh-config-editor-layer]'))
+    if (!layer || !textarea || !settings) return { ok: false }
+    window.__dshConfigScrollProbe = {
+      layer,
+      textarea,
+      settings,
+      disconnected: 0,
+      frames: 0,
+      hiddenFrames: 0,
+      maxScrollTop: 0,
+      observer: new MutationObserver(() => {
+        if (!layer.isConnected || !textarea.isConnected || !settings.isConnected) window.__dshConfigScrollProbe.disconnected += 1
+      }),
+    }
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+    valueSetter?.call(textarea, textarea.value + '\n' + 'scroll-probe: true\n'.repeat(240))
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    window.__dshConfigScrollProbe.onScroll = () => {
+      const probe = window.__dshConfigScrollProbe
+      if (probe) probe.maxScrollTop = Math.max(probe.maxScrollTop, textarea.scrollTop)
+    }
+    textarea.addEventListener('scroll', window.__dshConfigScrollProbe.onScroll)
+    window.__dshConfigScrollProbe.observer.observe(document.body, { childList: true, subtree: true })
+    const sampleFrame = () => {
+      const probe = window.__dshConfigScrollProbe
+      if (!probe) return
+      probe.frames += 1
+      if (!probe.layer.isConnected || !probe.textarea.isConnected || !probe.settings.isConnected
+        || getComputedStyle(probe.layer).visibility !== 'visible'
+        || getComputedStyle(probe.settings).visibility !== 'visible') probe.hiddenFrames += 1
+      if (probe.frames < 90) requestAnimationFrame(sampleFrame)
+    }
+    requestAnimationFrame(sampleFrame)
+    const rect = textarea.getBoundingClientRect()
+    return JSON.stringify({
+      ok: true,
+      x: rect.x + rect.width / 2,
+      y: rect.y + rect.height / 2,
+      scrollable: textarea.scrollHeight > textarea.clientHeight,
+      viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
+    })
+  })()`))
+  assert.equal(scrollProbe.ok, true, 'configuration editor scroll target was unavailable')
+  assert.equal(scrollProbe.scrollable, true, 'configuration editor did not contain scrollable test content')
+  for (let index = 0; index < 24; index += 1) {
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x: scrollProbe.x,
+      y: scrollProbe.y,
+      deltaX: 0,
+      deltaY: index < 16 ? 240 : -240,
+    })
+    await sleep(25)
+  }
+  const compactHeight = Math.max(480, scrollProbe.viewportHeight - 120)
+  for (let index = 0; index < 10; index += 1) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: scrollProbe.viewportWidth,
+      height: index % 2 === 0 ? compactHeight : scrollProbe.viewportHeight,
+      deviceScaleFactor: 1,
+      mobile: false,
+    })
+    await sleep(35)
+  }
+  await cdp.send('Emulation.clearDeviceMetricsOverride')
+  await sleep(1200)
+  const scrollStability = JSON.parse(await evaluate(`(() => {
+    const probe = window.__dshConfigScrollProbe
+    if (!probe) return JSON.stringify({ ok: false })
+    probe.observer.disconnect()
+    probe.textarea.removeEventListener('scroll', probe.onScroll)
+    const result = {
+      ok: true,
+      layer: probe.layer.isConnected,
+      textarea: probe.textarea.isConnected,
+      settings: probe.settings.isConnected,
+      disconnected: probe.disconnected,
+      frames: probe.frames,
+      hiddenFrames: probe.hiddenFrames,
+      maxScrollTop: probe.maxScrollTop,
+      filters: [...document.querySelectorAll('[data-dsh-config-editor-layer], [data-dsh-config-editor-layer] *')]
+        .filter(node => getComputedStyle(node).backdropFilter && getComputedStyle(node).backdropFilter !== 'none').length,
+    }
+    delete window.__dshConfigScrollProbe
+    return JSON.stringify(result)
+  })()`))
+  assert.equal(scrollStability.ok, true, 'configuration editor scroll target was unavailable')
+  assert.equal(scrollStability.layer, true, 'editor layer disappeared during scrolling')
+  assert.equal(scrollStability.textarea, true, 'editor textarea disappeared during scrolling')
+  assert.equal(scrollStability.settings, true, 'settings dialog disappeared during scrolling')
+  assert.equal(scrollStability.disconnected, 0, 'settings or editor DOM remounted during scrolling')
+  assert.equal(scrollStability.hiddenFrames, 0, 'settings or editor became hidden during scrolling')
+  assert.ok(scrollStability.maxScrollTop > 0, 'real wheel events did not scroll the configuration content')
+  assert.ok(scrollStability.frames >= 30, 'scroll stability probe did not sample enough animation frames')
+  assert.equal(scrollStability.filters, 0, 'nested backdrop filter appeared during scrolling')
   await evaluate(`(() => {
     const button = [...document.querySelectorAll('[role="dialog"] button')].find(item => /取消|Cancel/i.test(item.innerText))
     if (button) button.click()
