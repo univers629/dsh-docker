@@ -4,6 +4,7 @@ const root = process.env.DSH_PROFILE_ROOT ?? '/data/dsh/profiles/web'
 const clientFile = `${root}/node_modules/dsh-vision-router/lib/client.js`
 const permissionFile = `${root}/node_modules/dsh-vision-router/lib/local-remote-settings-permission.js`
 const marketClientFile = `${root}/node_modules/dshmarket/client/client.js`
+const marketHttpFile = `${root}/node_modules/dshmarket/lib/http.js`
 
 const clientBefore = "const ALL_TOGGLE_KEYS = [...TOGGLE_KEYS, ...ADVANCED_TOGGLE_KEYS, ...LOCAL_TOGGLE_KEYS, ...PRIVACY_TOGGLE_KEYS]"
 const clientAfter = "const ALL_TOGGLE_KEYS = [...TOGGLE_KEYS, ...ADVANCED_TOGGLE_KEYS, ...LOCAL_TOGGLE_KEYS, ...PRIVACY_TOGGLE_KEYS, 'allowRemoteSettings']"
@@ -74,6 +75,24 @@ function patchMarketUpdateResponse(source) {
   return source.slice(0, parseStart) + replacement + source.slice(parseEnd + parseEndToken.length)
 }
 
+function patchMarketApplicationStatus(source) {
+  const before = `export function sendJson(response, status, payload) {
+    response.writeHead(status, {`
+  const after = `export function sendJson(response, status, payload) {
+    // HTTP 502 is reserved for failures at a gateway boundary. dsh-market
+    // also used it for ordinary package-manager, validation, rollback, and
+    // activation failures. Public gateways commonly replace every 502 body
+    // with their own HTML page, hiding the structured JSON error and actions
+    // such as the fresh-release "Update now" retry. Keep the application
+    // failure body intact by using 422 at the HTTP boundary instead.
+    const responseStatus = status === 502 ? 422 : status;
+    response.writeHead(responseStatus, {`
+
+  return source.includes('const responseStatus = status === 502 ? 422 : status;')
+    ? source
+    : replaceExactly(source, before, after)
+}
+
 const client = read(clientFile)
 const permission = read(permissionFile)
 if (client !== undefined && permission !== undefined) {
@@ -105,5 +124,16 @@ if (market !== undefined) {
   } else if (nextMarket !== market) {
     fs.writeFileSync(marketClientFile, nextMarket, 'utf8')
     process.stderr.write('[dsh] fixed dsh-market non-JSON update responses\n')
+  }
+}
+
+const marketHttp = read(marketHttpFile)
+if (marketHttp !== undefined) {
+  const nextMarketHttp = patchMarketApplicationStatus(marketHttp)
+  if (nextMarketHttp === undefined) {
+    process.stderr.write('[dsh] market application-status patch skipped: server source is not recognized\n')
+  } else if (nextMarketHttp !== marketHttp) {
+    fs.writeFileSync(marketHttpFile, nextMarketHttp, 'utf8')
+    process.stderr.write('[dsh] kept dsh-market application errors out of gateway HTTP 502 responses\n')
   }
 }
