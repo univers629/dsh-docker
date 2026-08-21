@@ -174,7 +174,10 @@ await evaluate(`new Promise(resolve => {
 
 async function evaluate(expression) {
   const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
-  if (result.exceptionDetails) throw new Error(result.exceptionDetails.text)
+  if (result.exceptionDetails) {
+    const details = result.exceptionDetails
+    throw new Error(details.exception?.description || details.exception?.value || details.text || 'browser evaluation failed')
+  }
   return result.result?.value
 }
 
@@ -289,7 +292,7 @@ if (opened) {
       }),
     }
     const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
-    valueSetter?.call(textarea, textarea.value + '\n' + 'scroll-probe: true\n'.repeat(240))
+    valueSetter?.call(textarea, textarea.value + '\\n' + 'scroll-probe: true\\n'.repeat(240))
     textarea.dispatchEvent(new Event('input', { bubbles: true }))
     window.__dshConfigScrollProbe.onScroll = () => {
       const probe = window.__dshConfigScrollProbe
