@@ -17,6 +17,10 @@ if [ "$(id -u)" = "0" ]; then
     node /usr/local/bin/link-modules.mjs
   fi
 
+  if [ -f /usr/local/bin/install-docker-control.mjs ]; then
+    node /usr/local/bin/install-docker-control.mjs
+  fi
+
   if [ -f /usr/local/bin/patch-profile-plugins.mjs ]; then
     node /usr/local/bin/patch-profile-plugins.mjs
   fi
