@@ -126,7 +126,7 @@ uv pip install mcp httpx
 
 当用户要求安装、更新或删除 DSH 插件（例如 `dsh-better-sidebar`、`dsh-vision-router`）时：
 
-使用内置的 `/usr/local/bin/manage-dsh-plugin`。它会用中文标明每个阶段、保留 pnpm/DSH 的真实输出、校验组合后的 profile，并且只在当前 Agent 回合完成持久化后安排 DSH 重启。这里的 profile 校验只证明配置能够解析，不证明插件的前端入口或功能已经生效。
+使用内置的 `/usr/local/bin/manage-dsh-plugin`。它会用中文标明每个阶段、保留 pnpm/DSH 的真实输出、校验组合后的 profile，并且只在当前 Agent 回合完成持久化后安排 DSH 重启。这里的 profile 校验只证明配置能够解析，不证明插件的前端入口或功能已经生效；安装命令返回时，重启和依赖重新链接尚未开始。
 
 ```sh
 manage-dsh-plugin install <package-name>@latest
@@ -151,7 +151,7 @@ Vision Router 的 `allowRemoteSettings` 是用户明确控制的安全权限，�
 辅助脚本成功后，立即发送一条简短的中文完成回复，让当前回合结束并执行已安排的重启。例如：
 
 ```text
-插件 `<package-name>` 的包管理操作已完成并写入持久化 web profile，profile 配置解析通过。DSH 会在本轮回复结束后自动重启；重启结果和插件前端是否生效尚未验证，页面恢复后还需按该插件自身的入口与功能检查。
+插件 `<package-name>` 已写入持久化 web profile，profile 配置解析通过，但前端尚未确认生效。DSH 会在本轮回复结束后自动重启并加载插件；本轮不会等待重启完成后再补发通知。页面会短暂断开，请等待约 30～60 秒（复杂插件可能接近 1 分钟）后再刷新，过早刷新仍看不到插件属于正常现象。超过 90 秒仍未出现时，再查看最近 500 行日志和插件自身入口。
 ```
 
 不要假定所有插件都有设置页、侧边栏或按钮。只有在阅读该插件说明或源码并实际验证页面后，才向用户说明它的具体入口和生效状态。

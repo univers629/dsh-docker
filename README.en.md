@@ -144,7 +144,7 @@ Lessons learned from real-world deployments and integrated out of the box:
 
 ### 2. Safe plugin lifecycle management
 - `procps` remains available for diagnostics, and `/usr/local/bin/manage-dsh-plugin` handles plugin installation, updates, removal, and profile validation.
-- The helper shows staged status around the package-manager and validation output, then precisely and gracefully restarts DSH after the current Agent turn is durable, avoiding an unexplained unknown tool outcome. Its output distinguishes a persisted profile change, parse validation, a scheduled restart, and frontend behavior that still requires post-restart verification; it does not present generic config validation as proof that a plugin-specific settings page or button is live.
+- The helper shows staged package-manager and validation status, then gracefully restarts DSH only after the current Agent turn is durable. Its single pre-restart notice says that the package is persisted but the frontend is not yet verified, that restart begins after the turn ends, that no post-restart notice will follow, and that users should wait 30–60 seconds (complex plugins may take about a minute) before refreshing. If it is still absent after 90 seconds, inspect the recent logs and the plugin's own entry point.
 
 ---
 
