@@ -8,7 +8,12 @@ services:
     hostname: dsh
     restart: unless-stopped
     ports:
-      - "3080:3080"
+      # Keep the public entry behind the authenticated reverse proxy. Docker
+      # must not publish the privileged loopback bridge on every interface.
+      - "${DSH_BIND_HOST:-127.0.0.1}:3080:3080"
+    networks:
+      - default
+      - dsh-private
     environment:
       DSH_HOME: /data/dsh
       DSH_AGENTS_HOME: /data/agents
@@ -31,3 +36,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+networks:
+  dsh-private:
+    # Set DSH_DOCKER_NETWORK=dpanel-local and
+    # DSH_DOCKER_NETWORK_EXTERNAL=true on a VPS where DPanel is attached to
+    # that network. The default keeps local installs self-contained.
+    name: "${DSH_DOCKER_NETWORK:-dsh-private}"
+    external: ${DSH_DOCKER_NETWORK_EXTERNAL:-false}

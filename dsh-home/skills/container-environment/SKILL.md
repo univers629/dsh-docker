@@ -19,7 +19,7 @@ You run inside a production Docker container for DeepSeek Harness (DSH). This do
 | **Python** | **Python 3.13** | `/usr/bin/python3`, `/usr/local/bin/python`, pip3, venv |
 | **Tool Runner** | **uv & uvx** | `/usr/local/bin/uv`, `/usr/local/bin/uvx` (Ultrafast Python package & MCP runner) |
 | **Process Manager**| **procps** | `pkill`, `pgrep`, `ps`, `kill` built-in |
-| **Reverse Proxy** | **Nginx 1.26+** | Built-in loopback rewrite proxy listening on `0.0.0.0:3080` forwarding to `127.0.0.1:3081` |
+| **Reverse Proxy** | **Nginx 1.26+** | Built-in loopback rewrite proxy listening on private `127.0.0.1:3080` (or an explicitly configured private Docker gateway) and forwarding to `127.0.0.1:3081` |
 
 ---
 
@@ -143,6 +143,8 @@ manage-dsh-plugin restart
 该入口会校验 `/run/dsh.pid` 对应的确实是 DSH 主进程，并在当前 Agent 回合结束后只终止这个目标进程；容器现有的 `restart: unless-stopped` 策略会负责重新拉起它。不要在容器内执行 `docker compose`，也不要在前台 Bash 中使用 `pkill`、`kill` 或 `kill -9`。重启命令返回后应先用中文说明“已安排重启”，让当前回复正常结束，再在下一轮查看状态和最近 500 行日志确认结果。
 
 Vision Router 的 `allowRemoteSettings` 是用户明确控制的安全权限，不是插件安装或 trusted host 配置的一部分。除非用户在当前请求中明确要求开启或关闭它，否则 Agent 不得代为调用授权接口、修改 `/data/dsh/settings.yaml`，或声称该权限已经改变。`DSH_TRUSTED_HOSTS` 只声明允许的请求 authority，不等于远程设置授权。
+
+公网访问使用 host 设置的前提是：前置入口已经完成认证，且宿主机的 3080 只监听私有接口。`DSH_PUBLIC_LOCAL_MODE` Cookie 仅用于让浏览器选择官方 host 设置镜像，不是后端授权凭据；不要把 3080 绑定到 `0.0.0.0`。
 
 不要在前台 Bash 调用后追加 `pkill`、`kill` 或第二条重启命令。辅助脚本已经在回合边界后安排了一次精确的优雅重启。在前台调用内杀死 DSH 会让界面只显示“调用被中断，结果未知”。
 

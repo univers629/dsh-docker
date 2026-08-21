@@ -59,8 +59,8 @@ This project delivers a solid, zero-friction, production-grade deployment runtim
    - All user assets and toolchains live strictly under `./data` (environment/sessions/configs/MCP/subagents) and `./workspace` (project code). Host backup and migration only require archiving these two directories.
 2. **100% Local Self-Contained Build**:
    - Free from external pre-built registry dependencies. Docker builds straight from upstream official source with automated sandbox patches.
-3. **Boundary-Preserving Reverse Proxy**:
-   - Built-in Nginx forwards requests while preserving the browser's real `Host`, `Origin`, and protocol headers. Trusted hosts authorize request authority only; they do not bypass remote settings permissions.
+3. **Authenticated Public-Local Mode**:
+   - The public entry must be protected by Cloudflare Access, Basic Auth, or a private tunnel. The outer proxy sends authenticated traffic to a private DSH port, and the container proxy presents it to the official server as loopback. Official settings, credentials, and plugin pages therefore use the same host persistence path without changing the upstream privileged-method set.
 4. **Autonomous Agent Governance & Security Guard**:
    - Container startup automatically corrects mount volume permissions (running securely as `node` via `gosu`), guards `.credentials.yaml` (`600`) and SSH key permissions, preinstalls `procps` (`pkill`/`pgrep`), and whitelists `/data` in all sandboxes.
 
@@ -70,10 +70,10 @@ This project delivers a solid, zero-friction, production-grade deployment runtim
 
 ```mermaid
 graph TD
-    User["🌐 External Request (Browser / Public Domain / dpanel / LAN IP)"] -->|Port 3080| NGINX["🛡️ Builtin Nginx Proxy (Port 3080)"]
+    User["🌐 Authenticated Request (Public Domain / SSH Tunnel / dpanel)"] -->|Private port 3080| NGINX["🛡️ Builtin Nginx Proxy (Port 3080)"]
     
     subgraph DSH Docker Container
-        NGINX -->|Preserves Host / Origin<br>proxies to 127.0.0.1:3081| BACKEND["⚙️ DSH Engine (Port 3081)<br>(Debian 13 + Node 24 + Python 3.13 + uv)"]
+        NGINX -->|Rewrites authenticated traffic to loopback<br>proxies to 127.0.0.1:3081| BACKEND["⚙️ DSH Engine (Port 3081)<br>(Debian 13 + Node 24 + Python 3.13 + uv)"]
         
         BACKEND -->|Read/Write Sessions & Settings| V1["/data/dsh ($DSH_HOME)"]
         BACKEND -->|User Toolchain & Subagent CLIs| V2["/data/home ($HOME)"]
@@ -102,7 +102,7 @@ graph TD
 | **Daily Management** | **Windows** | Double-click **`dsh.bat`** or `.\dsh.bat [start\|stop\|logs]` | Unified management CLI |
 | **Daily Management** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | Unified management CLI |
 | **Sync Official Updates** | **All OS** | `.\dsh.bat update` or `./dsh.sh update` | Pulls latest master, rebuilds locally in seconds, prunes cache |
-| **Reverse Proxy (dpanel/1Panel)** | **All OS** | Docker dpanel: host-gateway IP (usually `http://172.17.0.1:3080`); host Nginx: `http://127.0.0.1:3080` | Forward to host static port: proxy **never breaks across rebuilds** |
+| **Reverse Proxy (dpanel/1Panel)** | **All OS** | Prefer joining dsh to dpanel's Docker network and proxying to `http://dsh:3080`; otherwise use `http://127.0.0.1:3080` and keep `DSH_BIND_HOST` private | Rebuilds replace only dsh; persistent data remains mounted |
 
 ---
 
@@ -155,9 +155,9 @@ The upstream frontend selects the settings scope based on whether the connection
 ```javascript
 settingsScope: connection.isLoopback ? "host" : "memory"
 ```
-Loopback access can use the official host settings scope. Public access follows the upstream restricted memory scope and must not be made writable by spoofing loopback headers. Keeping visibility, authorization, and persistence aligned prevents a page from appearing editable while writes fail their readback check.
+Loopback access can use the official host settings scope. Public access enters that scope only after an authenticated, source-restricted proxy has reached the private 3080 bridge; the container Nginx then presents the request as loopback. The browser receives `DSH_PUBLIC_LOCAL_MODE=1` and selects the same host settings mirror. The cookie is not an authentication credential, and the backend still receives only internal loopback requests.
 
-The container Nginx only proxies traffic and preserves the caller's authority. Vision Router exposes its own controlled `/vision-router-settings/*` RPC for capability and permission status; that is separate from the DSH generic settings API.
+Vision Router exposes its own controlled RPC for capability and permission status; that is separate from the DSH generic settings API. Plugins do not need per-plugin public-host adaptations.
 
 When using a public tunnel or reverse proxy, copy `.env.example` to `.env` and set `DSH_TRUSTED_HOSTS`. The variable accepts comma-separated `host[:port]` entries, for example `agent.example.com,admin.example.com`. This trusted-host list only satisfies the browser request authority fence; it does not enable remote plugin settings writes. Vision Router's "allow trusted Host remote settings" switch remains an explicit security setting in its own settings page. It can be left empty for loopback-only access.
 
@@ -200,13 +200,13 @@ The container includes preconfigured `PATH`: `$HOME/.local/bin` and `$HOME/.npm-
 ## 🌐 Reverse Proxy & dpanel Stability Guide
 
 ### 1. Fixing dpanel Re-forwarding After Rebuilds
-- **Docker dpanel**: Run `sudo docker exec dpanel getent hosts host.dpanel.local` to obtain the host-gateway IP, then point the proxy to port `3080` on that IP, for example **`http://172.17.0.1:3080`**. Inside the dpanel container, `127.0.0.1` refers to dpanel itself. Do not enter `host.dpanel.local` directly: dpanel's generated dynamic Nginx upstream uses Docker DNS and may not read this alias from `/etc/hosts`.
-- **Nginx/1Panel running directly on the host**: Point the proxy to **`http://127.0.0.1:3080`**.
-- **Principle**: Host port 3080 is static. Regardless of container rebuilds, the forward rule remains permanently valid.
+- **Docker dpanel**: Join dsh to dpanel's Docker network and proxy to **`http://dsh:3080`** (or a stable alias in that network). If a host-gateway route is required, set `DSH_BIND_HOST=172.17.0.1` in `.env`; never use `0.0.0.0`.
+- **Nginx/SSH tunnel on the host**: Point the proxy to **`http://127.0.0.1:3080`**.
+- **Principle**: Port 3080 is private. Rebuilding dsh replaces only the image; `data/` and `workspace/` remain mounted.
 
-> 💡 **dpanel 1-Line Reconnection**: If using `dsh.pod.dpanel.local` and encountering 502 after recreating a container, reconnect the bridge in 1 second:
+> 💡 **dpanel network connection**: If using a separate dpanel network, attach the running container (use the actual network name):
 > ```bash
-> sudo docker network connect --alias dsh.pod.dpanel.local dpanel-local dsh
+> sudo docker network connect --alias dsh dpanel-local dsh
 > ```
 
 ### 2. Standard Host Nginx Configuration
@@ -236,11 +236,11 @@ server {
 ## 🔒 Security Hardening for Public Access
 
 > [!WARNING]
-> DeepSeek Harness does not have native authentication. Use one of the following methods when exposing port 3080 to the public:
+> DeepSeek Harness has no native authentication. Keep 3080 private and expose it only through an authenticated reverse proxy; never set `DSH_BIND_HOST=0.0.0.0`.
 
-1. **Cloudflare Zero Trust Tunnels (Recommended)**: Point tunnel to `http://localhost:3080` and enable GitHub/Email OAuth access.
-2. **HTTP Basic Auth**: Add `.htpasswd` authentication at host reverse proxy.
-3. **Tailscale / Private VPN**: Restrict Web UI access to private VPN subnet.
+1. **Cloudflare Access (Recommended)**: Keep the Access policy and allow only Cloudflare source ranges plus local tunnel traffic at the origin for this hostname.
+2. **Cloudflare Zero Trust Tunnel**: Point the tunnel to `http://localhost:3080` and enable an Access policy.
+3. **HTTP Basic Auth or private VPN**: Protect the host reverse proxy and keep the DSH port private.
 
 ---
 

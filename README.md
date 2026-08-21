@@ -59,8 +59,8 @@ curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/inst
    - 用户的所有资产与数据仅集中在 `./data`（环境/会话/配置/MCP/子智能体）与 `./workspace`（项目代码）中，宿主机无任何散碎系统垃圾，备份迁移只需打包两个目录。
 2. **纯本地自主闭环构建 (100% Local Self-Contained Build)**：
    - 彻底摆脱对第三方镜像仓库的依赖，本地 Docker 自动抓取官方最新源码、自动注入沙箱补丁并完成编译，确保代码链路 100% 纯净可审计。
-3. **保留请求边界的安全反代 (Boundary-Preserving Reverse Proxy)**：
-   - 容器内部内置轻量级反代机制，保留浏览器真实的 `Host`、`Origin` 与协议头，让 DSH 能正确区分回环请求和公网请求；trusted host 只用于明确允许的请求 authority，不会绕过远程设置权限。
+3. **认证后的公网本地模式 (Authenticated Public-Local Mode)**：
+   - 公网入口必须经过 Cloudflare Access、Basic Auth 或私有隧道；外层反代将已认证请求送入只绑定私有接口的 DSH 端口，容器内部再以 `127.0.0.1` 访问官方 DSH。这样所有官方设置、凭据和插件页面都使用同一套 host 持久化逻辑，不修改官方后端权限集合。
 4. **智能体全权限数据治理与安全守护 (Agent Governance & Security Guard)**：
    - 容器启动自动纠正数据卷属主权限（`gosu node` 降权安全运行），严格守护 `.credentials.yaml`（`600`）与 SSH 密钥权限，预装 `procps`（`pkill`/`pgrep`），沙箱白名单完全放行持久化目录。
 
@@ -70,10 +70,10 @@ curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/inst
 
 ```mermaid
 graph TD
-    User["🌐 外部访问 (浏览器 / 公网域名 / dpanel / 局域网IP)"] -->|端口 3080| NGINX["🛡️ 容器内置 Nginx 反代 (端口 3080)"]
+    User["🌐 已认证访问 (公网域名 / SSH 隧道 / dpanel)"] -->|私有端口 3080| NGINX["🛡️ 容器内置 Nginx 反代 (端口 3080)"]
     
     subgraph DSH Docker 隔离容器
-        NGINX -->|保留真实 Host / Origin<br>转发至 127.0.0.1:3081| BACKEND["⚙️ DSH 核心引擎 (端口 3081)<br>(Debian 13 + Node 24 + Python 3.13 + uv)"]
+        NGINX -->|认证请求改写为 loopback<br>转发至 127.0.0.1:3081| BACKEND["⚙️ DSH 核心引擎 (端口 3081)<br>(Debian 13 + Node 24 + Python 3.13 + uv)"]
         
         BACKEND -->|读写会话/插件/设置| V1["/data/dsh ($DSH_HOME)"]
         BACKEND -->|读写用户工具链/Subagent CLI| V2["/data/home ($HOME)"]
@@ -102,7 +102,7 @@ graph TD
 | **日常管理 (启动/停止/日志)** | **Windows** | 双击 **`dsh.bat`** 或 `.\dsh.bat [start\|stop\|logs]` | 统一高颜值管理 CLI |
 | **日常管理 (启动/停止/日志)** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | 统一高颜值管理 CLI |
 | **同步官方最新源码** | **全平台** | `.\dsh.bat update` 或 `./dsh.sh update` | 在线拉取官方最新 Commit，秒级重新编译，自动清理垃圾缓存 |
-| **面板反代管理 (dpanel/1Panel)** | **全平台** | Docker 版 dpanel 填写宿主机网关 IP（通常为 `http://172.17.0.1:3080`）；宿主机直接运行的 Nginx 填写 `http://127.0.0.1:3080` | 走宿主机静态映射端口，容器无论如何更新重建，**反代永远不失效** |
+| **面板反代管理 (dpanel/1Panel)** | **全平台** | 推荐将 DSH 加入 dpanel 网络并使用容器别名；否则宿主机 Nginx/SSH 隧道使用 `http://127.0.0.1:3080`，不要绑定 `0.0.0.0` | 端口只在私有接口监听，数据目录独立持久化，重建 dsh 不影响其他容器 |
 
 ---
 
@@ -156,9 +156,9 @@ DeepSeek Harness 官方前端在 `packages/client/ui-settings/lib/client.js` 中
 // 官方原生判断：
 settingsScope: connection.isLoopback ? "host" : "memory"
 ```
-回环访问可以使用 DSH 官方的 host settings；公网访问则按官方规则使用受限的 memory scope，不能通过反代伪装成回环来获得写权限。这样页面的可见性、写入权限和落盘结果保持一致，避免出现“页面能编辑但保存 readback-mismatch”的假成功。
+回环访问可以使用 DSH 官方的 host settings。公网访问只有在前置认证、源站限制和私有 3080 同时成立时，才会由容器 Nginx 转换为内部 loopback；浏览器通过 `DSH_PUBLIC_LOCAL_MODE=1` Cookie 选择同一套 host settings 镜像。Cookie 不是认证凭据，后端仍只接受容器内部的 loopback 请求。
 
-容器内 Nginx 只做转发，不改写为 `127.0.0.1`。Vision Router 的配置页通过自身的受控 `/vision-router-settings/*` RPC 显示能力与权限状态；这与 DSH 通用 settings API 是两条不同的权限边界。
+Vision Router 的配置页通过自身的受控 RPC 显示能力与权限状态；这与 DSH 通用 settings API 是两条不同的权限边界。插件无需单独适配公网域名。
 
 如果通过隧道或反向代理使用公网域名，请复制 `.env.example` 为 `.env`，填写 `DSH_TRUSTED_HOSTS`。该变量支持逗号分隔的多个 `host[:port]`，例如 `agent.example.com,admin.example.com`。这里的 trusted host 只解决浏览器请求的 authority 校验，不会自动开启插件的远程写设置权限；Vision Router 的“允许可信 Host 远程修改设置”仍由其设置页中的安全开关控制。仅通过回环地址访问时可以留空。
 
@@ -203,13 +203,13 @@ environment:
 ### 1. dpanel / 宝塔 / 1Panel 转发“重建后失效”的根治方案
 
 在各种 Docker 管理面板中添加反向代理时：
-- **Docker 版 dpanel**：先运行 `sudo docker exec dpanel getent hosts host.dpanel.local` 查询宿主机网关 IP，再把代理目标填写为该 IP 的 `3080` 端口，例如 **`http://172.17.0.1:3080`**。`127.0.0.1` 在 dpanel 容器内只代表 dpanel 自身；同时不要直接填写 `host.dpanel.local`，因为 dpanel 生成的动态 Nginx 上游使用 Docker DNS，可能不会读取 `/etc/hosts` 中的这个别名。
-- **宿主机直接运行的 Nginx/1Panel**：代理目标填写 **`http://127.0.0.1:3080`**。
-- **原理**：本项目已固化宿主机映射端口 `3080:3080`。容器无论怎么重建、销毁、升级，宿主机端口永远固定，**面板反代一次配置终身有效**！
+- **Docker 版 dpanel**：将 dsh 接入 dpanel 使用的 Docker 网络，并把代理目标设置为 **`http://dsh:3080`**（或该网络中的固定别名）。如果不能改网络，才使用宿主机网关地址；此时 `.env` 中设置 `DSH_BIND_HOST=172.17.0.1`，不能设置 `0.0.0.0`。
+- **宿主机直接运行的 Nginx/SSH 隧道**：代理目标填写 **`http://127.0.0.1:3080`**。
+- **原理**：3080 只监听私有接口，公网流量必须先通过认证反代；容器重建只替换 dsh 镜像，不替换 `data/` 与 `workspace/`。
 
-> 💡 **dpanel 专属一键连网命令**：若使用 `dsh.pod.dpanel.local` 并在重构容器后遇到 502，只需执行单行命令立即打通网桥：
+> 💡 **dpanel 专属网络连接**：若使用独立网络，可执行以下命令把现有 dsh 接入 dpanel 网络（网络名称以实际部署为准）：
 > ```bash
-> sudo docker network connect --alias dsh.pod.dpanel.local dpanel-local dsh
+> sudo docker network connect --alias dsh dpanel-local dsh
 > ```
 
 ### 2. 标准 Nginx 反向代理配置
@@ -239,11 +239,10 @@ server {
 ## 🔒 公网访问安全加固指南
 
 > [!WARNING]
-> DeepSeek Harness 原生未设登录鉴权，若将 3080 端口直接暴露在公网，存在被他人调用的风险。建议采用以下安全方案之一：
+> DeepSeek Harness 原生未设登录鉴权。3080 必须保持私有监听，公网只允许经过认证的反向代理访问；不要把 `DSH_BIND_HOST` 设置为 `0.0.0.0`。
 
-- **方案 A：Cloudflare Zero Trust Tunnels（推荐）**
-  - 将 Tunnel 指向 `http://localhost:3080`；
-  - 开启 Access 策略，通过 GitHub / Google OAuth 或邮箱验证码验证访问。
+- **方案 A：Cloudflare Access（推荐）**：保留站点 Access 策略，并在源站 Nginx/DPanel 对该域名只放行 Cloudflare 网段与本机隧道地址。
+- **方案 B：Cloudflare Zero Trust Tunnel**：将 Tunnel 指向 `http://localhost:3080`，并开启 Access 策略。
 - **方案 B：Host Nginx HTTP Basic Auth**
   - 在宿主机反代配置中启用账号密码保护（`auth_basic`）。
 - **方案 C：Tailscale / WireGuard 私有内网**
