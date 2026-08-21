@@ -180,6 +180,12 @@ environment:
 
 ## 🔌 子智能体 CLI 与 MCP 服务器扩展指南
 
+### 内置 DSH 控制按钮
+
+镜像内置 `dsh-docker-control` 插件。打开 Web 设置后，设置内容标题栏会显示“重启 DSH”按钮；点击后会先确认，再通过受保护的回环接口安排重启，并在服务恢复后自动刷新。它不依赖 `dsh-market`，也不会自动重启。
+
+容器中的 DSH 主进程以非 root 的 `node` 用户运行。`DSH_PERMISSION_MODE=danger-full-access` 只影响 DSH 沙箱路径，不等于 Linux root 权限，因此 Agent 不能直接修改 `/var/lib/apt` 等系统目录。需要系统工具链时，应在 Dockerfile 的 runtime 阶段预装，或使用用户态的 `pnpm`、`npm`、`uv` 安装到持久化的 `/data/home`；不要在会话中把宿主机 apt 与容器 apt 混用。
+
 ### 1. 安装子 Agent CLI 工具（容器重建不丢失）
 容器内置全局 PATH：`$HOME/.local/bin` 与 `$HOME/.npm-global/bin`。
 - **Python 工具 (如 aider, goose)**：`uv tool install aider-chat` 或 `pip install --user <pkg>`，生成命令持久保存在 `/data/home/.local/bin`；

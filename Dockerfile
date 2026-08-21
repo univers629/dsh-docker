@@ -86,12 +86,14 @@ COPY bin/manage-dsh-plugin /usr/local/bin/manage-dsh-plugin
 COPY bin/link-modules.mjs /usr/local/bin/link-modules.mjs
 COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY bin/patch-profile-plugins.mjs /usr/local/bin/patch-profile-plugins.mjs
+COPY bin/install-docker-control.mjs /usr/local/bin/install-docker-control.mjs
 COPY dsh-home/ /etc/dsh-home/
+COPY dsh-home/docker-control/ /opt/dsh-docker-control/
 COPY nginx/dsh-nginx.conf /etc/dsh/nginx.conf
 
 RUN mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
     && chown -R node:node /opt /data /workspace \
-    && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/patch-profile-plugins.mjs
+    && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs
 
 ENV DSH_HOME=/data/dsh \
     DSH_AGENTS_HOME=/data/agents \
