@@ -9,6 +9,9 @@
     "./client": "./client/client.js",
     "./package.json": "./package.json"
   },
+  "dependencies": {
+    "yaml": "2.9.0"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

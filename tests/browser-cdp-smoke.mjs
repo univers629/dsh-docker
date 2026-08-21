@@ -218,10 +218,37 @@ if (opened) {
     dialog: Boolean(document.querySelector('[role="dialog"]')),
     buttons: [...document.querySelectorAll('[role="dialog"] button')].map(button => button.innerText.trim()).filter(Boolean),
     restart: [...document.querySelectorAll('[role="dialog"] button')].some(button => /重启 DSH|Restart DSH/i.test(button.innerText)),
+    config: [...document.querySelectorAll('[role="dialog"] button')].some(button => /打开配置文件|Open configuration file/i.test(button.innerText)),
   })`))
   console.log(JSON.stringify({ phase: 'settings', settings, exceptions, consoleErrors }, null, 2))
   assert.equal(settings.dialog, true, 'settings dialog did not open')
   assert.equal(settings.restart, true, 'restart button did not render in settings action row')
+  assert.equal(settings.config, true, 'WebUI configuration editor button did not render in settings action row')
+
+  const configClicked = await evaluate(`(() => {
+    const button = [...document.querySelectorAll('[role="dialog"] button')].find(item => /打开配置文件|Open configuration file/i.test(item.innerText))
+    if (!button) return false
+    button.click()
+    return true
+  })()`)
+  assert.equal(configClicked, true, 'WebUI configuration editor button could not be clicked')
+  await sleep(1200)
+  const configEditor = JSON.parse(await evaluate(`JSON.stringify({
+    dialogs: document.querySelectorAll('[role="dialog"]').length,
+    textarea: Boolean(document.querySelector('textarea[aria-label="编辑配置文件"], textarea[aria-label="Edit configuration file"]')),
+    save: [...document.querySelectorAll('[role="dialog"] button')].some(button => /保存配置|Save configuration/i.test(button.innerText)),
+    bodyText: document.body?.innerText?.slice(-1600) ?? '',
+  })`))
+  console.log(JSON.stringify({ phase: 'config-editor', configEditor, exceptions, consoleErrors }, null, 2))
+  assert.ok(configEditor.dialogs >= 2, 'configuration editor modal did not open over settings')
+  assert.equal(configEditor.textarea, true, 'configuration editor textarea did not render')
+  assert.equal(configEditor.save, true, 'configuration editor save action did not render')
+  await evaluate(`(() => {
+    const button = [...document.querySelectorAll('[role="dialog"] button')].find(item => /取消|Cancel/i.test(item.innerText))
+    if (button) button.click()
+    return Boolean(button)
+  })()`)
+  await sleep(300)
 
   if (process.env.DSH_TEST_RESTART === '1') {
     const beforeRestart = await readStatus()

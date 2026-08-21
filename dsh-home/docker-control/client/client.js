@@ -6,7 +6,7 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
-    const { Button, Toast, IconRefreshOutline14 } = primitives
+    const { Button, Modal, Toast, IconRefreshOutline14 } = primitives
 
     const NS = 'dsh-docker-control'
     const h = React.createElement
@@ -20,6 +20,17 @@ window.__ModuleLoader__.load({
       restored: 'DSH 已重新启动',
       failed: '重启失败',
       timeout: '服务未在 60 秒内完成新一轮启动',
+      openConfig: '打开配置文件',
+      configTitle: '编辑配置文件',
+      configDescription: '修改后保存会写入 DSH 的 settings.yaml；配置语法错误不会保存。',
+      configLoading: '正在读取配置文件…',
+      configSave: '保存配置',
+      configCancel: '取消',
+      configSaving: '正在保存…',
+      configSaved: '配置已保存',
+      configLoadFailed: '读取配置文件失败',
+      configSaveFailed: '保存配置文件失败',
+      configConflict: '配置文件已在其他地方修改，请重新打开后再保存。',
     }
 
     const en = {
@@ -30,6 +41,17 @@ window.__ModuleLoader__.load({
       restored: 'DSH restarted',
       failed: 'Restart failed',
       timeout: 'The service did not report a new boot within 60 seconds',
+      openConfig: 'Open configuration file',
+      configTitle: 'Edit configuration file',
+      configDescription: 'Saving writes DSH settings.yaml; invalid configuration is rejected.',
+      configLoading: 'Reading configuration file…',
+      configSave: 'Save configuration',
+      configCancel: 'Cancel',
+      configSaving: 'Saving…',
+      configSaved: 'Configuration saved',
+      configLoadFailed: 'Could not read configuration file',
+      configSaveFailed: 'Could not save configuration file',
+      configConflict: 'The configuration changed elsewhere. Reopen it before saving.',
     }
 
     function fallbackText(key) {
@@ -178,6 +200,125 @@ window.__ModuleLoader__.load({
       return h(RestartActionBoundary, null, h(RestartAction, props))
     }
 
+    function ConfigEditor({ t }) {
+      const [open, setOpen] = React.useState(false)
+      const [text, setText] = React.useState('')
+      const [revision, setRevision] = React.useState(null)
+      const [phase, setPhase] = React.useState('idle')
+      const [error, setError] = React.useState(null)
+
+      const load = React.useCallback(() => {
+        setOpen(true)
+        setPhase('loading')
+        setError(null)
+        fetch('/dsh-docker-control/config', { cache: 'no-store' })
+          .then(async (response) => {
+            const body = await readJson(response)
+            if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
+            return body
+          })
+          .then((body) => {
+            setText(typeof body.text === 'string' ? body.text : '')
+            setRevision(typeof body.revision === 'string' ? body.revision : null)
+            setPhase('ready')
+          })
+          .catch((cause) => {
+            setPhase('error')
+            setError(String(cause && cause.message ? cause.message : cause))
+          })
+      }, [])
+
+      const close = React.useCallback(() => {
+        if (phase !== 'saving') setOpen(false)
+      }, [phase])
+
+      const save = React.useCallback(() => {
+        if (phase !== 'ready' || revision === null) return
+        setPhase('saving')
+        setError(null)
+        fetch('/dsh-docker-control/config', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text, revision }),
+        })
+          .then(async (response) => {
+            const body = await readJson(response)
+            if (!response.ok || body.ok !== true) {
+              const cause = new Error(body.error || `HTTP ${response.status}`)
+              cause.code = body.conflict === true ? 'CONFIG_CONFLICT' : undefined
+              throw cause
+            }
+            return body
+          })
+          .then((body) => {
+            setRevision(typeof body.revision === 'string' ? body.revision : revision)
+            setPhase('ready')
+            setError(translate(t, 'configSaved'))
+          })
+          .catch((cause) => {
+            setPhase('ready')
+            setError(cause && cause.code === 'CONFIG_CONFLICT'
+              ? translate(t, 'configConflict')
+              : `${translate(t, 'configSaveFailed')}: ${String(cause && cause.message ? cause.message : cause)}`)
+          })
+      }, [phase, revision, t, text])
+
+      const button = typeof Button === 'function'
+        ? h(Button, { variant: 'outline', size: 'sm', onClick: load }, translate(t, 'openConfig'))
+        : h('button', { type: 'button', onClick: load }, translate(t, 'openConfig'))
+      const body = phase === 'loading'
+        ? h('p', { role: 'status' }, translate(t, 'configLoading'))
+        : phase === 'error'
+          ? h('p', { role: 'alert' }, `${translate(t, 'configLoadFailed')}: ${error || ''}`)
+          : h('textarea', {
+              value: text,
+              onChange: event => setText(event.target.value),
+              spellCheck: false,
+              'aria-label': translate(t, 'configTitle'),
+              style: {
+                display: 'block',
+                boxSizing: 'border-box',
+                width: '100%',
+                minHeight: 'min(58vh, 520px)',
+                resize: 'vertical',
+                padding: '10px 12px',
+                border: '1px solid var(--dsw-alias-border-l2, #d9dde3)',
+                borderRadius: '8px',
+                background: 'var(--dsw-alias-bg-layer-1, #fff)',
+                color: 'var(--dsw-alias-label-primary, #1f2328)',
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                fontSize: '12px',
+                lineHeight: '1.5',
+              },
+            })
+      const notice = error === null || phase === 'error'
+        ? null
+        : h('p', { role: 'status', style: { margin: '8px 0 0', color: 'var(--dsw-alias-label-secondary, #6b7280)' } }, error)
+      const footer = h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '8px' } },
+        typeof Button === 'function'
+          ? h(Button, { variant: 'outline', size: 'sm', onClick: close, disabled: phase === 'saving' }, translate(t, 'configCancel'))
+          : h('button', { type: 'button', onClick: close, disabled: phase === 'saving' }, translate(t, 'configCancel')),
+        typeof Button === 'function'
+          ? h(Button, { variant: 'primary', size: 'sm', onClick: save, disabled: phase !== 'ready' }, phase === 'saving' ? translate(t, 'configSaving') : translate(t, 'configSave'))
+          : h('button', { type: 'button', onClick: save, disabled: phase !== 'ready' }, phase === 'saving' ? translate(t, 'configSaving') : translate(t, 'configSave')),
+      )
+      const modal = typeof Modal === 'function'
+        ? h(Modal, {
+            open,
+            onClose: close,
+            title: translate(t, 'configTitle'),
+            description: translate(t, 'configDescription'),
+            footer,
+            contentClassName: 'dsh-docker-control-config-editor',
+          }, body, notice)
+        : open ? h('div', { role: 'dialog', 'aria-modal': 'true' }, body, notice, footer) : null
+      return h(React.Fragment, null, button, modal)
+    }
+
+    function SafeConfigEditor(props) {
+      return h(RestartActionBoundary, null, h(ConfigEditor, props))
+    }
+
     function apply(ctx) {
       const fail = (phase, error) => {
         console.error(`[dsh-docker-control] ${phase} failed:`, error)
@@ -192,6 +333,14 @@ window.__ModuleLoader__.load({
             offZh()
           }
         }, 'dsh-docker-control: dictionaries')
+
+        ctx.slots.inject('settings.action', () => ctx.slots.register({
+          name: 'settings.action',
+          id: 'open-document',
+          priority: -10,
+          order: 0,
+          locale: NS,
+        }, SafeConfigEditor))
 
         ctx.slots.inject('settings.action', () => ctx.slots.register({
           name: 'settings.action',

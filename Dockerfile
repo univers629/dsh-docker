@@ -91,7 +91,10 @@ COPY dsh-home/ /etc/dsh-home/
 COPY dsh-home/docker-control/ /opt/dsh-docker-control/
 COPY nginx/dsh-nginx.conf /etc/dsh/nginx.conf
 
-RUN mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
+RUN cd /opt/dsh-docker-control \
+    && npm install --omit=dev --ignore-scripts --no-package-lock \
+    && npm cache clean --force \
+    && mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
     && chown -R node:node /opt /data /workspace \
     && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs
 
