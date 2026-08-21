@@ -5,8 +5,9 @@ window.__ModuleLoader__.load({
     var exports = module.exports
 
     const React = require('react')
+    const { createPortal } = require('react-dom')
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
-    const { Button, Modal, Toast, IconRefreshOutline14 } = primitives
+    const { Button, Toast, IconRefreshOutline14 } = primitives
 
     const NS = 'dsh-docker-control'
     const h = React.createElement
@@ -232,6 +233,18 @@ window.__ModuleLoader__.load({
         if (phase !== 'saving') setOpen(false)
       }, [phase])
 
+      React.useEffect(() => {
+        if (!open) return undefined
+        const onKeyDown = event => {
+          if (event.key !== 'Escape') return
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          close()
+        }
+        document.addEventListener('keydown', onKeyDown, true)
+        return () => document.removeEventListener('keydown', onKeyDown, true)
+      }, [close, open])
+
       const save = React.useCallback(() => {
         if (phase !== 'ready' || revision === null) return
         setPhase('saving')
@@ -302,17 +315,57 @@ window.__ModuleLoader__.load({
           ? h(Button, { variant: 'primary', size: 'sm', onClick: save, disabled: phase !== 'ready' }, phase === 'saving' ? translate(t, 'configSaving') : translate(t, 'configSave'))
           : h('button', { type: 'button', onClick: save, disabled: phase !== 'ready' }, phase === 'saving' ? translate(t, 'configSaving') : translate(t, 'configSave')),
       )
-      const modal = typeof Modal === 'function'
-        ? h(Modal, {
-            open,
-            onClose: close,
-            title: translate(t, 'configTitle'),
-            description: translate(t, 'configDescription'),
-            footer,
-            contentClassName: 'dsh-docker-control-config-editor',
-          }, body, notice)
-        : open ? h('div', { role: 'dialog', 'aria-modal': 'true' }, body, notice, footer) : null
-      return h(React.Fragment, null, button, modal)
+      // The settings page already owns a full-viewport backdrop-filter layer.
+      // Do not nest the generic Modal here: two composited masks fight while
+      // the textarea scrolls and make both dialogs visibly blink. This layer
+      // is a fixed, opaque editor surface with no second backdrop; the
+      // settings dialog remains stable behind it until the editor closes.
+      const editor = open
+        ? h('div', {
+            'data-dsh-config-editor-layer': 'true',
+            role: 'presentation',
+            onClick: event => { if (event.target === event.currentTarget) close() },
+            style: {
+              position: 'fixed',
+              inset: 0,
+              zIndex: 1100,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '16px',
+              boxSizing: 'border-box',
+              background: 'transparent',
+            },
+          }, h('div', {
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-label': translate(t, 'configTitle'),
+            onClick: event => event.stopPropagation(),
+            style: {
+              position: 'relative',
+              display: 'flex',
+              flexDirection: 'column',
+              width: 'min(880px, 100%)',
+              height: 'min(760px, calc(100vh - 32px))',
+              minHeight: 'min(420px, calc(100vh - 32px))',
+              overflow: 'hidden',
+              border: '1px solid var(--dsw-alias-border-inverted, #d9dde3)',
+              borderRadius: '16px',
+              background: 'var(--dsw-alias-bg-layer-2, #fff)',
+              boxShadow: 'var(--dsw-shadow-lv3, 0 16px 48px rgba(0, 0, 0, .22))',
+            },
+          }, h('div', {
+            style: {
+              flex: 'none',
+              padding: '18px 24px 12px',
+              borderBottom: '1px solid var(--dsw-alias-border-l2, #d9dde3)',
+            },
+          }, h('h2', { style: { margin: 0, fontSize: '16px', lineHeight: '24px', fontWeight: 500 } }, translate(t, 'configTitle')),
+          h('p', { style: { margin: '4px 0 0', fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-label-secondary, #6b7280)' } }, translate(t, 'configDescription'))),
+          h('div', { style: { flex: 1, minHeight: 0, padding: '16px 24px 0', display: 'flex', flexDirection: 'column' } }, body, notice),
+          h('div', { style: { flex: 'none', display: 'flex', justifyContent: 'flex-end', gap: '8px', padding: '12px 24px 18px' } }, footer)))
+        : null
+      return h(React.Fragment, null, button, editor === null ? null : createPortal(editor, document.body))
     }
 
     function SafeConfigEditor(props) {

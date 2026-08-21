@@ -28,15 +28,16 @@ const React = {
   Fragment: Symbol('Fragment'),
   createElement,
   useCallback: callback => callback,
+  useEffect: () => {},
   useRef: value => ({ current: value }),
   useState: value => [value, () => {}],
 }
 const primitives = {
   Button: function Button() {},
-  Modal: function Modal() {},
   Toast: function Toast() {},
   IconRefreshOutline14: function IconRefreshOutline14() {},
 }
+const ReactDOM = { createPortal: element => element }
 
 vm.runInNewContext(source, {
   console: { error: (...args) => { errors.push(args) }, log() {}, warn() {} },
@@ -52,11 +53,12 @@ const requests = []
 const client = registration.factory((request) => {
   requests.push(request)
   if (request === 'react') return React
+  if (request === 'react-dom') return ReactDOM
   if (request === '@deepseek-ai/dsh-client-ui-primitives') return primitives
   throw new Error(`unexpected module request: ${request}`)
 })
 
-assert.deepEqual(requests, ['react', '@deepseek-ai/dsh-client-ui-primitives'])
+assert.deepEqual(requests, ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'])
 assert.equal(typeof client.apply, 'function')
 assert.deepEqual(Array.from(client.inject), ['slots', 'locale'])
 
