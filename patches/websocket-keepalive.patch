@@ -1,0 +1,59 @@
+diff --git a/packages/client/connection/src/websocket-downlink.ts b/packages/client/connection/src/websocket-downlink.ts
+index 72ae5e9..c30a6ae 100644
+--- a/packages/client/connection/src/websocket-downlink.ts
++++ b/packages/client/connection/src/websocket-downlink.ts
+@@ -13,0 +14,8 @@ type Frame = MuxFrame | HostFrame
++/**
++ * Keep the event sockets active through authenticated reverse proxies and
++ * mobile networks that reap otherwise-idle WebSockets. Control-frame pings
++ * are handled by the WebSocket implementation and never enter the DSH
++ * downlink protocol, so they cannot be mistaken for upstream messages.
++ */
++const KEEPALIVE_INTERVAL_MS = 25_000
++
+@@ -55,2 +63,8 @@ export class WebSocketDownlinks {
+-  /** @param api - host API supplying the typed event streams. */
+-  constructor(private readonly api: ApiProxy) {}
++  /**
++   * @param api - host API supplying the typed event streams.
++   * @param keepaliveIntervalMs - Ping cadence; injectable for transport tests.
++   */
++  constructor(
++    private readonly api: ApiProxy,
++    private readonly keepaliveIntervalMs = KEEPALIVE_INTERVAL_MS,
++  ) {}
+@@ -107,2 +121,25 @@ export class WebSocketDownlinks {
+-      websocket.once('close', () => { abort.abort() })
+-      websocket.once('error', () => { abort.abort() })
++      let receivedPong = true
++      websocket.on('pong', () => { receivedPong = true })
++      const keepalive = setInterval(() => {
++        if (websocket.readyState !== WebSocket.OPEN) return
++        if (!receivedPong) {
++          websocket.terminate()
++          return
++        }
++        receivedPong = false
++        try {
++          websocket.ping()
++        } catch {
++          websocket.terminate()
++        }
++      }, this.keepaliveIntervalMs)
++      keepalive.unref()
++      const stopKeepalive = () => { clearInterval(keepalive) }
++      websocket.once('close', () => {
++        stopKeepalive()
++        abort.abort()
++      })
++      websocket.once('error', () => {
++        stopKeepalive()
++        abort.abort()
++      })
+@@ -112 +149 @@ export class WebSocketDownlinks {
+-      const pump = this.pump(websocket, open(abort.signal), abort)
++      const pump = this.pump(websocket, open(abort.signal), abort, stopKeepalive)
+@@ -121,0 +159 @@ export class WebSocketDownlinks {
++    stopKeepalive: () => void,
+@@ -133,0 +172 @@ export class WebSocketDownlinks {
++      stopKeepalive()
