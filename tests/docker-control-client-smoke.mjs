@@ -33,6 +33,7 @@ const React = {
 }
 const primitives = {
   Button: function Button() {},
+  Modal: function Modal() {},
   Toast: function Toast() {},
   IconRefreshOutline14: function IconRefreshOutline14() {},
 }
@@ -61,7 +62,7 @@ assert.deepEqual(Array.from(client.inject), ['slots', 'locale'])
 
 const dictionaries = []
 const effects = []
-let slot
+const slots = []
 const ctx = {
   effect(factory, label) {
     effects.push({ label, dispose: factory() })
@@ -78,7 +79,7 @@ const ctx = {
       return factory()
     },
     register(options, component) {
-      slot = { options, component }
+      slots.push({ options, component })
       return () => {}
     },
   },
@@ -90,20 +91,37 @@ assert.deepEqual(dictionaries.map(({ namespace, language }) => [namespace, langu
   ['dsh-docker-control', 'en'],
 ])
 assert.equal(effects[0].label, 'dsh-docker-control: dictionaries')
-assert.deepEqual(JSON.parse(JSON.stringify(slot.options)), {
+assert.equal(slots.length, 2)
+const configSlot = slots.find(({ options }) => options.id === 'open-document')
+const restartSlot = slots.find(({ options }) => options.id === 'dsh-docker-control-restart')
+assert.deepEqual(JSON.parse(JSON.stringify(configSlot.options)), {
+  name: 'settings.action',
+  id: 'open-document',
+  priority: -10,
+  order: 0,
+  locale: 'dsh-docker-control',
+})
+assert.deepEqual(JSON.parse(JSON.stringify(restartSlot.options)), {
   name: 'settings.action',
   id: 'dsh-docker-control-restart',
   order: 10,
   locale: 'dsh-docker-control',
 })
-assert.equal(Object.hasOwn(slot.options, 'inject'), false)
+assert.equal(Object.hasOwn(restartSlot.options, 'inject'), false)
 
-const safeTree = slot.component({ t: key => ({ restart: 'Restart DSH' })[key] ?? key })
+const safeTree = restartSlot.component({ t: key => ({ restart: 'Restart DSH' })[key] ?? key })
 const actionTree = safeTree.props.children
 const rendered = actionTree.type(actionTree.props)
 const button = rendered.props.children[0]
 assert.equal(button.type, primitives.Button)
 assert.equal(button.props.children, 'Restart DSH')
+
+const configSafeTree = configSlot.component({ t: key => ({ openConfig: 'Open configuration file' })[key] ?? key })
+const configActionTree = configSafeTree.props.children
+const configRendered = configActionTree.type(configActionTree.props)
+const configButton = configRendered.props.children[0]
+assert.equal(configButton.type, primitives.Button)
+assert.equal(configButton.props.children, 'Open configuration file')
 
 assert.doesNotThrow(() => {
   client.apply({
