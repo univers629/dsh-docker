@@ -63,6 +63,8 @@ Windows PowerShell 使用脚本块传参：
 
 `--root` 只让 DSH 主进程在容器内使用 UID 0，不会给容器增加 `privileged`、Docker Socket 或宿主机 root 权限；Nginx 仍以 `node` 用户运行。默认始终是普通 `node` 模式（这是容器内 UID 1000，不等同于宿主机当前登录用户）。安装器会先同步已有 Git 工程，再写入 `.env` 并强制重新创建 `dsh` 容器，确保新模式立即应用；如果检测到已提交源码修改或非 Git 目录会停止，避免覆盖用户文件。root 模式写入 bind mount 的新文件时可能产生宿主机 root 所有的文件，再次使用 `--user` 启动时入口会重新纠正 `/data` 和 `/workspace` 的属主。选择会写入工程目录 `.env` 的 `DSH_RUN_AS_ROOT`，后续更新和重启继续沿用。
 
+root 模式下，`apt install` / `apt-get install` 会把包和依赖下载并解压到持久化的 `/data/home/.local/toolchain`，并把命令链接到 `/data/home/.local/bin`；这些目录属于工具链持久化目录，容器重建后仍保留。`apt update`、查询等非安装操作仍使用 Debian 原生 APT。系统基础包仍应写入 Dockerfile，不建议把 `/usr`、`/var/lib/dpkg` 等系统目录挂载到宿主机。
+
 > [!TIP]
 > **⏱️ 构建耗时提示 (Build Duration Note)**：
 > - **初次全新构建**：由于需要从官方源码全量编译 Monorepo、前端产物及原生扩展，在普通 VPS 或 ARM 实例（如 Oracle ARM）上耗时通常约为 **300 ~ 360 秒（5~6 分钟）**，请耐心等待构建完成；
@@ -204,7 +206,7 @@ environment:
 
 镜像内置 `dsh-docker-control` 插件。打开 Web 设置后，设置内容标题栏会显示“重启 DSH”按钮；点击后会先确认，再通过受保护的回环接口安排重启，并在服务恢复后自动刷新。它不依赖 `dsh-market`，也不会自动重启。
 
-容器中的 DSH 主进程默认以非 root 的 `node` 用户运行。`DSH_PERMISSION_MODE=danger-full-access` 只影响 DSH 沙箱路径，不等于 Linux root 权限，因此 Agent 不能直接修改 `/var/lib/apt` 等系统目录。确实需要容器内系统级操作时，可使用上面的 `--root` 安装参数；该模式仍受 Docker 隔离、`no-new-privileges`、镜像能力和挂载路径限制。需要系统工具链时，应在 Dockerfile 的 runtime 阶段预装，或使用用户态的 `pnpm`、`npm`、`uv` 安装到持久化的 `/data/home`；不要在会话中把宿主机 apt 与容器 apt 混用。
+容器中的 DSH 主进程默认以非 root 的 `node` 用户运行。`DSH_PERMISSION_MODE=danger-full-access` 只影响 DSH 沙箱路径，不等于 Linux root 权限，因此 Agent 不能直接修改 `/var/lib/apt` 等系统目录。确实需要容器内系统级操作时，可使用上面的 `--root` 安装参数；该模式仍受 Docker 隔离、`no-new-privileges`、镜像能力和挂载路径限制。需要系统基础软件时，应在 Dockerfile 的 runtime 阶段预装；root 模式下交互执行 `apt install` 会把额外工具提取到持久化的 `/data/home/.local/toolchain`，命令链接在 `/data/home/.local/bin`，因此重建容器不会丢失。不要把宿主机 apt 与容器 apt 混用。
 
 ### 1. 安装子 Agent CLI 工具（容器重建不丢失）
 容器内置全局 PATH：`$HOME/.local/bin` 与 `$HOME/.npm-global/bin`。

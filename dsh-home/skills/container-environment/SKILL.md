@@ -66,7 +66,7 @@ To guarantee that your work, toolchains, and user data survive container restart
 ```
 
 ### 🚫 Anti-Patterns (Forbidden Placement)
-- **NEVER** write persistent user tools to `/usr`, `/root`, or `/var` (these are in the ephemeral container image layer and will be wiped on updates).
+- **NEVER** write persistent user tools to `/usr`, `/root`, or `/var` (these are in the ephemeral container image layer and will be wiped on updates). In root mode, `apt install` is redirected to `/data/home/.local/toolchain` and command links are placed in `/data/home/.local/bin`.
 - **NEVER** install Python tools with `sudo` — always use `uv tool install <pkg>`, `pip install --user <pkg>`, or create a virtual environment in `/data/mcp/` or `/workspace/`.
 
 ---

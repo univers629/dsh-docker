@@ -63,6 +63,8 @@ Windows PowerShell passes the switch through a script block:
 
 `--root` changes only the DSH process UID inside the container. It does not add Docker Socket access, `privileged`, or host-root capabilities; Nginx still runs as `node`. The installer first fast-forwards an existing Git checkout, then writes `.env` and force-recreates the `dsh` container so the selected mode is applied immediately. It stops instead of overwriting tracked local source changes or a non-Git directory. The default remains unprivileged `node` (container UID 1000, not the host's current login user). Root mode can create host-root-owned files in bind mounts; starting again with `--user` makes the entrypoint repair ownership under `/data` and `/workspace`. The choice is persisted as `DSH_RUN_AS_ROOT` in the project `.env` for later updates and restarts.
 
+In root mode, `apt install` / `apt-get install` downloads and extracts packages and dependencies into the persistent `/data/home/.local/toolchain`, then links commands into `/data/home/.local/bin`. These are the toolchain persistence directories, so installed tools survive container recreation. `apt update` and queries retain Debian's native behavior. Base system packages should remain in the Dockerfile; do not mount `/usr` or `/var/lib/dpkg` from the host.
+
 > [!TIP]
 > **⏱️ Build Duration Note**:
 > - **Initial Clean Build**: Because the build compiles the complete DSH monorepo, web frontend, and native extensions from scratch, it typically takes **300 ~ 360 seconds (5~6 minutes)** on standard VPS or ARM64 instances (e.g. Oracle ARM). Please allow it to complete.
