@@ -14,7 +14,6 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
     && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates python3 make g++ \
     && npm install -g pnpm@11.7.0 esbuild
@@ -57,12 +56,11 @@ FROM ${NODE_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="DeepSeek Harness Docker" \
       org.opencontainers.image.licenses="MIT"
 
-# 开启 runtime 阶段 APT 持久化缓存
+# 保留 APT 软件包缓存；APT 索引不挂载为临时 BuildKit 缓存，确保运行时可继续 apt install。
 RUN rm -f /etc/apt/apt.conf.d/docker-clean \
     && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
     && apt-get install -y --no-install-recommends \
        bash \
