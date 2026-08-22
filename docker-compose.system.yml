@@ -6,7 +6,6 @@ services:
       - dsh-system-usr-bin:/usr/bin
       - dsh-system-usr-lib:/usr/lib
       - dsh-system-usr-share:/usr/share
-      - dsh-system-usr-sbin:/usr/sbin
       - dsh-system-usr-include:/usr/include
       - dsh-system-usr-libexec:/usr/libexec
       - dsh-system-usr-games:/usr/games
@@ -24,9 +23,6 @@ volumes:
   dsh-system-usr-share:
     driver: local
     driver_opts: { type: none, o: bind, device: ./data/system/usr/share }
-  dsh-system-usr-sbin:
-    driver: local
-    driver_opts: { type: none, o: bind, device: ./data/system/usr/sbin }
   dsh-system-usr-include:
     driver: local
     driver_opts: { type: none, o: bind, device: ./data/system/usr/include }

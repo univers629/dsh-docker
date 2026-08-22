@@ -40,7 +40,7 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1
 | `/data/agents` | `data/agents` | 子智能体状态 |
 | `/workspace` | `workspace` | 项目工作区 |
 
-Linux 还会启用 `docker-compose.system.yml`。Debian 包仍安装在标准容器路径，相关路径外置到 `data/system/`：`/usr/bin`、`/usr/lib`、`/usr/share`、`/usr/sbin`、`/etc`、`/var/lib` 和 `/var/cache`。`/usr/local` 保留在镜像中，确保 DSH 自带运行文件随镜像更新。Windows 使用镜像系统层。
+Linux 还会启用 `docker-compose.system.yml`。Debian 包仍安装在标准容器路径，相关路径外置到 `data/system/`：`/usr/bin`、`/usr/lib`、`/usr/share`、`/usr/include`、`/usr/libexec`、`/etc`、`/var/lib` 和 `/var/cache`。`/usr/local` 与 `/usr/sbin` 保留在镜像/运行时层：Docker 的 `/sbin/docker-init` 注入依赖 `/usr/sbin`，不能被外置目录遮挡。Windows 使用镜像系统层。
 
 
 备份 Linux 安装时，保存 `data/`、`data/system/` 和 `workspace/`。

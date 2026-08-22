@@ -22,6 +22,7 @@ assert.match(files.systemCompose, /dsh-system-usr-bin/)
 assert.match(files.systemCompose, /dsh-system-usr-bin:\/usr\/bin/)
 assert.match(files.systemCompose, /dsh-system-var-lib:\/var\/lib/)
 assert.match(files.systemCompose, /device: \.\/data\/system\/usr\/bin/)
+assert.doesNotMatch(files.systemCompose, /target: \/usr\/sbin/)
 assert.doesNotMatch(files.dockerfile, /dsh-toolchain-apt|DSH_TOOLCHAIN_ROOT|XDG_DATA_DIRS=.*toolchain/)
 assert.match(files.dockerfile, /profile\.d\/dsh-toolchain\.sh/)
 

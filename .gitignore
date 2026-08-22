@@ -14,7 +14,6 @@ data/system/*
 !data/system/usr/bin/
 !data/system/usr/lib/
 !data/system/usr/share/
-!data/system/usr/sbin/
 !data/system/usr/include/
 !data/system/usr/libexec/
 !data/system/usr/games/

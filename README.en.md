@@ -40,7 +40,7 @@ The installer updates an existing Git checkout, writes the selected mode, and fo
 | `/data/agents` | `data/agents` | Shared subagent state |
 | `/workspace` | `workspace` | Project workspace |
 
-Linux also enables `docker-compose.system.yml`. Debian packages keep their normal container paths while `/usr/bin`, `/usr/lib`, `/usr/share`, `/usr/sbin`, `/etc`, `/var/lib`, and `/var/cache` are stored under matching directories in `data/system/`. `/usr/local` stays in the image so DSH runtime files update with the image. Windows keeps the system layer in the image.
+Linux also enables `docker-compose.system.yml`. Debian packages keep their normal container paths while `/usr/bin`, `/usr/lib`, `/usr/share`, `/usr/include`, `/usr/libexec`, `/etc`, `/var/lib`, and `/var/cache` are stored under matching directories in `data/system/`. `/usr/local` and `/usr/sbin` stay in the image/runtime layer: Docker injects `/sbin/docker-init` through the `/usr/sbin` symlink, so that path must not be shadowed. Windows keeps the system layer in the image.
 
 Back up `data/`, `data/system/`, and `workspace/` for a Linux installation.
 

@@ -21,7 +21,7 @@ fi
 if [ "$(uname -s)" = Linux ]; then
   SYSTEM_DIRS=(
     data/system/usr/bin data/system/usr/lib data/system/usr/share
-    data/system/usr/sbin data/system/usr/include data/system/usr/libexec
+    data/system/usr/include data/system/usr/libexec
     data/system/usr/games data/system/etc data/system/var/lib data/system/var/cache
   )
   mkdir -p "${SYSTEM_DIRS[@]}"
