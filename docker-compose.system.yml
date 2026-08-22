@@ -1,0 +1,47 @@
+services:
+  dsh:
+    volumes:
+      # Debian package paths stay standard inside the container. /usr/local
+      # remains in the image so DSH runtime files update with the image.
+      - dsh-system-usr-bin:/usr/bin
+      - dsh-system-usr-lib:/usr/lib
+      - dsh-system-usr-share:/usr/share
+      - dsh-system-usr-sbin:/usr/sbin
+      - dsh-system-usr-include:/usr/include
+      - dsh-system-usr-libexec:/usr/libexec
+      - dsh-system-usr-games:/usr/games
+      - dsh-system-etc:/etc
+      - dsh-system-var-lib:/var/lib
+      - dsh-system-var-cache:/var/cache
+
+volumes:
+  dsh-system-usr-bin:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/usr/bin }
+  dsh-system-usr-lib:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/usr/lib }
+  dsh-system-usr-share:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/usr/share }
+  dsh-system-usr-sbin:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/usr/sbin }
+  dsh-system-usr-include:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/usr/include }
+  dsh-system-usr-libexec:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/usr/libexec }
+  dsh-system-usr-games:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/usr/games }
+  dsh-system-etc:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/etc }
+  dsh-system-var-lib:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/var/lib }
+  dsh-system-var-cache:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/var/cache }
