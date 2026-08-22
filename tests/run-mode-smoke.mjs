@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 const files = Object.fromEntries(await Promise.all([
   ['compose', 'docker-compose.yml'],
   ['dockerfile', 'Dockerfile'],
+  ['toolchainApt', 'bin/dsh-toolchain-apt'],
   ['entrypoint', 'bin/entrypoint.sh'],
   ['installSh', 'install.sh'],
   ['installPs1', 'install.ps1'],
@@ -18,6 +19,14 @@ const runtimeDockerfile = files.dockerfile.slice(files.dockerfile.indexOf('FROM 
 assert.match(runtimeDockerfile, /RUN --mount=type=cache,target=\/var\/cache\/apt,sharing=locked/)
 assert.match(runtimeDockerfile, /apt-get update/)
 assert.doesNotMatch(runtimeDockerfile, /target=\/var\/lib\/apt/)
+assert.match(files.dockerfile, /COPY bin\/dsh-toolchain-apt \/usr\/local\/bin\/dsh-toolchain-apt/)
+assert.match(files.dockerfile, /ln -sf \/usr\/local\/bin\/dsh-toolchain-apt \/usr\/local\/bin\/apt/)
+assert.match(files.toolchainApt, /DSH_TOOLCHAIN_ROOT/)
+assert.match(files.toolchainApt, /dpkg-deb -x/)
+assert.match(files.toolchainApt, /id -u/)
+assert.match(files.toolchainApt, /readlink/)
+assert.match(files.dockerfile, /LD_LIBRARY_PATH=.*toolchain/)
+assert.match(files.dockerfile, /XDG_DATA_DIRS=.*toolchain/)
 
 assert.match(files.entrypoint, /true\|1\|yes\|on/)
 assert.match(files.entrypoint, /false\|0\|no\|off/)
