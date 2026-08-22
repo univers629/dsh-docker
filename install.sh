@@ -72,6 +72,23 @@ if [ ! -d "$TARGET_DIR" ]; then
   if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
     chown -R "$SUDO_USER:$SUDO_USER" "$TARGET_DIR" 2>/dev/null || true
   fi
+elif [ -d "$TARGET_DIR/.git" ]; then
+  echo "==> [1/2] 正在同步工程文件..."
+  if ! git -C "$TARGET_DIR" diff --quiet || ! git -C "$TARGET_DIR" diff --cached --quiet; then
+    echo "[错误] $TARGET_DIR 中存在未提交的源码修改，已停止以避免覆盖。请先提交、保存或清理这些修改后重试。" >&2
+    exit 1
+  fi
+  if ! git -C "$TARGET_DIR" fetch origin main; then
+    echo "[错误] 无法从 GitHub 获取最新工程文件，已保留现有安装。" >&2
+    exit 1
+  fi
+  if ! git -C "$TARGET_DIR" merge --ff-only FETCH_HEAD; then
+    echo "[错误] 本地工程无法 fast-forward 到 origin/main，请手动处理后重试。" >&2
+    exit 1
+  fi
+else
+  echo "[错误] $TARGET_DIR 已存在但不是 Git 工程，无法安全更新。请移动该目录后重试。" >&2
+  exit 1
 fi
 
 cd "$TARGET_DIR"

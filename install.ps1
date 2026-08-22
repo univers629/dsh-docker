@@ -64,6 +64,22 @@ if (-not (Test-Path $targetDir)) {
         Copy-Item -Path "$targetDir\temp\dsh-docker-dev-main\*" -Destination $targetDir -Recurse -Force
         Remove-Item -Path "$targetDir\temp", $zipFile -Recurse -Force
     }
+} elseif (Test-Path (Join-Path $targetDir ".git")) {
+    Write-Host "==> [1/3] 正在同步工程文件..." -ForegroundColor Yellow
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw "检测到已有 Git 工程，但系统未安装 Git，无法安全更新。"
+    }
+    $trackedChanges = git -C $targetDir diff --quiet; $trackedExit = $LASTEXITCODE
+    git -C $targetDir diff --cached --quiet; $cachedExit = $LASTEXITCODE
+    if ($trackedExit -ne 0 -or $cachedExit -ne 0) {
+        throw "$targetDir 中存在未提交的源码修改，已停止以避免覆盖。请先提交、保存或清理这些修改后重试。"
+    }
+    git -C $targetDir fetch origin main
+    if ($LASTEXITCODE -ne 0) { throw "无法从 GitHub 获取最新工程文件，已保留现有安装。" }
+    git -C $targetDir merge --ff-only FETCH_HEAD
+    if ($LASTEXITCODE -ne 0) { throw "本地工程无法 fast-forward 到 origin/main，请手动处理后重试。" }
+} else {
+    throw "$targetDir 已存在但不是 Git 工程，无法安全更新。请移动该目录后重试。"
 }
 
 Set-Location $targetDir
