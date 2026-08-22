@@ -61,7 +61,7 @@ Windows PowerShell passes the switch through a script block:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1))) -Root
 ```
 
-`--root` changes only the DSH process UID inside the container. It does not add Docker Socket access, `privileged`, or host-root capabilities; Nginx still runs as `node`. The installer force-recreates the `dsh` container after writing `.env`, so the selected mode is applied immediately. The default remains unprivileged `node` (container UID 1000, not the host's current login user). Root mode can create host-root-owned files in bind mounts; starting again with `--user` makes the entrypoint repair ownership under `/data` and `/workspace`. The choice is persisted as `DSH_RUN_AS_ROOT` in the project `.env` for later updates and restarts.
+`--root` changes only the DSH process UID inside the container. It does not add Docker Socket access, `privileged`, or host-root capabilities; Nginx still runs as `node`. The installer first fast-forwards an existing Git checkout, then writes `.env` and force-recreates the `dsh` container so the selected mode is applied immediately. It stops instead of overwriting tracked local source changes or a non-Git directory. The default remains unprivileged `node` (container UID 1000, not the host's current login user). Root mode can create host-root-owned files in bind mounts; starting again with `--user` makes the entrypoint repair ownership under `/data` and `/workspace`. The choice is persisted as `DSH_RUN_AS_ROOT` in the project `.env` for later updates and restarts.
 
 > [!TIP]
 > **⏱️ Build Duration Note**:

@@ -61,7 +61,7 @@ Windows PowerShell 使用脚本块传参：
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1))) -Root
 ```
 
-`--root` 只让 DSH 主进程在容器内使用 UID 0，不会给容器增加 `privileged`、Docker Socket 或宿主机 root 权限；Nginx 仍以 `node` 用户运行。默认始终是普通 `node` 模式（这是容器内 UID 1000，不等同于宿主机当前登录用户）。安装器会在写入 `.env` 后强制重新创建 `dsh` 容器，确保新模式立即应用；root 模式写入 bind mount 的新文件时可能产生宿主机 root 所有的文件，再次使用 `--user` 启动时入口会重新纠正 `/data` 和 `/workspace` 的属主。选择会写入工程目录 `.env` 的 `DSH_RUN_AS_ROOT`，后续更新和重启继续沿用。
+`--root` 只让 DSH 主进程在容器内使用 UID 0，不会给容器增加 `privileged`、Docker Socket 或宿主机 root 权限；Nginx 仍以 `node` 用户运行。默认始终是普通 `node` 模式（这是容器内 UID 1000，不等同于宿主机当前登录用户）。安装器会先同步已有 Git 工程，再写入 `.env` 并强制重新创建 `dsh` 容器，确保新模式立即应用；如果检测到已提交源码修改或非 Git 目录会停止，避免覆盖用户文件。root 模式写入 bind mount 的新文件时可能产生宿主机 root 所有的文件，再次使用 `--user` 启动时入口会重新纠正 `/data` 和 `/workspace` 的属主。选择会写入工程目录 `.env` 的 `DSH_RUN_AS_ROOT`，后续更新和重启继续沿用。
 
 > [!TIP]
 > **⏱️ 构建耗时提示 (Build Duration Note)**：
