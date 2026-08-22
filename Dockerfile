@@ -97,7 +97,8 @@ RUN cd /opt/dsh-docker-control \
     && chown -R node:node /opt /data /workspace \
     && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs /usr/local/bin/dsh-toolchain-apt \
     && ln -sf /usr/local/bin/dsh-toolchain-apt /usr/local/bin/apt \
-    && ln -sf /usr/local/bin/dsh-toolchain-apt /usr/local/bin/apt-get
+    && ln -sf /usr/local/bin/dsh-toolchain-apt /usr/local/bin/apt-get \
+    && printf '%s\n' 'export PATH="/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:$PATH"' > /etc/profile.d/dsh-toolchain.sh
 
 ENV DSH_HOME=/data/dsh \
     DSH_AGENTS_HOME=/data/agents \
