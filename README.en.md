@@ -43,6 +43,26 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1
 curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash
 ```
 
+To run the DSH Agent as UID 0 inside the container, explicitly opt in at install time:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash -s -- --root
+```
+
+To keep or restore the default unprivileged `node` mode:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash -s -- --user
+```
+
+Windows PowerShell passes the switch through a script block:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1))) -Root
+```
+
+`--root` changes only the DSH process UID inside the container. It does not add Docker Socket access, `privileged`, or host-root capabilities; Nginx still runs as `node`. The default remains unprivileged `node` (container UID 1000, not the host's current login user). Root mode can create host-root-owned files in bind mounts; starting again with `--user` makes the entrypoint repair ownership under `/data` and `/workspace`. The choice is persisted as `DSH_RUN_AS_ROOT` in the project `.env` for later updates and restarts.
+
 > [!TIP]
 > **⏱️ Build Duration Note**:
 > - **Initial Clean Build**: Because the build compiles the complete DSH monorepo, web frontend, and native extensions from scratch, it typically takes **300 ~ 360 seconds (5~6 minutes)** on standard VPS or ARM64 instances (e.g. Oracle ARM). Please allow it to complete.
@@ -144,6 +164,7 @@ Lessons learned from real-world deployments and integrated out of the box:
 
 ### 2. Safe plugin lifecycle management
 - `procps` remains available for diagnostics, and `/usr/local/bin/manage-dsh-plugin` handles plugin installation, updates, removal, and profile validation.
+- If container-level system operations are genuinely required, use the explicit `--root` installer option above. The mode remains inside Docker isolation and is still constrained by `no-new-privileges`, the image capabilities, and the mounted paths; keep the default unprivileged mode whenever possible.
 - The helper shows staged package-manager and validation status, then gracefully restarts DSH only after the current Agent turn is durable. Its single pre-restart notice says that the package is persisted but the frontend is not yet verified, that restart begins after the turn ends, that no post-restart notice will follow, and that users should wait 30–60 seconds (complex plugins may take about a minute) before refreshing. If it is still absent after 90 seconds, inspect the recent logs and the plugin's own entry point.
 
 ---

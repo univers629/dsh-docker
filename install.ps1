@@ -1,5 +1,44 @@
+param(
+    [switch]$Root,
+    [switch]$User
+)
+
 # DeepSeek Harness Docker (DSH-Docker) - Windows One-Line Installer
 $ErrorActionPreference = "Stop"
+
+$extraArgs = @($args)
+if ($extraArgs -contains "--root" -or $extraArgs -contains "--run-as-root") { $Root = $true }
+if ($extraArgs -contains "--user" -or $extraArgs -contains "--normal-user" -or $extraArgs -contains "--no-root") { $User = $true }
+if ($Root -and $User) { throw "--Root/--root 与 --User/--user 不能同时使用。" }
+foreach ($extraArg in $extraArgs) {
+    if ($extraArg -notin @("--root", "--run-as-root", "--user", "--normal-user", "--no-root")) {
+        throw "未知参数：$extraArg（支持 -Root 或 -User）。"
+    }
+}
+
+function Set-ComposeEnvValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+    $lines = if (Test-Path -LiteralPath $Path) { @([IO.File]::ReadAllLines($Path)) } else { @() }
+    $pattern = "^\s*" + [regex]::Escape($Key) + "\s*="
+    $found = $false
+    $updated = foreach ($line in $lines) {
+        if ($line -match $pattern) {
+            if (-not $found) {
+                $found = $true
+                "$Key=$Value"
+            }
+        } else {
+            $line
+        }
+    }
+    if (-not $found) { $updated += "$Key=$Value" }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($Path, (($updated -join [Environment]::NewLine) + [Environment]::NewLine), $utf8NoBom)
+}
 
 Write-Host "===================================================" -ForegroundColor Cyan
 Write-Host "  DeepSeek Harness (DSH) 一键安装与启动程序" -ForegroundColor Green
@@ -28,6 +67,13 @@ if (-not (Test-Path $targetDir)) {
 }
 
 Set-Location $targetDir
+
+if ($Root -or $User) {
+    $runAsRoot = if ($Root) { "true" } else { "false" }
+    Set-ComposeEnvValue -Path (Join-Path (Get-Location) ".env") -Key "DSH_RUN_AS_ROOT" -Value $runAsRoot
+    $modeLabel = if ($Root) { "root（仅容器内）" } else { "普通用户 node" }
+    Write-Host "==> DSH 运行模式：$modeLabel" -ForegroundColor Yellow
+}
 
 Write-Host "==> [2/3] 正在本地构建并启动 DeepSeek Harness 容器..." -ForegroundColor Yellow
 docker compose up -d --build
