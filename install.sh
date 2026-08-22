@@ -83,7 +83,7 @@ if [ -n "$RUN_AS_ROOT_OVERRIDE" ]; then
 fi
 
 echo "==> [2/2] 正在本地构建并启动 DeepSeek Harness 容器..."
-DOCKER compose up -d --build
+DOCKER compose up -d --build --force-recreate
 
 if DOCKER network inspect dpanel-local >/dev/null 2>&1; then
   echo "==> 检测到 dpanel 面板环境，已自动打通 dpanel 容器反代网桥！"
