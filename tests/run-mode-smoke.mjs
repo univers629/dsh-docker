@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 
 const files = Object.fromEntries(await Promise.all([
   ['compose', 'docker-compose.yml'],
+  ['dockerfile', 'Dockerfile'],
   ['entrypoint', 'bin/entrypoint.sh'],
   ['installSh', 'install.sh'],
   ['installPs1', 'install.ps1'],
@@ -13,6 +14,10 @@ assert.match(files.compose, /DSH_RUN_AS_ROOT:\s+"\$\{DSH_RUN_AS_ROOT:-false\}"/)
 assert.match(files.compose, /security_opt:\s*\n\s*- no-new-privileges:true/)
 assert.doesNotMatch(files.compose, /privileged:\s*true/)
 assert.doesNotMatch(files.compose, /docker\.sock/)
+const runtimeDockerfile = files.dockerfile.slice(files.dockerfile.indexOf('FROM ${NODE_IMAGE} AS runtime'))
+assert.match(runtimeDockerfile, /RUN --mount=type=cache,target=\/var\/cache\/apt,sharing=locked/)
+assert.match(runtimeDockerfile, /apt-get update/)
+assert.doesNotMatch(runtimeDockerfile, /target=\/var\/lib\/apt/)
 
 assert.match(files.entrypoint, /true\|1\|yes\|on/)
 assert.match(files.entrypoint, /false\|0\|no\|off/)
