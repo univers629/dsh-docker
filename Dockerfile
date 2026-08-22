@@ -85,7 +85,6 @@ COPY bin/link-modules.mjs /usr/local/bin/link-modules.mjs
 COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY bin/patch-profile-plugins.mjs /usr/local/bin/patch-profile-plugins.mjs
 COPY bin/install-docker-control.mjs /usr/local/bin/install-docker-control.mjs
-COPY bin/dsh-toolchain-apt /usr/local/bin/dsh-toolchain-apt
 COPY dsh-home/ /etc/dsh-home/
 COPY dsh-home/docker-control/ /opt/dsh-docker-control/
 COPY nginx/dsh-nginx.conf /etc/dsh/nginx.conf
@@ -95,18 +94,12 @@ RUN cd /opt/dsh-docker-control \
     && npm cache clean --force \
     && mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
     && chown -R node:node /opt /data /workspace \
-    && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs /usr/local/bin/dsh-toolchain-apt \
-    && ln -sf /usr/local/bin/dsh-toolchain-apt /usr/local/bin/apt \
-    && ln -sf /usr/local/bin/dsh-toolchain-apt /usr/local/bin/apt-get \
+    && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs \
     && printf '%s\n' 'export PATH="/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:$PATH"' > /etc/profile.d/dsh-toolchain.sh
 
 ENV DSH_HOME=/data/dsh \
     DSH_AGENTS_HOME=/data/agents \
     HOME=/data/home \
-    DSH_TOOLCHAIN_ROOT=/data/home/.local/toolchain \
-    DSH_TOOLCHAIN_BIN=/data/home/.local/bin \
-    LD_LIBRARY_PATH=/data/home/.local/toolchain/lib:/data/home/.local/toolchain/lib/aarch64-linux-gnu:/data/home/.local/toolchain/lib/x86_64-linux-gnu:/data/home/.local/toolchain/usr/lib:/data/home/.local/toolchain/usr/lib/aarch64-linux-gnu:/data/home/.local/toolchain/usr/lib/x86_64-linux-gnu \
-    XDG_DATA_DIRS=/data/home/.local/toolchain/usr/share:/data/home/.local/toolchain/share:/usr/local/share:/usr/share \
     NODE_PATH=/app/dsh/node_modules:/data/dsh/profiles/node_modules \
     PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:${PATH}
 

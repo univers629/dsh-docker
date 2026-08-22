@@ -3,8 +3,8 @@ import { readFile } from 'node:fs/promises'
 
 const files = Object.fromEntries(await Promise.all([
   ['compose', 'docker-compose.yml'],
+  ['systemCompose', 'docker-compose.system.yml'],
   ['dockerfile', 'Dockerfile'],
-  ['toolchainApt', 'bin/dsh-toolchain-apt'],
   ['entrypoint', 'bin/entrypoint.sh'],
   ['installSh', 'install.sh'],
   ['installPs1', 'install.ps1'],
@@ -18,15 +18,11 @@ assert.doesNotMatch(files.compose, /docker\.sock/)
 const runtimeDockerfile = files.dockerfile.slice(files.dockerfile.indexOf('FROM ${NODE_IMAGE} AS runtime'))
 assert.match(runtimeDockerfile, /RUN --mount=type=cache,target=\/var\/cache\/apt,sharing=locked/)
 assert.match(runtimeDockerfile, /apt-get update/)
-assert.doesNotMatch(runtimeDockerfile, /target=\/var\/lib\/apt/)
-assert.match(files.dockerfile, /COPY bin\/dsh-toolchain-apt \/usr\/local\/bin\/dsh-toolchain-apt/)
-assert.match(files.dockerfile, /ln -sf \/usr\/local\/bin\/dsh-toolchain-apt \/usr\/local\/bin\/apt/)
-assert.match(files.toolchainApt, /DSH_TOOLCHAIN_ROOT/)
-assert.match(files.toolchainApt, /dpkg-deb -x/)
-assert.match(files.toolchainApt, /id -u/)
-assert.match(files.toolchainApt, /readlink/)
-assert.match(files.dockerfile, /LD_LIBRARY_PATH=.*toolchain/)
-assert.match(files.dockerfile, /XDG_DATA_DIRS=.*toolchain/)
+assert.match(files.systemCompose, /dsh-system-usr-bin/)
+assert.match(files.systemCompose, /dsh-system-usr-bin:\/usr\/bin/)
+assert.match(files.systemCompose, /dsh-system-var-lib:\/var\/lib/)
+assert.match(files.systemCompose, /device: \.\/data\/system\/usr\/bin/)
+assert.doesNotMatch(files.dockerfile, /dsh-toolchain-apt|DSH_TOOLCHAIN_ROOT|XDG_DATA_DIRS=.*toolchain/)
 assert.match(files.dockerfile, /profile\.d\/dsh-toolchain\.sh/)
 
 assert.match(files.entrypoint, /true\|1\|yes\|on/)
@@ -43,7 +39,11 @@ assert.match(files.installSh, /未知参数/)
 assert.match(files.installSh, /set_compose_env DSH_RUN_AS_ROOT/)
 assert.match(files.installSh, /fetch origin main/)
 assert.match(files.installSh, /merge --ff-only FETCH_HEAD/)
-assert.match(files.installSh, /compose up -d --build --force-recreate/)
+assert.match(files.installSh, /compose .*up -d --build --force-recreate/)
+assert.match(files.installSh, /docker-compose\.system\.yml/)
+assert.match(files.installSh, /data\/system\/var\/lib/)
+assert.match(files.installPs1, /compose up -d --build --force-recreate/)
+assert.doesNotMatch(files.installPs1, /docker-compose\.system\.yml/)
 assert.match(files.installPs1, /\[switch\]\$Root/)
 assert.match(files.installPs1, /\[switch\]\$User/)
 assert.match(files.installPs1, /Set-ComposeEnvValue/)

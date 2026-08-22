@@ -8,6 +8,20 @@ data/*
 !data/mcp/.gitkeep
 !data/home
 !data/home/.gitkeep
+data/system/*
+!data/system/
+!data/system/usr/
+!data/system/usr/bin/
+!data/system/usr/lib/
+!data/system/usr/share/
+!data/system/usr/sbin/
+!data/system/usr/include/
+!data/system/usr/libexec/
+!data/system/usr/games/
+!data/system/etc/
+!data/system/var/
+!data/system/var/lib/
+!data/system/var/cache/
 workspace/*
 !workspace/.gitkeep
 

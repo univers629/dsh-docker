@@ -94,13 +94,25 @@ fi
 cd "$TARGET_DIR"
 chmod +x dsh.sh 2>/dev/null || true
 
+if [ "$(uname -s)" = Linux ]; then
+  SYSTEM_DIRS=(
+    data/system/usr/bin data/system/usr/lib data/system/usr/share
+    data/system/usr/sbin data/system/usr/include data/system/usr/libexec
+    data/system/usr/games data/system/etc data/system/var/lib data/system/var/cache
+  )
+  mkdir -p "${SYSTEM_DIRS[@]}"
+  COMPOSE_ARGS=(-f docker-compose.yml -f docker-compose.system.yml)
+else
+  COMPOSE_ARGS=(-f docker-compose.yml)
+fi
+
 if [ -n "$RUN_AS_ROOT_OVERRIDE" ]; then
   set_compose_env DSH_RUN_AS_ROOT "$RUN_AS_ROOT_OVERRIDE"
   echo "==> DSH 运行模式：$([ "$RUN_AS_ROOT_OVERRIDE" = true ] && printf 'root（仅容器内）' || printf '普通用户 node')"
 fi
 
 echo "==> [2/2] 正在本地构建并启动 DeepSeek Harness 容器..."
-DOCKER compose up -d --build --force-recreate
+DOCKER compose "${COMPOSE_ARGS[@]}" up -d --build --force-recreate
 
 if DOCKER network inspect dpanel-local >/dev/null 2>&1; then
   echo "==> 检测到 dpanel 面板环境，已自动打通 dpanel 容器反代网桥！"

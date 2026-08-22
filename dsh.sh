@@ -18,6 +18,18 @@ else
   DOCKER() { sudo docker "$@"; }
 fi
 
+if [ "$(uname -s)" = Linux ]; then
+  SYSTEM_DIRS=(
+    data/system/usr/bin data/system/usr/lib data/system/usr/share
+    data/system/usr/sbin data/system/usr/include data/system/usr/libexec
+    data/system/usr/games data/system/etc data/system/var/lib data/system/var/cache
+  )
+  mkdir -p "${SYSTEM_DIRS[@]}"
+  COMPOSE_ARGS=(-f docker-compose.yml -f docker-compose.system.yml)
+else
+  COMPOSE_ARGS=(-f docker-compose.yml)
+fi
+
 ENSURE_NETWORKS() {
   if DOCKER network inspect dpanel-local >/dev/null 2>&1; then
     DOCKER network connect --alias dsh.pod.dpanel.local dpanel-local dsh 2>/dev/null || true
@@ -25,23 +37,23 @@ ENSURE_NETWORKS() {
 }
 
 CLEANUP_BUILD_LEFTOVERS() {
-  echo "==> [自动清理] 清理悬空镜像（100% 保留 APT 与 pnpm 持久化包缓存及构建加速层）..."
+  echo "==> 清理悬空镜像..."
   DOCKER image prune -f >/dev/null 2>&1 || true
 }
 
 case "$ACTION" in
   start|up)
     echo "==> 启动 DeepSeek Harness 容器..."
-    DOCKER compose up -d --build --force-recreate
+    DOCKER compose "${COMPOSE_ARGS[@]}" up -d --build --force-recreate
     ENSURE_NETWORKS
     CLEANUP_BUILD_LEFTOVERS
     echo "==> Web UI: http://127.0.0.1:3080"
     ;;
   update)
     echo "==> [1/3] 从官方源码构建最新镜像..."
-    DOCKER compose build dsh
+    DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
     echo "==> [2/3] 重启服务..."
-    DOCKER compose up -d --force-recreate
+    DOCKER compose "${COMPOSE_ARGS[@]}" up -d --force-recreate
     ENSURE_NETWORKS
     echo "==> [3/3] 自动清理悬空垃圾镜像..."
     CLEANUP_BUILD_LEFTOVERS
@@ -49,18 +61,18 @@ case "$ACTION" in
     ;;
   stop|down)
     echo "==> 停止服务..."
-    DOCKER compose down
+    DOCKER compose "${COMPOSE_ARGS[@]}" down
     ;;
   restart)
     echo "==> 重启服务..."
-    DOCKER compose restart dsh
+    DOCKER compose "${COMPOSE_ARGS[@]}" restart dsh
     ENSURE_NETWORKS
     ;;
   logs)
-    DOCKER compose logs -f dsh
+    DOCKER compose "${COMPOSE_ARGS[@]}" logs -f dsh
     ;;
   status|ps)
-    DOCKER compose ps
+    DOCKER compose "${COMPOSE_ARGS[@]}" ps
     ;;
   *)
     echo "用法: $0 [start|update|stop|restart|logs|status]"
