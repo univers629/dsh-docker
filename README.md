@@ -71,8 +71,8 @@ Windows 没有 Linux 意义上的 root 模式；Windows 安装始终使用镜像
    - 用户的所有资产与数据仅集中在 `./data`（环境/会话/配置/MCP/子智能体）与 `./workspace`（项目代码）中，宿主机无任何散碎系统垃圾，备份迁移只需打包两个目录。
 2. **纯本地自主闭环构建 (100% Local Self-Contained Build)**：
    - 彻底摆脱对第三方镜像仓库的依赖，本地 Docker 自动抓取官方最新源码、自动注入沙箱补丁并完成编译，确保代码链路 100% 纯净可审计。
-3. **无感回环安全反代屏障 (Transparent Loopback Shield)**：
-   - 容器内部内置轻量级反代机制，自动将外部域名/IP 请求头伪装为合法的本地回环（`127.0.0.1`），彻底消除公网访问时设置空白与凭据受限问题。
+3. **认证后的公网本地模式 (Authenticated Public-Local Mode)**：
+   - 公网入口必须经过 Cloudflare Access、Basic Auth 或私有隧道；外层反代将已认证请求送入只绑定私有接口的 DSH 端口，容器内部再以 `127.0.0.1` 访问官方 DSH。这样所有官方设置、凭据和插件页面都使用同一套 host 持久化逻辑，不修改官方后端权限集合。
 4. **智能体全权限数据治理与安全守护 (Agent Governance & Security Guard)**：
    - 容器启动自动纠正数据卷属主权限（`gosu node` 降权安全运行），严格守护 `.credentials.yaml`（`600`）与 SSH 密钥权限，预装 `procps`（`pkill`/`pgrep`），沙箱白名单完全放行持久化目录。
 
@@ -87,10 +87,10 @@ Windows 没有 Linux 意义上的 root 模式；Windows 安装始终使用镜像
 
 ```mermaid
 graph TD
-    User["🌐 外部访问 (浏览器 / 公网域名 / dpanel / 局域网IP)"] -->|端口 3080| NGINX["🛡️ 容器内置 Nginx 反代 (端口 3080)"]
+    User["🌐 已认证访问 (公网域名 / SSH 隧道 / dpanel)"] -->|私有端口 3080| NGINX["🛡️ 容器内置 Nginx 反代 (端口 3080)"]
     
     subgraph DSH Docker 隔离容器
-        NGINX -->|自动改写 Header<br>Host & Origin: 127.0.0.1:3081| BACKEND["⚙️ DSH 核心引擎 (端口 3081)<br>(Debian 13 + Node 24 + Python 3.13 + uv)"]
+        NGINX -->|认证请求改写为 loopback<br>转发至 127.0.0.1:3081| BACKEND["⚙️ DSH 核心引擎 (端口 3081)<br>(Debian 13 + Node 24 + Python 3.13 + uv)"]
         
         BACKEND -->|读写会话/插件/设置| V1["/data/dsh ($DSH_HOME)"]
         BACKEND -->|读写用户工具链/Subagent CLI| V2["/data/home ($HOME)"]
@@ -119,7 +119,7 @@ graph TD
 | **日常管理 (启动/停止/日志)** | **Windows** | 双击 **`dsh.bat`** 或 `.\dsh.bat [start\|stop\|logs]` | 统一高颜值管理 CLI |
 | **日常管理 (启动/停止/日志)** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | 统一高颜值管理 CLI |
 | **同步官方最新源码** | **全平台** | `.\dsh.bat update` 或 `./dsh.sh update` | 在线拉取官方最新 Commit，秒级重新编译，自动清理垃圾缓存 |
-| **面板反代管理 (dpanel/1Panel)** | **全平台** | 目标填写 `http://127.0.0.1:3080` | 走宿主机静态映射端口，容器无论如何更新重建，**反代永远不失效** |
+| **面板反代管理 (dpanel/1Panel)** | **全平台** | 推荐将 DSH 加入 dpanel 网络并使用容器别名；否则宿主机 Nginx/SSH 隧道使用 `http://127.0.0.1:3080`，不要绑定 `0.0.0.0` | 端口只在私有接口监听，数据目录独立持久化，重建 dsh 不影响其他容器 |
 
 ---
 
@@ -140,7 +140,7 @@ dsh_docker/
 │   ├── cordis.patch.yml      # 机器级网络与服务覆盖配置
 │   └── skills/               # 预置技能库（内置 container-environment SOP）
 ├── 📂 nginx/
-│   └── dsh-nginx.conf        # 容器内轻量回环伪装反向代理配置
+│   └── dsh-nginx.conf        # 容器内保留请求边界的反向代理配置
 ├── 📂 data/                  # 💾 核心数据持久化目录（Git 忽略数据内容）
 │   ├── dsh/                  # 会话历史 (sessions/)、插件 (profiles/)、.credentials.yaml、settings.yaml
 │   ├── home/                 # Linux 用户家目录 (~/.local, ~/.npm-global, ~/.ssh, ~/.cache)
@@ -169,27 +169,27 @@ Linux 还会启用 `docker-compose.system.yml`，把 Debian 包安装保存在�
 - **官方断言机制**：DSH `@deepseek-ai/dsh-credentials-local` 对 `/data/dsh/.credentials.yaml` 实施了严格的安全断言，如果文件权限超出所有者可读写（例如 `660`），系统将**硬性拒绝启动**以防密钥泄漏；
 - **自动纠偏锁**：[`bin/entrypoint.sh`](bin/entrypoint.sh) 在容器每次启动时，会自动对全盘 `/data` 进行属主纠正的同时，**强制锁定所有的 `*credentials*.yaml` 为 `600`**，既保证了多用户挂载不冲突，又完全满足官方严苛的安全断言。
 
-### 2. 内置 `procps` 进程管理套件（`pkill` / `pgrep`）
-- 容器运行时原生集成了 `procps` 工具包。当智能体在容器内部自主执行热重载、插件生命周期管理或服务平滑重启时，调用 `pkill -f "apps/cli/lib/bin.js"` 不会发生 `command not found` 错误。
+### 2. 安全的插件生命周期管理
+- 容器内置 `procps` 供诊断使用，同时提供 `/usr/local/bin/manage-dsh-plugin`，负责插件安装、更新、删除和校验 profile 配置。
+- 脚本会显示包管理与配置校验的阶段性信息，并在当前 Agent 回复持久化完成后精确、优雅地重启 DSH。输出会明确区分“已写入 profile”“配置可解析”“已安排重启”和“重启后前端尚待验证”，不会把通用配置校验误报成某个插件已经出现设置页或按钮。
 
 ---
 
 ## 🔧 核心技术解密：公网/反代下插件与设置页面空白的根治方案
 
-### 1. 痛点根源
-DeepSeek Harness 官方前端在 `packages/client/ui-settings/lib/client.js` 中包含一段回环检测逻辑：
+### 1. 权限边界
+DeepSeek Harness 官方前端在 `packages/client/ui-settings/lib/client.js` 中根据连接是否回环选择设置作用域：
 ```javascript
 // 官方原生判断：
 settingsScope: connection.isLoopback ? "host" : "memory"
 ```
-当通过 **公网域名、外部 IP 或面板反向代理** 访问时，`connection.isLoopback` 返回 `false`，导致设置作用域被强制降级为纯内存态（`"memory"`）。
-- **严重影响**：设置页面直接白屏/空白、输入的 API Key 无法持久化保存、插件配置面板无法加载。
+回环访问可以使用 DSH 官方的 host settings。公网访问只有在前置认证、源站限制和私有 3080 同时成立时，才会由容器 Nginx 转换为内部 loopback；浏览器通过 `DSH_PUBLIC_LOCAL_MODE=1` Cookie 选择同一套 host settings 镜像。Cookie 不是认证凭据，后端仍只接受容器内部的 loopback 请求。
 
-### 2. 本项目的“双保险”根治方案
-1. **代码级持久化补丁（Code-level Patch）**：
-   在 `Dockerfile` 构建阶段自动将前端产物中的 `connection.isLoopback ? "host" : "memory"` 强制修正为 `"host"`，确保任何网络环境下设置均落盘至 `/data/dsh/settings.yaml`；
-2. **网络级回环伪装屏障（Network-level Reverse Proxy）**：
-   容器内置 Nginx 将外部请求无感伪装为 `Host: 127.0.0.1:3081` 与 `Origin: http://127.0.0.1:3081`，使得后端核心引擎的安全断言 100% 通过。
+Vision Router 的配置页通过自身的受控 RPC 显示能力与权限状态；这与 DSH 通用 settings API 是两条不同的权限边界。插件无需单独适配公网域名。
+
+如果通过隧道或反向代理使用公网域名，请复制 `.env.example` 为 `.env`，填写 `DSH_TRUSTED_HOSTS`。该变量支持逗号分隔的多个 `host[:port]`，例如 `agent.example.com,admin.example.com`。这里的 trusted host 只解决浏览器请求的 authority 校验，不会自动开启插件的远程写设置权限；Vision Router 的“允许可信 Host 远程修改设置”仍由其设置页中的安全开关控制。仅通过回环地址访问时可以留空。
+
+`allowRemoteSettings` 是用户授权项。Agent 不会替用户打开或关闭它；请通过运行 DSH 机器的回环地址或 SSH 隧道端口转发，在 Vision Router 设置页中明确操作。插件更新或 DSH 重启后若页面仍显示旧状态，请先关闭旧页面并重新加载最新页面，再确认该开关的写入结果。
 
 ### 3. 内置控制插件的初始化
 
@@ -234,12 +234,13 @@ environment:
 ### 1. dpanel / 宝塔 / 1Panel 转发“重建后失效”的根治方案
 
 在各种 Docker 管理面板中添加反向代理时：
-- **强烈推荐做法**：代理目标直接填写 **`http://127.0.0.1:3080`**（宿主机本地回环与静态端口）；
-- **原理**：本项目已固化宿主机映射端口 `3080:3080`。容器无论怎么重建、销毁、升级，宿主机端口永远固定，**面板反代一次配置终身有效**！
+- **Docker 版 dpanel**：将 dsh 接入 dpanel 使用的 Docker 网络，并把代理目标设置为 **`http://dsh:3080`**（或该网络中的固定别名）。如果不能改网络，才使用宿主机网关地址；此时 `.env` 中设置 `DSH_BIND_HOST=172.17.0.1`，不能设置 `0.0.0.0`。
+- **宿主机直接运行的 Nginx/SSH 隧道**：代理目标填写 **`http://127.0.0.1:3080`**。
+- **原理**：3080 只监听私有接口，公网流量必须先通过认证反代；容器重建只替换 dsh 镜像，不替换 `data/` 与 `workspace/`。
 
-> 💡 **dpanel 专属一键连网命令**：若使用 `dsh.pod.dpanel.local` 并在重构容器后遇到 502，只需执行单行命令立即打通网桥：
+> 💡 **dpanel 专属网络连接**：若使用独立网络，可执行以下命令把现有 dsh 接入 dpanel 网络（网络名称以实际部署为准）：
 > ```bash
-> sudo docker network connect --alias dsh.pod.dpanel.local dpanel-local dsh
+> sudo docker network connect --alias dsh dpanel-local dsh
 > ```
 
 ### 2. 标准 Nginx 反向代理配置
@@ -269,15 +270,11 @@ server {
 ## 🔒 公网访问安全加固指南
 
 > [!WARNING]
-> DeepSeek Harness 原生未设登录鉴权，若将 3080 端口直接暴露在公网，存在被他人调用的风险。建议采用以下安全方案之一：
+> DeepSeek Harness 原生未设登录鉴权。3080 必须保持私有监听，公网只允许经过认证的反向代理访问；不要把 `DSH_BIND_HOST` 设置为 `0.0.0.0`。
 
-- **方案 A：Cloudflare Zero Trust Tunnels（推荐）**
-  - 将 Tunnel 指向 `http://localhost:3080`；
-  - 开启 Access 策略，通过 GitHub / Google OAuth 或邮箱验证码验证访问。
-- **方案 B：Host Nginx HTTP Basic Auth**
-  - 在宿主机反代配置中启用账号密码保护（`auth_basic`）。
-- **方案 C：Tailscale / WireGuard 私有内网**
-  - 不对外开放任何公网端口，仅限 Tailscale 组网内设备访问。
+1. **Cloudflare Access（推荐）**：保留站点 Access 策略，并在源站 Nginx/DPanel 对该域名只放行 Cloudflare 网段与本机隧道地址。
+2. **Cloudflare Zero Trust Tunnel**：将 Tunnel 指向 `http://localhost:3080`，并开启 Access 策略。
+3. **HTTP Basic Auth 或私有 VPN**：保护宿主机反代并保持 DSH 端口私有。
 
 ---
 
@@ -291,7 +288,9 @@ Agent 会自动遵循预置 SOP：
 1. **安装**：自动在 `$DSH_HOME/profiles/web/package.json` 添加依赖并安全执行安装；
 2. **配置校验**：自动校验 `cordis.patch.yml` 语法有效性；
 3. **数据管理**：直接进入 `/data/dsh/sessions/` 对过期归档文件执行清理；
-4. **生效**：向用户发出完成通知并自动触发服务热重载。
+4. **生效**：向用户发出中文完成通知；当前回复结束后自动优雅重启 DSH，使插件组合变更生效。
+
+若需要单独重启 DSH，向 Agent 明确提出“重启 DSH”即可；内置 skill 会调用 `manage-dsh-plugin restart`，在当前回复结束后只重启 DSH 主进程，不会重启其他 Docker 容器。
 
 ---
 
