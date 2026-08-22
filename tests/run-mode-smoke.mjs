@@ -26,10 +26,12 @@ for (const flag of ['--root', '--run-as-root', '--user', '--normal-user', '--no-
 }
 assert.match(files.installSh, /未知参数/)
 assert.match(files.installSh, /set_compose_env DSH_RUN_AS_ROOT/)
+assert.match(files.installSh, /compose up -d --build --force-recreate/)
 assert.match(files.installPs1, /\[switch\]\$Root/)
 assert.match(files.installPs1, /\[switch\]\$User/)
 assert.match(files.installPs1, /Set-ComposeEnvValue/)
 assert.match(files.installPs1, /DSH_RUN_AS_ROOT/)
+assert.match(files.installPs1, /compose up -d --build --force-recreate/)
 assert.match(files.envExample, /^DSH_RUN_AS_ROOT=false$/m)
 
 console.log('run mode smoke: ok')

@@ -76,7 +76,7 @@ if ($Root -or $User) {
 }
 
 Write-Host "==> [2/3] 正在本地构建并启动 DeepSeek Harness 容器..." -ForegroundColor Yellow
-docker compose up -d --build
+docker compose up -d --build --force-recreate
 
 Write-Host "==> [3/3] 正在打开浏览器访问 Web UI..." -ForegroundColor Green
 Start-Sleep -Seconds 3
