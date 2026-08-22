@@ -59,6 +59,24 @@ fi
 printf '%s\n' "$$" > /run/dsh.pid
 chmod 644 /run/dsh.pid
 
+case "${DSH_RUN_AS_ROOT:-false}" in
+  true|1|yes|on)
+    DSH_RUN_AS_ROOT=true
+    ;;
+  false|0|no|off|'')
+    DSH_RUN_AS_ROOT=false
+    ;;
+  *)
+    echo "[dsh] invalid DSH_RUN_AS_ROOT=${DSH_RUN_AS_ROOT}; expected true or false" >&2
+    exit 64
+    ;;
+esac
+
+if [ "$DSH_RUN_AS_ROOT" = true ] && [ "$(id -u)" != 0 ]; then
+  echo "[dsh] DSH_RUN_AS_ROOT=true requires the container entrypoint to run as UID 0" >&2
+  exit 77
+fi
+
 if [ "$(id -u)" = "0" ]; then
   # Nginx creates its temp directories as the configured worker user when they
   # do not exist. This image runs the master and worker as `node`, while the
@@ -84,9 +102,15 @@ if [ "$(id -u)" = "0" ]; then
     /tmp/nginx-scgi
   gosu node nginx -c /etc/dsh/nginx.conf -g "daemon off;" &
   sleep 1
+  if [ "$DSH_RUN_AS_ROOT" = true ]; then
+    echo "[dsh] starting DSH as root inside the container (explicit opt-in)" >&2
+    exec /usr/local/bin/dsh "$@"
+  fi
+  echo "[dsh] starting DSH as unprivileged node inside the container" >&2
   exec gosu node /usr/local/bin/dsh "$@"
 else
   nginx -c /etc/dsh/nginx.conf -g "daemon off;" &
   sleep 1
+  echo "[dsh] starting DSH as current container user" >&2
   exec /usr/local/bin/dsh "$@"
 fi

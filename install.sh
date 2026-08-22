@@ -1,6 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+RUN_AS_ROOT_OVERRIDE=""
+for arg in "$@"; do
+  case "$arg" in
+    --root|--run-as-root)
+      if [ "$RUN_AS_ROOT_OVERRIDE" = false ]; then
+        echo "[错误] --root 与 --user 不能同时使用。" >&2
+        exit 2
+      fi
+      RUN_AS_ROOT_OVERRIDE=true
+      ;;
+    --user|--normal-user|--no-root)
+      if [ "$RUN_AS_ROOT_OVERRIDE" = true ]; then
+        echo "[错误] --root 与 --user 不能同时使用。" >&2
+        exit 2
+      fi
+      RUN_AS_ROOT_OVERRIDE=false
+      ;;
+    *)
+      echo "[错误] 未知参数：$arg（支持 --root 或 --user）。" >&2
+      exit 2
+      ;;
+  esac
+done
+
+set_compose_env() {
+  local key="$1" value="$2" file=".env" temporary
+  temporary="$(mktemp "${file}.tmp.XXXXXX")"
+  if [ -f "$file" ]; then
+    awk -v key="$key" -v value="$value" '
+      BEGIN { replaced = 0 }
+      $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+        if (!replaced) { print key "=" value; replaced = 1 }
+        next
+      }
+      { print }
+      END { if (!replaced) print key "=" value }
+    ' "$file" > "$temporary"
+  else
+    printf '%s=%s\n' "$key" "$value" > "$temporary"
+  fi
+  mv "$temporary" "$file"
+}
+
 echo "==================================================="
 echo "  DeepSeek Harness (DSH) 一键安装与启动程序"
 echo "==================================================="
@@ -33,6 +76,11 @@ fi
 
 cd "$TARGET_DIR"
 chmod +x dsh.sh 2>/dev/null || true
+
+if [ -n "$RUN_AS_ROOT_OVERRIDE" ]; then
+  set_compose_env DSH_RUN_AS_ROOT "$RUN_AS_ROOT_OVERRIDE"
+  echo "==> DSH 运行模式：$([ "$RUN_AS_ROOT_OVERRIDE" = true ] && printf 'root（仅容器内）' || printf '普通用户 node')"
+fi
 
 echo "==> [2/2] 正在本地构建并启动 DeepSeek Harness 容器..."
 DOCKER compose up -d --build
