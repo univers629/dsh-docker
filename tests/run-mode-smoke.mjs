@@ -27,6 +27,7 @@ assert.match(files.toolchainApt, /id -u/)
 assert.match(files.toolchainApt, /readlink/)
 assert.match(files.dockerfile, /LD_LIBRARY_PATH=.*toolchain/)
 assert.match(files.dockerfile, /XDG_DATA_DIRS=.*toolchain/)
+assert.match(files.dockerfile, /profile\.d\/dsh-toolchain\.sh/)
 
 assert.match(files.entrypoint, /true\|1\|yes\|on/)
 assert.match(files.entrypoint, /false\|0\|no\|off/)
