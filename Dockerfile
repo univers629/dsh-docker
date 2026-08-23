@@ -74,6 +74,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
        python3 \
        python3-pip \
        python3-venv \
+       make \
+       gcc \
+       g++ \
     && ln -s /usr/bin/python3 /usr/local/bin/python \
     && npm install -g pnpm@11.7.0 \
     && npm cache clean --force
