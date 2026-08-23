@@ -61,7 +61,7 @@ fi
 printf '%s\n' "$$" > /run/dsh.pid
 chmod 644 /run/dsh.pid
 
-case "${DSH_RUN_AS_ROOT:-false}" in
+case "${DSH_RUN_AS_ROOT:-true}" in
   true|1|yes|on)
     DSH_RUN_AS_ROOT=true
     ;;

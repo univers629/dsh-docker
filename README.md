@@ -25,7 +25,7 @@ Windows PowerShell：
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-同一条命令可再次执行，进入菜单后选择更新、启动、停止、重启、日志、状态或重新配置。默认以容器内普通用户 `node` 运行；Linux 可选择容器内 root，但这不会授予宿主机 root、Docker socket 或特权容器权限。
+同一条命令可再次执行，进入菜单后选择更新、启动、停止、重启、日志、状态或重新配置。Linux 与 Windows 默认使用容器内 `root`，可显式选择 `node`；容器内 root 不会授予宿主机 root、Docker socket 或特权容器权限。
 
 无人值守安装示例：
 
@@ -136,7 +136,7 @@ flowchart LR
 
 ### 权限边界
 
-Linux 安装器默认以 `node` 运行；Windows 安装器默认使用容器内 `root`，可传入 `-User` 改为 `node`。入口脚本会修正挂载目录属主并保护凭据和 SSH 私钥权限。容器内 `root` 不启用 privileged、不挂载 Docker socket，也不获得宿主机管理员权限。
+Linux 与 Windows 安装器均默认使用容器内 `root`；Linux 可传入 `--user`、Windows 可传入 `-User` 改为 `node`。入口脚本会修正挂载目录属主并保护凭据和 SSH 私钥权限。容器内 `root` 不启用 privileged、不挂载 Docker socket，也不获得宿主机管理员权限。
 
 ### 插件与工具链
 
