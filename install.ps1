@@ -1,9 +1,10 @@
 param(
-    [ValidateSet('install','configure','update','start','stop','restart','logs','status')]
-    [string]$Action = '',
+    [Alias('Action')]
+    [ValidateSet('','install','configure','update','start','stop','restart','logs','status')]
+    [string]$DshAction,
     [switch]$Root,
     [switch]$User,
-    [ValidateSet('local','trusted-proxy','basic')]
+    [ValidateSet('','local','trusted-proxy','basic')]
     [string]$Access = '',
     [string]$BindHost = '',
     [string]$TrustedHosts = '',
@@ -94,17 +95,17 @@ function Fetch-Project {
 }
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw '未检测到 Docker，请先安装并启动 Docker Desktop。' }
-if (-not $Action -and $interactive) {
+if (-not $DshAction -and $interactive) {
     $installLabel = if (Test-Path $Dir) { '重新配置并启动（保留数据）' } else { '全新安装' }
     Write-Host "1) $installLabel`n2) 更新源码并重建`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态"
     switch (Ask '这次要做什么' '1') {
-        '1' { $Action = 'install' }; '2' { $Action = 'update' }; '3' { $Action = 'start' }; '4' { $Action = 'stop' }
-        '5' { $Action = 'restart' }; '6' { $Action = 'logs' }; '7' { $Action = 'status' }
+        '1' { $DshAction = 'install' }; '2' { $DshAction = 'update' }; '3' { $DshAction = 'start' }; '4' { $DshAction = 'stop' }
+        '5' { $DshAction = 'restart' }; '6' { $DshAction = 'logs' }; '7' { $DshAction = 'status' }
         default { throw '无效操作。' }
     }
-} elseif (-not $Action) { $Action = 'install' }
+} elseif (-not $DshAction) { $DshAction = 'install' }
 
-if ($Action -in @('install','configure','update')) { Fetch-Project }
+if ($DshAction -in @('install','configure','update')) { Fetch-Project }
 elseif (-not (Test-Path (Join-Path $Dir 'docker-compose.yml'))) { throw "未找到 $Dir，请先执行安装。" }
 Set-Location $Dir
 $env:DOCKER_BUILDKIT = '1'; $env:COMPOSE_DOCKER_CLI_BUILD = '1'
@@ -119,7 +120,7 @@ $basicUser = $env:DSH_BASIC_AUTH_USER
 $basicPassword = $env:DSH_BASIC_AUTH_PASSWORD
 $writeBasicAuth = $false
 
-if ($Action -in @('install','configure')) {
+if ($DshAction -in @('install','configure')) {
     if ($interactive -and -not $Root -and -not $User) {
         $runDefault = if ($runAsRoot -eq 'true') { '2' } else { '1' }
         $runAsRoot = if ((Ask '容器内权限：1=node（推荐） 2=root' $runDefault) -eq '2') { 'true' } else { 'false' }
@@ -168,7 +169,7 @@ if ($Action -in @('install','configure')) {
     Set-ComposeEnvValue $envFile 'DSH_DOCKER_NETWORK_EXTERNAL' $networkExternalValue
 }
 
-switch ($Action) {
+switch ($DshAction) {
     { $_ -in @('install','configure') } {
         docker compose build dsh
         if ($LASTEXITCODE -ne 0) { throw 'DSH 镜像构建失败。' }
@@ -190,5 +191,5 @@ switch ($Action) {
     'logs' { & .\dsh.bat logs }
     'status' { docker compose ps }
 }
-if ($Action -in @('install','configure')) { Start-Sleep -Seconds 3; Start-Process 'http://127.0.0.1:3080' }
-Write-Host "完成：$Action`n工程目录：$(Get-Location)`n管理：.\dsh.bat [start|update|stop|restart|logs|status]" -ForegroundColor Green
+if ($DshAction -in @('install','configure')) { Start-Sleep -Seconds 3; Start-Process 'http://127.0.0.1:3080' }
+Write-Host "完成：$DshAction`n工程目录：$(Get-Location)`n管理：.\dsh.bat [start|update|stop|restart|logs|status]" -ForegroundColor Green
