@@ -192,12 +192,12 @@ function Invoke-WithGitSsh {
 function Invoke-GitHubClone {
     param([string]$Destination)
     $attempts = [Collections.Generic.List[object]]::new()
+    $attempts.Add([pscustomobject]@{ Label = 'HTTPS Git'; Url = $GitHubHttpsUrl; Ssh = $null })
     foreach ($key in Get-GitHubSshKeys) {
         $attempts.Add([pscustomobject]@{ Label = "SSH key $([IO.Path]::GetFileName($key))"; Url = $GitHubSshUrl; Ssh = (Get-GitSshCommand $key) })
     }
     $currentSsh = if ($env:GIT_SSH_COMMAND) { $env:GIT_SSH_COMMAND } else { Get-GitSshCommand '' }
     $attempts.Add([pscustomobject]@{ Label = 'SSH agent/config'; Url = $GitHubSshUrl; Ssh = $currentSsh })
-    $attempts.Add([pscustomobject]@{ Label = 'HTTPS Git'; Url = $GitHubHttpsUrl; Ssh = $null })
 
     foreach ($attempt in $attempts) {
         Write-Host "==> 尝试通过 $($attempt.Label) 获取工程..." -ForegroundColor Yellow
@@ -208,7 +208,7 @@ function Invoke-GitHubClone {
     return $false
 }
 
-function Invoke-GitHubFetch {
+function Invoke-GitHubSshFetch {
     param([string]$Directory)
     foreach ($key in Get-GitHubSshKeys) {
         $ssh = Get-GitSshCommand $key
@@ -217,9 +217,7 @@ function Invoke-GitHubFetch {
     }
     $currentSsh = if ($env:GIT_SSH_COMMAND) { $env:GIT_SSH_COMMAND } else { Get-GitSshCommand '' }
     $ok = Invoke-WithGitSsh $currentSsh { & git -C $Directory fetch origin main }
-    if ($ok) { return $true }
-    & git -C $Directory fetch origin main
-    return ($LASTEXITCODE -eq 0)
+    return $ok
 }
 
 function Fetch-ArchiveProject {
@@ -256,7 +254,7 @@ function Fetch-Project {
         if ((Get-Command git -ErrorAction SilentlyContinue) -and (Invoke-GitHubClone $Dir)) {
             return
         }
-        Write-Warning 'SSH 和 HTTPS Git 均失败，将改用 GitHub ZIP 下载。'
+        Write-Warning 'HTTPS 和 SSH Git 均失败，将改用 GitHub ZIP 下载。'
         Fetch-ArchiveProject
     } elseif (Test-Path (Join-Path $Dir '.git')) {
         Write-Host '==> 正在同步工程文件...' -ForegroundColor Yellow
@@ -265,20 +263,24 @@ function Fetch-Project {
         git -C $Dir diff --cached --quiet; if ($LASTEXITCODE -ne 0) { throw "$Dir 存在已暂存修改。" }
         $origin = ((git -C $Dir remote get-url origin 2>$null) | Select-Object -First 1)
         $origin = if ($origin) { $origin.Trim() } else { '' }
-        $switchedOrigin = $false
-        if ($origin -match 'github\.com(?::|/)univers629/dsh-docker(?:\.git)?/?$' -and $origin -ne $GitHubSshUrl) {
-            git -C $Dir remote set-url origin $GitHubSshUrl
-            $switchedOrigin = ($LASTEXITCODE -eq 0)
-        }
-        $fetched = Invoke-GitHubFetch $Dir
-        if (-not $fetched -and $switchedOrigin) {
-            git -C $Dir remote set-url origin $origin
-            if ($LASTEXITCODE -eq 0) {
-                git -C $Dir fetch origin main
-                $fetched = ($LASTEXITCODE -eq 0)
+        $officialOrigin = $origin -match 'github\.com(?::|/)univers629/dsh-docker(?:\.git)?/?$'
+        if ($officialOrigin) {
+            if ($origin -ne $GitHubHttpsUrl) {
+                git -C $Dir remote set-url origin $GitHubHttpsUrl
+                if ($LASTEXITCODE -ne 0) { throw '无法将官方远端切换为 HTTPS。' }
             }
+            Write-Host '==> 尝试通过 HTTPS Git 更新工程...' -ForegroundColor Yellow
+            $fetched = Invoke-WithGitSsh $null { & git -C $Dir fetch origin main }
+            if (-not $fetched) {
+                Write-Warning 'HTTPS Git 更新失败，将改用用户 SSH 密钥。'
+                git -C $Dir remote set-url origin $GitHubSshUrl
+                if ($LASTEXITCODE -eq 0) { $fetched = Invoke-GitHubSshFetch $Dir }
+            }
+        } else {
+            $currentSsh = if ($env:GIT_SSH_COMMAND) { $env:GIT_SSH_COMMAND } else { $null }
+            $fetched = Invoke-WithGitSsh $currentSsh { & git -C $Dir fetch origin main }
         }
-        if (-not $fetched) { throw '无法通过 SSH 或 HTTPS 从 GitHub 获取最新工程文件。' }
+        if (-not $fetched) { throw '无法通过 HTTPS 或 SSH 从 GitHub 获取最新工程文件。' }
         git -C $Dir merge --ff-only FETCH_HEAD
         if ($LASTEXITCODE -ne 0) { throw '本地工程无法 fast-forward 到 origin/main。' }
     } elseif (Test-Path (Join-Path $Dir '.dsh-docker-archive-source')) {
