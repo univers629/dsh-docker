@@ -29,31 +29,31 @@
 
 ---
 
-## ⚡ 1-Line Instant Installation (Recommended)
+## ⚡ One Command for Installation, Configuration, and Management
 
-No manual repository cloning required. Copy and paste one command to automatically download, build, and launch:
+The installer asks what to do, which in-container user to run, how access is protected, where the reverse proxy runs, and which public hosts are trusted. It writes `.env` automatically. Built-in Basic Auth stores only a bcrypt hash in `data/auth/htpasswd`, never the plaintext password.
 
 ### 🪟 Windows (PowerShell)
+
 ```powershell
 irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1 | iex
 ```
 
 ### 🐧 Linux / 🍏 macOS (Bash)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash
 ```
 
-Run DSH as UID 0 inside the Linux container (this does not grant host-root access):
+Run the same command later to update, start, stop, restart, view logs/status, or reconfigure. The default is the unprivileged `node` user. Linux users may select in-container root, which does not grant host root, a Docker socket, or privileged-container capabilities.
+
+Automation can still use flags, for example:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash -s -- --root
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash -s -- install --user --access local --non-interactive
 ```
 
-Restore the default unprivileged `node` mode:
-```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash -s -- --user
-```
-
-Windows has no Linux-style root mode; the Windows installation uses the container user defined by the image.
+Run `bash install.sh --help` for the complete flag list.
 
 > [!TIP]
 > **⏱️ Build Duration Note**:
@@ -64,7 +64,7 @@ Windows has no Linux-style root mode; the Windows installation uses the containe
 
 ## 💡 Design Philosophy
 
-This project delivers a solid, zero-friction, production-grade deployment runtime for **DeepSeek Harness (DSH)** based on four core design principles:
+This project delivers a solid, zero-friction, production-grade deployment runtime for **DeepSeek Harness (DSH)** based on five core design principles:
 
 1. **Immutable OS & Two-Root Persistence**:
    - Base system libraries (Debian 13 + Node 24 + Python 3.13 + uv + procps) are baked into an immutable container layer.
@@ -72,7 +72,7 @@ This project delivers a solid, zero-friction, production-grade deployment runtim
 2. **100% Local Self-Contained Build**:
    - Free from external pre-built registry dependencies. Docker builds straight from upstream official source with automated sandbox patches.
 3. **Authenticated Public-Local Mode**:
-   - The public entry must be protected by Cloudflare Access, Basic Auth, or a private tunnel. The outer proxy sends authenticated traffic to a private DSH port, and the container proxy presents it to the official server as loopback. Official settings, credentials, and plugin pages therefore use the same host persistence path without changing upstream permission boundaries.
+   - Public access must use HTTPS and be authenticated by Cloudflare Access, built-in Basic Auth, panel authentication, or a private tunnel. The container proxy then presents traffic to the official server as loopback, so settings, credentials, and plugin pages use the same host persistence path without changing upstream permission boundaries.
 4. **Autonomous Agent Governance & Security Guard**:
    - Container startup automatically corrects mount volume permissions (running securely as `node` via `gosu`), guards `.credentials.yaml` (`600`) and SSH key permissions, preinstalls `procps` (`pkill`/`pgrep`), and whitelists `/data` in all sandboxes.
 
@@ -110,16 +110,16 @@ graph TD
 
 ---
 
-## 🚦 User Flow & Routing Guide
+## 🚦 Daily Management
 
-| User Scenario | OS | Recommended Action | Notes |
-|---|---|---|---|
-| **1-Line Instant Install** | **Windows** | `irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1 \| iex` | Auto-downloads, builds locally, runs container, opens browser |
-| **1-Line Instant Install** | **Linux / macOS** | `curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh \| bash` | Auto-downloads and starts container in background |
-| **Daily Management** | **Windows** | Double-click **`dsh.bat`** or `.\dsh.bat [start\|stop\|logs]` | Unified management CLI |
-| **Daily Management** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | Unified management CLI |
-| **Sync Official Updates** | **All OS** | `.\dsh.bat update` or `./dsh.sh update` | Pulls latest master, rebuilds locally in seconds, prunes cache |
-| **Reverse Proxy (dpanel/1Panel)** | **All OS** | Prefer joining dsh to dpanel's Docker network and proxying to `http://dsh:3080`; otherwise use `http://127.0.0.1:3080` and keep `DSH_BIND_HOST` private | Rebuilds replace only dsh; persistent data remains mounted |
+Prefer rerunning the one-line installer and selecting an action from its menu. From inside the project directory, the direct commands remain available:
+
+```text
+Linux/macOS: ./dsh.sh [start|update|stop|restart|logs|status]
+Windows:     .\dsh.bat [start|update|stop|restart|logs|status]
+```
+
+Updates sync this project and rebuild the latest upstream DSH source. Persistent data, plugins, sessions, and toolchains remain intact.
 
 ---
 
@@ -142,6 +142,7 @@ dsh_docker/
 ├── 📂 nginx/
 │   └── dsh-nginx.conf        # Built-in boundary-preserving reverse proxy config
 ├── 📂 data/                  # 💾 Persistent data roots (gitignored)
+│   ├── auth/                 # Optional built-in Basic Auth bcrypt file
 │   ├── dsh/                  # Sessions history (sessions/), profiles, .credentials.yaml, settings.yaml
 │   ├── home/                 # Linux user home (~/.local, ~/.npm-global, ~/.ssh, ~/.cache)
 │   ├── mcp/                  # 🌟 Custom MCP server source code, venvs, and data
@@ -182,11 +183,11 @@ The upstream frontend selects the settings scope based on whether the connection
 ```javascript
 settingsScope: connection.isLoopback ? "host" : "memory"
 ```
-Loopback access can use the official host settings scope. Public access enters that scope only after an authenticated, source-restricted proxy has reached the private 3080 bridge; the container Nginx then presents the request as loopback. The browser receives `DSH_PUBLIC_LOCAL_MODE=1` and selects the same host settings mirror. The cookie is not an authentication credential, and the backend still receives only internal loopback requests.
+Loopback access can use the official host settings scope. Public access enters that scope only after built-in Basic Auth or a trusted outer authentication layer has reached the private 3080 bridge; the container Nginx then presents the request as loopback. The browser receives `DSH_PUBLIC_LOCAL_MODE=1` and selects the same host settings mirror. The cookie is not an authentication credential, and the backend still receives only internal loopback requests.
 
 Vision Router exposes its own controlled RPC for capability and permission status; that is separate from the DSH generic settings API. Plugins do not need per-plugin public-host adaptations.
 
-When using a public tunnel or reverse proxy, copy `.env.example` to `.env` and set `DSH_TRUSTED_HOSTS`. The variable accepts comma-separated `host[:port]` entries, for example `agent.example.com,admin.example.com`. This trusted-host list only satisfies the browser request authority fence; it does not enable remote plugin settings writes. Vision Router's “allow trusted Host remote settings” switch remains an explicit security setting in its own settings page. It can be left empty for loopback-only access.
+The installer fills `DSH_TRUSTED_HOSTS` automatically; `.env.example` remains available for manual configuration. The variable accepts comma-separated `host[:port]` entries, for example `agent.example.com,admin.example.com`. This trusted-host list only satisfies the browser request authority fence; it does not enable remote plugin settings writes. Vision Router's “allow trusted Host remote settings” switch remains an explicit security setting in its own settings page. It can be left empty for loopback-only access.
 
 `allowRemoteSettings` is a user authorization choice. The Agent does not enable or disable it on the user's behalf; use the DSH machine's loopback UI or an SSH tunnel port forward to make that choice in Vision Router settings. After a plugin update or DSH restart, close stale pages and load the current page before checking whether the toggle persisted.
 
@@ -235,17 +236,18 @@ The container includes preconfigured `PATH`: `$HOME/.local/bin` and `$HOME/.npm-
 - **Nginx/SSH tunnel on the host**: Point the proxy to **`http://127.0.0.1:3080`**.
 - **Principle**: Port 3080 is private. Rebuilding dsh replaces only the image; `data/` and `workspace/` remain mounted.
 
-> 💡 **dpanel network connection**: If using a separate dpanel network, attach the running container (use the actual network name):
-> ```bash
-> sudo docker network connect --alias dsh dpanel-local dsh
-> ```
+> 💡 **dpanel network connection**: Select “Docker container/panel” in the installer and enter the dpanel network name (usually `dpanel-local`). Compose persists the attachment across rebuilds; no manual `docker network connect` is required.
 
 ### 2. Standard Host Nginx Configuration
 
+Replace the certificate paths with real files. When using `trusted-proxy`, configure Access, `auth_basic`, or another authentication mechanism at this layer as well.
+
 ```nginx
 server {
-    listen 80;
+    listen 443 ssl;
     server_name dsh.yourdomain.com;
+    ssl_certificate /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
     client_max_body_size 0;
 
     location / {
@@ -267,11 +269,15 @@ server {
 ## 🔒 Security Hardening for Public Access
 
 > [!WARNING]
-> DeepSeek Harness does not have native authentication. Keep 3080 private and expose it only through an authenticated reverse proxy; never set `DSH_BIND_HOST=0.0.0.0`.
+> DeepSeek Harness does not have native authentication. The installer binds 3080 to `127.0.0.1` by default. Public access must use HTTPS and an authenticated reverse proxy; never set `DSH_BIND_HOST=0.0.0.0`.
 
-1. **Cloudflare Access (Recommended)**: Keep the Access policy and allow only Cloudflare source ranges plus local tunnel traffic at the origin for this hostname.
-2. **Cloudflare Zero Trust Tunnel**: Point the tunnel to `http://localhost:3080` and enable an Access policy.
-3. **HTTP Basic Auth or private VPN**: Protect the host reverse proxy and keep the DSH port private.
+The installer offers three access modes:
+
+1. **Local/SSH tunnel** (`local`): for a local browser or SSH port forwarding.
+2. **Existing Cloudflare Access, dpanel, Nginx authentication, or private VPN** (`trusted-proxy`): the wizard records trusted hosts and an optional external Docker network; the outer entry point remains the authentication boundary.
+3. **Built-in Basic Auth** (`basic`): the wizard generates a bcrypt password file. It authenticates usernames and passwords, but the outer proxy must still provide HTTPS; Basic Auth does not provide MFA.
+
+Cloudflare Access/OIDC with MFA is stronger than Basic Auth alone. Correctly configured Caddy, Nginx, and the built-in Nginx have negligible performance differences for this workload.
 
 ---
 

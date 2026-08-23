@@ -69,6 +69,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
        ca-certificates \
        curl \
        nginx \
+       apache2-utils \
        gosu \
        python3 \
        python3-pip \
@@ -83,6 +84,7 @@ COPY bin/dsh /usr/local/bin/dsh
 COPY bin/manage-dsh-plugin /usr/local/bin/manage-dsh-plugin
 COPY bin/link-modules.mjs /usr/local/bin/link-modules.mjs
 COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY bin/configure-nginx-auth /usr/local/bin/configure-nginx-auth
 COPY bin/patch-profile-plugins.mjs /usr/local/bin/patch-profile-plugins.mjs
 COPY bin/install-docker-control.mjs /usr/local/bin/install-docker-control.mjs
 COPY dsh-home/ /etc/dsh-home/
@@ -94,7 +96,7 @@ RUN cd /opt/dsh-docker-control \
     && npm cache clean --force \
     && mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
     && chown -R node:node /opt /data /workspace \
-    && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs \
+    && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/configure-nginx-auth /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs \
     && printf '%s\n' 'export PATH="/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:$PATH"' > /etc/profile.d/dsh-toolchain.sh
 
 ENV DSH_HOME=/data/dsh \
@@ -108,7 +110,7 @@ WORKDIR /workspace
 EXPOSE 3080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3080/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:3080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["web"]

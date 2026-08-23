@@ -29,31 +29,31 @@
 
 ---
 
-## ⚡ 一行流极速安装 (推荐)
+## ⚡ 一条命令完成安装、配置与管理
 
-无需手动克隆完整仓库，复制单行命令即可全自动安装、本地构建并启动服务：
+安装器会逐项询问本次操作、容器内权限、访问保护方式、反向代理位置和公网域名，并自动生成 `.env`。选择内置 Basic Auth 时，密码只以 bcrypt 哈希写入 `data/auth/htpasswd`，不会保存明文。
 
-### 🪟 Windows (PowerShell)
+### 🪟 Windows（PowerShell）
+
 ```powershell
 irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1 | iex
 ```
 
-### 🐧 Linux / 🍏 macOS (Bash)
+### 🐧 Linux / 🍏 macOS（Bash）
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash
 ```
 
-Linux 容器内 root 模式（仅改变容器内 DSH 进程 UID，不授予宿主机 root 权限）：
+以后再次执行同一条命令，即可选择更新、启动、停止、重启、日志、状态或重新配置。默认使用容器内普通用户 `node`；Linux 可在向导中切换到容器内 root，但不会获得宿主机 root、Docker socket 或特权容器权限。
+
+无人值守环境仍可使用参数，例如：
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash -s -- --root
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash -s -- install --user --access local --non-interactive
 ```
 
-恢复默认的容器内 `node` 模式：
-```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh | bash -s -- --user
-```
-
-Windows 没有 Linux 意义上的 root 模式；Windows 安装始终使用镜像定义的容器用户。
+完整参数可执行 `bash install.sh --help` 查看。
 
 > [!TIP]
 > **⏱️ 构建耗时提示 (Build Duration Note)**：
@@ -64,7 +64,7 @@ Windows 没有 Linux 意义上的 root 模式；Windows 安装始终使用镜像
 
 ## 💡 设计理念 (Design Philosophy)
 
-本项目旨在为 **DeepSeek Harness (DSH)** 提供一个极其稳固、开箱即用且高度自主的生产级运行底座，核心遵循四大设计准则：
+本项目旨在为 **DeepSeek Harness (DSH)** 提供一个极其稳固、开箱即用且高度自主的生产级运行底座，核心遵循五项设计准则：
 
 1. **不可变系统与两根持久化 (Immutable OS & Two-Root Persistence)**：
    - 操作系统、基础运行库（Debian 13 + Node 24 + Python 3.13 + uv + procps）封装为不可变容器层；
@@ -72,7 +72,7 @@ Windows 没有 Linux 意义上的 root 模式；Windows 安装始终使用镜像
 2. **纯本地自主闭环构建 (100% Local Self-Contained Build)**：
    - 彻底摆脱对第三方镜像仓库的依赖，本地 Docker 自动抓取官方最新源码、自动注入沙箱补丁并完成编译，确保代码链路 100% 纯净可审计。
 3. **认证后的公网本地模式 (Authenticated Public-Local Mode)**：
-   - 公网入口必须经过 Cloudflare Access、Basic Auth 或私有隧道；外层反代将已认证请求送入只绑定私有接口的 DSH 端口，容器内部再以 `127.0.0.1` 访问官方 DSH。这样所有官方设置、凭据和插件页面都使用同一套 host 持久化逻辑，不修改官方后端权限集合。
+   - 公网入口必须使用 HTTPS，并由 Cloudflare Access、内置 Basic Auth、面板认证或私有隧道完成鉴权；容器内部再以 `127.0.0.1` 访问官方 DSH。这样所有官方设置、凭据和插件页面都使用同一套 host 持久化逻辑，不修改官方后端权限集合。
 4. **智能体全权限数据治理与安全守护 (Agent Governance & Security Guard)**：
    - 容器启动自动纠正数据卷属主权限（`gosu node` 降权安全运行），严格守护 `.credentials.yaml`（`600`）与 SSH 密钥权限，预装 `procps`（`pkill`/`pgrep`），沙箱白名单完全放行持久化目录。
 
@@ -110,16 +110,16 @@ graph TD
 
 ---
 
-## 🚦 用户场景分流指引
+## 🚦 日常管理
 
-| 用户场景 | 操作系统 | 推荐操作 | 说明 |
-|---|---|---|---|
-| **一行流极速安装** | **Windows** | `irm https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.ps1 \| iex` | 自动下载、本地编译镜像、启动容器并自动打开浏览器 |
-| **一行流极速安装** | **Linux / macOS** | `curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker-dev/main/install.sh \| bash` | 自动下载并后台启动容器 |
-| **日常管理 (启动/停止/日志)** | **Windows** | 双击 **`dsh.bat`** 或 `.\dsh.bat [start\|stop\|logs]` | 统一高颜值管理 CLI |
-| **日常管理 (启动/停止/日志)** | **Linux / macOS** | `./dsh.sh [start\|stop\|logs\|status]` | 统一高颜值管理 CLI |
-| **同步官方最新源码** | **全平台** | `.\dsh.bat update` 或 `./dsh.sh update` | 在线拉取官方最新 Commit，秒级重新编译，自动清理垃圾缓存 |
-| **面板反代管理 (dpanel/1Panel)** | **全平台** | 推荐将 DSH 加入 dpanel 网络并使用容器别名；否则宿主机 Nginx/SSH 隧道使用 `http://127.0.0.1:3080`，不要绑定 `0.0.0.0` | 端口只在私有接口监听，数据目录独立持久化，重建 dsh 不影响其他容器 |
+优先重复运行上面的一行命令，通过菜单完成所有操作。进入工程目录后也可直接使用：
+
+```text
+Linux/macOS: ./dsh.sh [start|update|stop|restart|logs|status]
+Windows:     .\dsh.bat [start|update|stop|restart|logs|status]
+```
+
+更新会同步本项目并重新拉取官方 DSH 源码构建；数据、插件、会话和工具链仍保留在持久化目录中。
 
 ---
 
@@ -142,6 +142,7 @@ dsh_docker/
 ├── 📂 nginx/
 │   └── dsh-nginx.conf        # 容器内保留请求边界的反向代理配置
 ├── 📂 data/                  # 💾 核心数据持久化目录（Git 忽略数据内容）
+│   ├── auth/                 # 可选的内置 Basic Auth bcrypt 密码文件
 │   ├── dsh/                  # 会话历史 (sessions/)、插件 (profiles/)、.credentials.yaml、settings.yaml
 │   ├── home/                 # Linux 用户家目录 (~/.local, ~/.npm-global, ~/.ssh, ~/.cache)
 │   ├── mcp/                  # 🌟 自定义 MCP 服务器源码、独立虚拟环境与数据
@@ -183,11 +184,11 @@ DeepSeek Harness 官方前端在 `packages/client/ui-settings/lib/client.js` 中
 // 官方原生判断：
 settingsScope: connection.isLoopback ? "host" : "memory"
 ```
-回环访问可以使用 DSH 官方的 host settings。公网访问只有在前置认证、源站限制和私有 3080 同时成立时，才会由容器 Nginx 转换为内部 loopback；浏览器通过 `DSH_PUBLIC_LOCAL_MODE=1` Cookie 选择同一套 host settings 镜像。Cookie 不是认证凭据，后端仍只接受容器内部的 loopback 请求。
+回环访问可以使用 DSH 官方的 host settings。公网访问只有在内置 Basic Auth 或可信外层认证、源站限制和私有 3080 同时成立时，才会由容器 Nginx 转换为内部 loopback；浏览器通过 `DSH_PUBLIC_LOCAL_MODE=1` Cookie 选择同一套 host settings 镜像。Cookie 不是认证凭据，后端仍只接受容器内部的 loopback 请求。
 
 Vision Router 的配置页通过自身的受控 RPC 显示能力与权限状态；这与 DSH 通用 settings API 是两条不同的权限边界。插件无需单独适配公网域名。
 
-如果通过隧道或反向代理使用公网域名，请复制 `.env.example` 为 `.env`，填写 `DSH_TRUSTED_HOSTS`。该变量支持逗号分隔的多个 `host[:port]`，例如 `agent.example.com,admin.example.com`。这里的 trusted host 只解决浏览器请求的 authority 校验，不会自动开启插件的远程写设置权限；Vision Router 的“允许可信 Host 远程修改设置”仍由其设置页中的安全开关控制。仅通过回环地址访问时可以留空。
+安装向导会自动填写 `DSH_TRUSTED_HOSTS`；手动配置时可参考 `.env.example`。该变量支持逗号分隔的多个 `host[:port]`，例如 `agent.example.com,admin.example.com`。这里的 trusted host 只解决浏览器请求的 authority 校验，不会自动开启插件的远程写设置权限；Vision Router 的“允许可信 Host 远程修改设置”仍由其设置页中的安全开关控制。仅通过回环地址访问时可以留空。
 
 `allowRemoteSettings` 是用户授权项。Agent 不会替用户打开或关闭它；请通过运行 DSH 机器的回环地址或 SSH 隧道端口转发，在 Vision Router 设置页中明确操作。插件更新或 DSH 重启后若页面仍显示旧状态，请先关闭旧页面并重新加载最新页面，再确认该开关的写入结果。
 
@@ -238,17 +239,18 @@ environment:
 - **宿主机直接运行的 Nginx/SSH 隧道**：代理目标填写 **`http://127.0.0.1:3080`**。
 - **原理**：3080 只监听私有接口，公网流量必须先通过认证反代；容器重建只替换 dsh 镜像，不替换 `data/` 与 `workspace/`。
 
-> 💡 **dpanel 专属网络连接**：若使用独立网络，可执行以下命令把现有 dsh 接入 dpanel 网络（网络名称以实际部署为准）：
-> ```bash
-> sudo docker network connect --alias dsh dpanel-local dsh
-> ```
+> 💡 **dPanel 网络连接**：在向导中选择“Docker 容器/面板”，再填写 dPanel 的网络名（通常为 `dpanel-local`）。Compose 会持久化该网络关系，重建后不需要手动执行 `docker network connect`。
 
 ### 2. 标准 Nginx 反向代理配置
 
+证书路径替换为实际文件；若选择 `trusted-proxy`，还需在这一层配置 Access、`auth_basic` 或其他认证。
+
 ```nginx
 server {
-    listen 80;
+    listen 443 ssl;
     server_name dsh.yourdomain.com;
+    ssl_certificate /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
     client_max_body_size 0;
 
     location / {
@@ -270,11 +272,15 @@ server {
 ## 🔒 公网访问安全加固指南
 
 > [!WARNING]
-> DeepSeek Harness 原生未设登录鉴权。3080 必须保持私有监听，公网只允许经过认证的反向代理访问；不要把 `DSH_BIND_HOST` 设置为 `0.0.0.0`。
+> DeepSeek Harness 原生未设登录鉴权。向导默认让 3080 只绑定 `127.0.0.1`；公网访问必须经过 HTTPS 和认证反向代理，不要把 `DSH_BIND_HOST` 设置为 `0.0.0.0`。
 
-1. **Cloudflare Access（推荐）**：保留站点 Access 策略，并在源站 Nginx/DPanel 对该域名只放行 Cloudflare 网段与本机隧道地址。
-2. **Cloudflare Zero Trust Tunnel**：将 Tunnel 指向 `http://localhost:3080`，并开启 Access 策略。
-3. **HTTP Basic Auth 或私有 VPN**：保护宿主机反代并保持 DSH 端口私有。
+安装向导中的访问保护选项对应如下：
+
+1. **仅本机/SSH 隧道**：选择 `local`，适合本机浏览器或 SSH 端口转发。
+2. **已有 Cloudflare Access、dPanel、Nginx 或私有 VPN**：选择 `trusted-proxy`，向导会记录 trusted hosts 和可选的外部 Docker 网络；认证仍由外层入口负责。
+3. **内置 Basic Auth**：选择 `basic`，向导会生成 bcrypt 密码文件。它只负责用户名密码，仍建议在外层反代启用 HTTPS；Basic Auth 不提供 MFA。
+
+Cloudflare Access/OIDC + MFA 的安全能力高于单纯 Basic Auth；Caddy、Nginx 和内置 Nginx 在配置正确时性能差异可以忽略。
 
 ---
 

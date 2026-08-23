@@ -23,8 +23,9 @@ if /i "%ACTION%"=="stop" goto :stop
 if /i "%ACTION%"=="down" goto :stop
 if /i "%ACTION%"=="restart" goto :restart
 if /i "%ACTION%"=="logs" goto :logs
+if /i "%ACTION%"=="status" goto :status
 
-echo 用法: %~nx0 [start^|update^|stop^|restart^|logs]
+echo 用法: %~nx0 [start^|update^|stop^|restart^|logs^|status]
 exit /b 0
 
 :start_and_open
@@ -71,6 +72,10 @@ exit /b %errorlevel%
 :logs
 docker compose logs -f dsh
 exit /b 0
+
+:status
+docker compose ps
+exit /b %errorlevel%
 
 :error
 echo [错误] 操作失败，请检查 Docker 是否正常运行。
