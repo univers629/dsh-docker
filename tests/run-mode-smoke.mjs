@@ -30,6 +30,7 @@ assert.match(files.entrypoint, /true\|1\|yes\|on/)
 assert.match(files.entrypoint, /false\|0\|no\|off/)
 assert.match(files.entrypoint, /invalid DSH_RUN_AS_ROOT/)
 assert.match(files.entrypoint, /DSH_RUN_AS_ROOT=true.*requires the container entrypoint/s)
+assert.doesNotMatch(files.entrypoint, /\/data\/home\/tmp/)
 assert.match(files.entrypoint, /exec gosu node \/usr\/local\/bin\/dsh/)
 assert.match(files.entrypoint, /exec \/usr\/local\/bin\/dsh/)
 
