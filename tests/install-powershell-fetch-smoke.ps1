@@ -18,17 +18,20 @@ $originalSsh = $env:GIT_SSH_COMMAND
 
 try {
     New-Item -ItemType Directory -Path $fakeBin -Force | Out-Null
-    [IO.File]::WriteAllText((Join-Path $fakeBin 'git.cmd'), "@echo off`r`necho %GIT_SSH_COMMAND%^|%*>>`"$log`"`r`nexit /b 0`r`n")
+    [IO.File]::WriteAllText((Join-Path $fakeBin 'git.cmd'), "@echo off`r`necho %GIT_SSH_COMMAND%^|%*>>`"$log`"`r`nif `"%GIT_SSH_COMMAND%`"==`"`" exit /b 1`r`nexit /b 0`r`n")
     $env:PATH = "$fakeBin;$originalPath"
     $env:GIT_SSH_COMMAND = 'original-ssh-command'
 
-    if (-not (Invoke-GitHubClone 'target-dir')) { throw 'Mock SSH clone did not succeed.' }
-    $call = [IO.File]::ReadAllText($log)
-    if ($call -notmatch 'BatchMode=yes.*github.*IdentitiesOnly=yes\|clone ssh://git@ssh\.github\.com:443/univers629/dsh-docker\.git target-dir') {
-        throw "Unexpected first Git call: $call"
+    if (-not (Invoke-GitHubClone 'target-dir')) { throw 'Mock HTTPS-to-SSH clone fallback did not succeed.' }
+    $calls = @([IO.File]::ReadAllLines($log))
+    if ($calls.Count -ne 2 -or $calls[0] -notmatch '^\|clone https://github\.com/univers629/dsh-docker\.git target-dir$') {
+        throw "HTTPS was not the first Git call: $($calls -join '; ')"
+    }
+    if ($calls[1] -notmatch 'BatchMode=yes.*github.*IdentitiesOnly=yes\|clone ssh://git@ssh\.github\.com:443/univers629/dsh-docker\.git target-dir') {
+        throw "SSH key was not the second Git call: $($calls -join '; ')"
     }
     if ($env:GIT_SSH_COMMAND -ne 'original-ssh-command') { throw 'GIT_SSH_COMMAND was not restored.' }
-    Write-Output 'PowerShell Git fallback smoke: ok'
+    Write-Output 'PowerShell HTTPS-to-SSH fallback smoke: ok'
 } finally {
     $env:PATH = $originalPath
     if ($null -eq $originalSsh) { Remove-Item Env:GIT_SSH_COMMAND -ErrorAction SilentlyContinue }
