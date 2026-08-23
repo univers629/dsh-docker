@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 const root = resolve(new URL('..', import.meta.url).pathname.replace(/^\/(.:)/, '$1'))
@@ -12,6 +12,10 @@ const bash = process.platform === 'win32'
   : 'bash'
 
 assert.ok(bash, 'bash is required for the empty-directory installer smoke test')
+
+const bashPath = (path) => process.platform === 'win32'
+  ? path.replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`).replaceAll('\\', '/')
+  : path
 
 const sandbox = await mkdtemp(join(tmpdir(), 'dsh-install-smoke-'))
 const mockBin = join(sandbox, 'bin')
@@ -45,14 +49,20 @@ for (const [name, body] of [['git', gitMock], ['docker', dockerMock]]) {
   await chmod(path, 0o755)
 }
 
-const runInstall = (target, args, extraEnv = {}) => spawnSync(bash, [installScript, 'install', '--non-interactive', '--dir', target, ...args], {
+const runInstall = (target, args, extraEnv = {}) => spawnSync(bash, [
+  '-c',
+  'PATH="$MOCK_BIN:$PATH"; export PATH; exec "$INSTALL_SCRIPT" "$@"',
+  'dsh-install-smoke',
+  'install', '--non-interactive', '--dir', target, ...args,
+], {
   cwd: sandbox,
   encoding: 'utf8',
   env: {
     ...process.env,
     ...extraEnv,
     MOCK_DOCKER_LOG: dockerLog,
-    PATH: `${mockBin}${delimiter}${process.env.PATH}`,
+    MOCK_BIN: bashPath(mockBin),
+    INSTALL_SCRIPT: bashPath(installScript),
   },
 })
 
