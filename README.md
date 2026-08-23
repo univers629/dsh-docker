@@ -114,7 +114,7 @@ flowchart LR
 | `/data/mcp` | `data/mcp` | 自定义 MCP 源码、虚拟环境和数据 |
 | `/data/agents` | `data/agents` | 子智能体共享状态 |
 | `/workspace` | `workspace` | Agent 工作区 |
-| `/usr/bin`、`/usr/lib`、`/usr/share`、`/usr/include`、`/usr/libexec`、`/usr/games` | `data/system/usr/*` | Debian 软件包安装内容 |
+| `/usr/bin`<br>`/usr/lib`<br>`/usr/share`<br>`/usr/include`<br>`/usr/libexec`<br>`/usr/games` | `data/system/usr/*` | Debian 软件包安装内容 |
 | `/etc`、`/var/lib`、`/var/cache` | `data/system/etc`、`data/system/var/*` | Debian 配置、软件数据库和 apt 缓存 |
 
 `/usr/local`、`/usr/sbin` 和 Docker init 保留在镜像层，不覆盖这些路径。删除 `data/system` 会删除容器内通过 apt 安装的软件；删除 `data/dsh` 会删除 DSH 配置和会话。
