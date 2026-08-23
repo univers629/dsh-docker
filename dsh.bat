@@ -10,10 +10,13 @@ if "%ACTION%"=="" set "ACTION=default"
 
 where docker >nul 2>nul
 if errorlevel 1 (
-  echo [错误] 未检测到 Docker，请先安装并启动 Docker Desktop 后重试。
+  echo [错误] 未检测到 Docker，请先安装 Docker Desktop 后重试。
   pause
   exit /b 1
 )
+
+call :ensure_docker
+if errorlevel 1 exit /b 1
 
 if /i "%ACTION%"=="default" goto :start_and_open
 if /i "%ACTION%"=="start" goto :start
@@ -76,6 +79,52 @@ exit /b 0
 :status
 docker compose ps
 exit /b %errorlevel%
+
+:ensure_docker
+set "DOCKER_OS="
+for /f "delims=" %%i in ('docker info --format "{{.OSType}}" 2^>nul') do set "DOCKER_OS=%%i"
+if /i "%DOCKER_OS%"=="linux" exit /b 0
+if /i "%DOCKER_OS%"=="windows" (
+  echo [错误] DSH 需要 Linux 容器。请在 Docker Desktop 中切换到 Linux containers。
+  pause
+  exit /b 1
+)
+
+echo ==^> Docker Desktop Linux Engine 未运行，正在启动...
+docker desktop start >nul 2>&1
+if errorlevel 1 (
+  if exist "%ProgramFiles%\Docker\Docker\Docker Desktop.exe" (
+    start "" /min "%ProgramFiles%\Docker\Docker\Docker Desktop.exe"
+  ) else if exist "%LocalAppData%\Docker\Docker Desktop.exe" (
+    start "" /min "%LocalAppData%\Docker\Docker Desktop.exe"
+  ) else (
+    echo [错误] 无法自动启动 Docker Desktop，请手动启动后重试。
+    pause
+    exit /b 1
+  )
+)
+
+set /a DOCKER_WAIT=0
+:wait_docker
+set "DOCKER_OS="
+for /f "delims=" %%i in ('docker info --format "{{.OSType}}" 2^>nul') do set "DOCKER_OS=%%i"
+if /i "%DOCKER_OS%"=="linux" (
+  echo ==^> Docker Desktop Linux Engine 已就绪。
+  exit /b 0
+)
+if /i "%DOCKER_OS%"=="windows" (
+  echo [错误] Docker Desktop 当前使用 Windows Containers，请切换到 Linux containers。
+  pause
+  exit /b 1
+)
+if %DOCKER_WAIT% geq 180 (
+  echo [错误] Docker Desktop Linux Engine 在 3 分钟内未就绪，请打开 Docker Desktop 检查。
+  pause
+  exit /b 1
+)
+timeout /t 2 /nobreak >nul
+set /a DOCKER_WAIT+=2
+goto :wait_docker
 
 :error
 echo [错误] 操作失败，请检查 Docker 是否正常运行。

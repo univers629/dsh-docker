@@ -2,9 +2,9 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 const read = async (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
-const [compose, dockerfile, entrypoint, authConfig, nginx, installSh, installPs1, envExample, dshSh, readmeZh, readmeEn] = await Promise.all([
+const [compose, dockerfile, entrypoint, authConfig, nginx, installSh, installPs1, envExample, dshSh, dshBat, readmeZh, readmeEn] = await Promise.all([
   'docker-compose.yml', 'Dockerfile', 'bin/entrypoint.sh', 'bin/configure-nginx-auth', 'nginx/dsh-nginx.conf',
-  'install.sh', 'install.ps1', '.env.example', 'dsh.sh', 'README.md', 'README.en.md',
+  'install.sh', 'install.ps1', '.env.example', 'dsh.sh', 'dsh.bat', 'README.md', 'README.en.md',
 ].map(read))
 
 assert.match(compose, /DSH_ACCESS_MODE: "\$\{DSH_ACCESS_MODE:-local\}"/)
@@ -49,6 +49,13 @@ assert.match(installPs1, /BatchMode=yes/)
 assert.match(installPs1, /Invoke-GitHubFetch/)
 assert.match(installPs1, /remote set-url origin \$GitHubSshUrl/)
 assert.match(installPs1, /remote set-url origin \$origin/)
+assert.match(installPs1, /Ensure-DockerEngine/)
+assert.match(installPs1, /docker desktop start/)
+assert.match(installPs1, /Docker Desktop Linux Engine 已就绪/)
+assert.match(installPs1, /Get-ComposeEnvValue \$envFile 'DSH_RUN_AS_ROOT' 'true'/)
+assert.doesNotMatch(installPs1, /容器内权限：1=node/)
+assert.match(dshBat, /docker info --format "\{\{\.OSType\}\}"/)
+assert.match(dshBat, /docker desktop start/)
 assert.match(installSh, /https:\/\/github\.com\/univers629\/dsh-docker\.git/)
 assert.match(installSh, /univers629\/dsh-docker\/archive\/refs\/heads\/main\.tar\.gz/)
 assert.match(installPs1, /https:\/\/github\.com\/univers629\/dsh-docker\.git/)

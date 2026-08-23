@@ -136,7 +136,7 @@ For public domains, the container Nginx presents traffic to DSH as internal loop
 
 ### Permission boundary
 
-The container runs as `node` by default. The entrypoint corrects mounted-directory ownership and protects credential and SSH private-key permissions. `DSH_RUN_AS_ROOT=true` changes only the DSH process UID inside the container; it does not enable privileged mode, mount the Docker socket, or grant host root.
+The Linux installer defaults to `node`; the Windows installer defaults to container `root` and accepts `-User` to select `node`. The entrypoint corrects mounted-directory ownership and protects credential and SSH private-key permissions. Container root does not enable privileged mode, mount the Docker socket, or grant administrator access on the host.
 
 ### Plugins and toolchains
 
