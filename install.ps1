@@ -19,6 +19,8 @@ $ErrorActionPreference = 'Stop'
 if ($Root -and $User) { throw '--Root 与 --User 不能同时使用。' }
 if ($NetworkExternal -and $NetworkInternal) { throw '--NetworkExternal 与 --NetworkInternal 不能同时使用。' }
 $interactive = -not $NonInteractive -and [Environment]::UserInteractive
+$GitHubSshUrl = 'ssh://git@ssh.github.com:443/univers629/dsh-docker.git'
+$GitHubHttpsUrl = 'https://github.com/univers629/dsh-docker.git'
 
 function Set-ComposeEnvValue {
     param([string]$Path, [string]$Key, [string]$Value)
@@ -69,29 +71,150 @@ function Ask-YesNo {
     }
 }
 
+function Get-GitHubSshKeys {
+    $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+    $sshDir = Join-Path $userHome '.ssh'
+    if (-not (Test-Path -LiteralPath $sshDir -PathType Container)) { return @() }
+
+    $preferred = @('github', 'github_ed25519', 'id_ed25519', 'id_rsa', 'id_ecdsa', 'id_dsa')
+    $ignored = @('config', 'authorized_keys', 'known_hosts', 'known_hosts.old')
+    $files = @(Get-ChildItem -LiteralPath $sshDir -File -Force -ErrorAction SilentlyContinue)
+    $keys = [Collections.Generic.List[string]]::new()
+
+    foreach ($name in $preferred) {
+        $file = $files | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+        if ($file) { $keys.Add($file.FullName) }
+    }
+    foreach ($file in $files) {
+        if ($ignored -contains $file.Name -or $file.Extension -eq '.pub' -or $keys -contains $file.FullName) { continue }
+        try {
+            $header = Get-Content -LiteralPath $file.FullName -TotalCount 1 -ErrorAction Stop
+            if ($header -match 'BEGIN .* PRIVATE KEY') { $keys.Add($file.FullName) }
+        } catch { }
+    }
+    return @($keys)
+}
+
+function Get-GitSshCommand {
+    param([string]$Key)
+    $command = 'ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new'
+    if ($Key) { $command += " -i `"$Key`" -o IdentitiesOnly=yes" }
+    return $command
+}
+
+function Invoke-WithGitSsh {
+    param([string]$SshCommand, [scriptblock]$Operation)
+    $previous = $env:GIT_SSH_COMMAND
+    try {
+        if ($SshCommand) { $env:GIT_SSH_COMMAND = $SshCommand }
+        else { Remove-Item Env:GIT_SSH_COMMAND -ErrorAction SilentlyContinue }
+        & $Operation | Out-Host
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        Write-Warning "Git 调用失败：$($_.Exception.Message)"
+        return $false
+    } finally {
+        if ($null -eq $previous) { Remove-Item Env:GIT_SSH_COMMAND -ErrorAction SilentlyContinue }
+        else { $env:GIT_SSH_COMMAND = $previous }
+    }
+}
+
+function Invoke-GitHubClone {
+    param([string]$Destination)
+    $attempts = [Collections.Generic.List[object]]::new()
+    foreach ($key in Get-GitHubSshKeys) {
+        $attempts.Add([pscustomobject]@{ Label = "SSH key $([IO.Path]::GetFileName($key))"; Url = $GitHubSshUrl; Ssh = (Get-GitSshCommand $key) })
+    }
+    $currentSsh = if ($env:GIT_SSH_COMMAND) { $env:GIT_SSH_COMMAND } else { Get-GitSshCommand '' }
+    $attempts.Add([pscustomobject]@{ Label = 'SSH agent/config'; Url = $GitHubSshUrl; Ssh = $currentSsh })
+    $attempts.Add([pscustomobject]@{ Label = 'HTTPS Git'; Url = $GitHubHttpsUrl; Ssh = $null })
+
+    foreach ($attempt in $attempts) {
+        Write-Host "==> 尝试通过 $($attempt.Label) 获取工程..." -ForegroundColor Yellow
+        $ok = Invoke-WithGitSsh $attempt.Ssh { & git clone $attempt.Url $Destination }
+        if ($ok) { return $true }
+        if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    return $false
+}
+
+function Invoke-GitHubFetch {
+    param([string]$Directory)
+    foreach ($key in Get-GitHubSshKeys) {
+        $ssh = Get-GitSshCommand $key
+        $ok = Invoke-WithGitSsh $ssh { & git -C $Directory fetch origin main }
+        if ($ok) { return $true }
+    }
+    $currentSsh = if ($env:GIT_SSH_COMMAND) { $env:GIT_SSH_COMMAND } else { Get-GitSshCommand '' }
+    $ok = Invoke-WithGitSsh $currentSsh { & git -C $Directory fetch origin main }
+    if ($ok) { return $true }
+    & git -C $Directory fetch origin main
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Fetch-ArchiveProject {
+    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("dsh-docker-download-" + [guid]::NewGuid().ToString('N'))
+    $zip = Join-Path $temporaryRoot 'source.zip'
+    $extract = Join-Path $temporaryRoot 'extract'
+    $targetExisted = Test-Path -LiteralPath $Dir
+    try {
+        New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://codeload.github.com/univers629/dsh-docker/zip/refs/heads/main' -OutFile $zip
+        Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+        $source = Join-Path $extract 'dsh-docker-main'
+        if (-not (Test-Path -LiteralPath (Join-Path $source 'docker-compose.yml'))) {
+            throw '下载的工程压缩包结构不完整。'
+        }
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        Get-ChildItem -LiteralPath $source -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Dir $_.Name) -Recurse -Force
+        }
+        Set-Content -LiteralPath (Join-Path $Dir '.dsh-docker-archive-source') -Value 'codeload.github.com' -Encoding utf8
+    } catch {
+        if (-not $targetExisted -and (Test-Path -LiteralPath $Dir)) {
+            Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw "无法从 GitHub 下载 dsh-docker 工程：$($_.Exception.Message)"
+    } finally {
+        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Fetch-Project {
     if (-not (Test-Path $Dir)) {
         Write-Host '==> 正在获取工程文件...' -ForegroundColor Yellow
-        if (Get-Command git -ErrorAction SilentlyContinue) {
-            git clone https://github.com/univers629/dsh-docker.git $Dir
-        } else {
-            $zip = Join-Path $Dir 'archive.zip'
-            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
-            Invoke-WebRequest -Uri 'https://github.com/univers629/dsh-docker/archive/refs/heads/main.zip' -OutFile $zip
-            Expand-Archive -Path $zip -DestinationPath (Join-Path $Dir 'temp') -Force
-            Copy-Item (Join-Path $Dir 'temp\dsh-docker-main\*') $Dir -Recurse -Force
-            Remove-Item (Join-Path $Dir 'temp'), $zip -Recurse -Force
+        if ((Get-Command git -ErrorAction SilentlyContinue) -and (Invoke-GitHubClone $Dir)) {
+            return
         }
+        Write-Warning 'SSH 和 HTTPS Git 均失败，将改用 GitHub ZIP 下载。'
+        Fetch-ArchiveProject
     } elseif (Test-Path (Join-Path $Dir '.git')) {
         Write-Host '==> 正在同步工程文件...' -ForegroundColor Yellow
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw '已有 Git 工程但未检测到 Git。' }
         git -C $Dir diff --quiet; if ($LASTEXITCODE -ne 0) { throw "$Dir 存在未提交修改。" }
         git -C $Dir diff --cached --quiet; if ($LASTEXITCODE -ne 0) { throw "$Dir 存在已暂存修改。" }
-        git -C $Dir fetch origin main
-        if ($LASTEXITCODE -ne 0) { throw '无法从 GitHub 获取最新工程文件。' }
+        $origin = ((git -C $Dir remote get-url origin 2>$null) | Select-Object -First 1)
+        $origin = if ($origin) { $origin.Trim() } else { '' }
+        $switchedOrigin = $false
+        if ($origin -match 'github\.com(?::|/)univers629/dsh-docker(?:\.git)?/?$' -and $origin -ne $GitHubSshUrl) {
+            git -C $Dir remote set-url origin $GitHubSshUrl
+            $switchedOrigin = ($LASTEXITCODE -eq 0)
+        }
+        $fetched = Invoke-GitHubFetch $Dir
+        if (-not $fetched -and $switchedOrigin) {
+            git -C $Dir remote set-url origin $origin
+            if ($LASTEXITCODE -eq 0) {
+                git -C $Dir fetch origin main
+                $fetched = ($LASTEXITCODE -eq 0)
+            }
+        }
+        if (-not $fetched) { throw '无法通过 SSH 或 HTTPS 从 GitHub 获取最新工程文件。' }
         git -C $Dir merge --ff-only FETCH_HEAD
         if ($LASTEXITCODE -ne 0) { throw '本地工程无法 fast-forward 到 origin/main。' }
-    } else { throw "$Dir 已存在但不是 Git 工程。" }
+    } elseif (Test-Path (Join-Path $Dir '.dsh-docker-archive-source')) {
+        Write-Host '==> 正在通过 GitHub ZIP 同步工程文件...' -ForegroundColor Yellow
+        Fetch-ArchiveProject
+    } else { throw "$Dir 已存在但不是 dsh-docker 工程。" }
 }
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw '未检测到 Docker，请先安装并启动 Docker Desktop。' }
@@ -106,7 +229,7 @@ if (-not $DshAction -and $interactive) {
 } elseif (-not $DshAction) { $DshAction = 'install' }
 
 if ($DshAction -in @('install','configure','update')) { Fetch-Project }
-elseif (-not (Test-Path (Join-Path $Dir 'docker-compose.yml'))) { throw "未找到 $Dir，请先执行安装。" }
+if (-not (Test-Path (Join-Path $Dir 'docker-compose.yml'))) { throw "未找到 $Dir 的 docker-compose.yml，工程获取失败。" }
 Set-Location $Dir
 $env:DOCKER_BUILDKIT = '1'; $env:COMPOSE_DOCKER_CLI_BUILD = '1'
 $envFile = Join-Path (Get-Location) '.env'
