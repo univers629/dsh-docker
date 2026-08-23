@@ -24,6 +24,7 @@ services:
       # capabilities; it only changes the UID of the DSH process inside this
       # container.
       DSH_RUN_AS_ROOT: "${DSH_RUN_AS_ROOT:-false}"
+      DSH_ACCESS_MODE: "${DSH_ACCESS_MODE:-local}"
       DSH_WEB_PORT: "3081"
       DSH_TRUSTED_HOSTS: "${DSH_TRUSTED_HOSTS:-}"
       NODE_PATH: "/app/dsh/node_modules:/data/dsh/profiles/node_modules"
@@ -32,12 +33,13 @@ services:
       - ./data/agents:/data/agents
       - ./data/mcp:/data/mcp
       - ./data/home:/data/home
+      - ./data/auth:/opt/dsh-auth:ro
       - ./workspace:/workspace
     init: true
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3

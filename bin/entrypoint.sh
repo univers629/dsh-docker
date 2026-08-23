@@ -3,6 +3,8 @@ set -eu
 
 export NODE_PATH="/app/dsh/node_modules:/data/dsh/profiles/node_modules:${NODE_PATH:-}"
 
+/usr/local/bin/configure-nginx-auth
+
 if [ "$(id -u)" = "0" ]; then
   mkdir -p /data/home/tmp /workspace /data/dsh/profiles
   rm -rf /home/node 2>/dev/null || true

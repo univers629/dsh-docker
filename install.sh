@@ -1,32 +1,248 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ACTION=""
 RUN_AS_ROOT_OVERRIDE=""
-for arg in "$@"; do
-  case "$arg" in
+ACCESS_MODE_OVERRIDE=""
+BIND_HOST_OVERRIDE=""
+TRUSTED_HOSTS_OVERRIDE=""
+NETWORK_OVERRIDE=""
+NETWORK_EXTERNAL_OVERRIDE=""
+INTERACTIVE=auto
+TARGET_DIR="${DSH_INSTALL_DIR:-dsh-docker}"
+PROMPT_RESULT=""
+PENDING_BASIC_USER="${DSH_BASIC_AUTH_USER:-}"
+PENDING_BASIC_PASSWORD="${DSH_BASIC_AUTH_PASSWORD:-}"
+
+usage() {
+  cat <<'EOF'
+用法：install.sh [操作] [选项]
+
+操作：install（默认）、configure、update、start、stop、restart、logs、status
+选项：
+  --root / --user                 DSH 在容器内使用 root / node 运行
+  --access local|trusted-proxy|basic
+  --bind-host ADDRESS             Docker 发布端口绑定地址
+  --trusted-hosts HOSTS           逗号分隔的公网 host[:port]
+  --network NAME                  与 Docker 反向代理共享的外部网络
+  --network-external / --network-internal
+  --non-interactive               不显示问答，使用参数或安全默认值
+  --dir PATH                      工程目录（默认 ./dsh-docker）
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    install|configure|update|start|stop|restart|logs|status)
+      ACTION="$1"
+      ;;
+    --action)
+      [ "$#" -ge 2 ] || { echo "[错误] --action 缺少值。" >&2; exit 2; }
+      shift
+      ACTION="$1"
+      ;;
+    --action=*) ACTION="${1#*=}" ;;
     --root|--run-as-root)
-      if [ "$RUN_AS_ROOT_OVERRIDE" = false ]; then
-        echo "[错误] --root 与 --user 不能同时使用。" >&2
-        exit 2
-      fi
+      [ "$RUN_AS_ROOT_OVERRIDE" != false ] || { echo "[错误] --root 与 --user 不能同时使用。" >&2; exit 2; }
       RUN_AS_ROOT_OVERRIDE=true
       ;;
     --user|--normal-user|--no-root)
-      if [ "$RUN_AS_ROOT_OVERRIDE" = true ]; then
-        echo "[错误] --root 与 --user 不能同时使用。" >&2
-        exit 2
-      fi
+      [ "$RUN_AS_ROOT_OVERRIDE" != true ] || { echo "[错误] --root 与 --user 不能同时使用。" >&2; exit 2; }
       RUN_AS_ROOT_OVERRIDE=false
       ;;
+    --access)
+      [ "$#" -ge 2 ] || { echo "[错误] --access 缺少值。" >&2; exit 2; }
+      shift
+      ACCESS_MODE_OVERRIDE="$1"
+      ;;
+    --access=*) ACCESS_MODE_OVERRIDE="${1#*=}" ;;
+    --bind-host)
+      [ "$#" -ge 2 ] || { echo "[错误] --bind-host 缺少值。" >&2; exit 2; }
+      shift
+      BIND_HOST_OVERRIDE="$1"
+      ;;
+    --bind-host=*) BIND_HOST_OVERRIDE="${1#*=}" ;;
+    --trusted-hosts)
+      [ "$#" -ge 2 ] || { echo "[错误] --trusted-hosts 缺少值。" >&2; exit 2; }
+      shift
+      TRUSTED_HOSTS_OVERRIDE="$1"
+      ;;
+    --trusted-hosts=*) TRUSTED_HOSTS_OVERRIDE="${1#*=}" ;;
+    --network)
+      [ "$#" -ge 2 ] || { echo "[错误] --network 缺少值。" >&2; exit 2; }
+      shift
+      NETWORK_OVERRIDE="$1"
+      ;;
+    --network=*) NETWORK_OVERRIDE="${1#*=}" ;;
+    --network-external) NETWORK_EXTERNAL_OVERRIDE=true ;;
+    --network-internal) NETWORK_EXTERNAL_OVERRIDE=false ;;
+    --non-interactive|-y|--yes) INTERACTIVE=false ;;
+    --dir)
+      [ "$#" -ge 2 ] || { echo "[错误] --dir 缺少值。" >&2; exit 2; }
+      shift
+      TARGET_DIR="$1"
+      ;;
+    --dir=*) TARGET_DIR="${1#*=}" ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
     *)
-      echo "[错误] 未知参数：$arg（支持 --root 或 --user）。" >&2
+      echo "[错误] 未知参数：$1" >&2
+      usage >&2
       exit 2
       ;;
   esac
+  shift
 done
 
+case "$ACTION" in
+  ''|install|configure|update|start|stop|restart|logs|status) ;;
+  *) echo "[错误] 未知操作：$ACTION" >&2; exit 2 ;;
+esac
+case "$ACCESS_MODE_OVERRIDE" in
+  ''|local|trusted-proxy|basic) ;;
+  *) echo "[错误] --access 只支持 local、trusted-proxy 或 basic。" >&2; exit 2 ;;
+esac
+
+if [ "$INTERACTIVE" = auto ]; then
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    INTERACTIVE=true
+  else
+    INTERACTIVE=false
+  fi
+fi
+
+prompt() {
+  local message="$1" default="${2:-}" answer
+  while :; do
+    if [ -n "$default" ]; then
+      printf '%s [%s]: ' "$message" "$default" > /dev/tty
+    else
+      printf '%s: ' "$message" > /dev/tty
+    fi
+    IFS= read -r answer < /dev/tty || exit 1
+    answer="${answer:-$default}"
+    if [ -n "$answer" ]; then
+      PROMPT_RESULT="$answer"
+      return
+    fi
+  done
+}
+
+prompt_secret() {
+  local message="$1" answer
+  printf '%s: ' "$message" > /dev/tty
+  IFS= read -r -s answer < /dev/tty || exit 1
+  printf '\n' > /dev/tty
+  PROMPT_RESULT="$answer"
+}
+
+prompt_yes_no() {
+  local message="$1" default="$2" answer
+  while :; do
+    prompt "$message" "$default"
+    answer="$PROMPT_RESULT"
+    case "$answer" in
+      y|Y|yes|YES|是) PROMPT_RESULT=true; return ;;
+      n|N|no|NO|否) PROMPT_RESULT=false; return ;;
+      *) echo "请输入 y 或 n。" > /dev/tty ;;
+    esac
+  done
+}
+
+echo "==================================================="
+echo "  DeepSeek Harness (DSH) 安装与管理向导"
+echo "==================================================="
+echo
+
+if [ -z "$ACTION" ]; then
+  if [ "$INTERACTIVE" = true ]; then
+    if [ -d "$TARGET_DIR" ]; then
+      echo "1) 重新配置并启动（保留数据）"
+    else
+      echo "1) 全新安装"
+    fi
+    echo "2) 更新源码并重建"
+    echo "3) 启动"
+    echo "4) 停止"
+    echo "5) 重启"
+    echo "6) 查看日志"
+    echo "7) 查看状态"
+    prompt "这次要做什么" "1"
+    case "$PROMPT_RESULT" in
+      1) ACTION=install ;;
+      2) ACTION=update ;;
+      3) ACTION=start ;;
+      4) ACTION=stop ;;
+      5) ACTION=restart ;;
+      6) ACTION=logs ;;
+      7) ACTION=status ;;
+      *) echo "[错误] 无效选项。" >&2; exit 2 ;;
+    esac
+  else
+    ACTION=install
+  fi
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "[错误] 未检测到 Docker，请先安装 Docker 后重试。" >&2
+  exit 1
+fi
+
+if docker info >/dev/null 2>&1; then
+  DOCKER() { docker "$@"; }
+elif command -v sudo >/dev/null 2>&1; then
+  DOCKER() { sudo docker "$@"; }
+else
+  echo "[错误] 当前用户无权访问 Docker，且系统没有 sudo。" >&2
+  exit 1
+fi
+
+fetch_project() {
+  if [ ! -d "$TARGET_DIR" ]; then
+    echo "==> 正在获取工程文件..."
+    if command -v git >/dev/null 2>&1; then
+      git clone https://github.com/univers629/dsh-docker-dev.git "$TARGET_DIR"
+    else
+      mkdir -p "$TARGET_DIR"
+      curl -fsSL https://github.com/univers629/dsh-docker-dev/archive/refs/heads/main.tar.gz \
+        | tar -xz -C "$TARGET_DIR" --strip-components=1
+    fi
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+      chown -R "$SUDO_USER:$SUDO_USER" "$TARGET_DIR" 2>/dev/null || true
+    fi
+  elif [ -d "$TARGET_DIR/.git" ]; then
+    echo "==> 正在同步工程文件..."
+    if ! git -C "$TARGET_DIR" diff --quiet || ! git -C "$TARGET_DIR" diff --cached --quiet; then
+      echo "[错误] $TARGET_DIR 中存在未提交的源码修改，已停止以避免覆盖。" >&2
+      exit 1
+    fi
+    git -C "$TARGET_DIR" fetch origin main
+    git -C "$TARGET_DIR" merge --ff-only FETCH_HEAD
+  else
+    echo "[错误] $TARGET_DIR 已存在但不是 Git 工程，请移动该目录后重试。" >&2
+    exit 1
+  fi
+}
+
+require_project() {
+  if [ ! -f "$TARGET_DIR/docker-compose.yml" ]; then
+    echo "[错误] 未找到 $TARGET_DIR。请先在向导中选择安装。" >&2
+    exit 1
+  fi
+}
+
+case "$ACTION" in
+  install|configure|update) fetch_project ;;
+  *) require_project ;;
+esac
+
+cd "$TARGET_DIR"
+chmod +x dsh.sh 2>/dev/null || true
+
 set_compose_env() {
-  local key="$1" value="$2" file=".env" temporary
+  local key="$1" value="$2" file=.env temporary
   temporary="$(mktemp "${file}.tmp.XXXXXX")"
   if [ -f "$file" ]; then
     awk -v key="$key" -v value="$value" '
@@ -44,55 +260,11 @@ set_compose_env() {
   mv "$temporary" "$file"
 }
 
-echo "==================================================="
-echo "  DeepSeek Harness (DSH) 一键安装与启动程序"
-echo "==================================================="
-echo
-
-if ! command -v docker &>/dev/null; then
-  echo "[错误] 未检测到 Docker，请先安装 Docker 后重试。"
-  exit 1
-fi
-
-if docker info >/dev/null 2>&1; then
-  DOCKER() { docker "$@"; }
-else
-  DOCKER() { sudo docker "$@"; }
-fi
-
-TARGET_DIR="dsh-docker"
-if [ ! -d "$TARGET_DIR" ]; then
-  echo "==> [1/2] 正在获取工程文件..."
-  if command -v git &>/dev/null; then
-    git clone https://github.com/univers629/dsh-docker-dev.git "$TARGET_DIR"
-  else
-    mkdir -p "$TARGET_DIR"
-    curl -fsSL https://github.com/univers629/dsh-docker-dev/archive/refs/heads/main.tar.gz | tar -xz -C "$TARGET_DIR" --strip-components=1
-  fi
-  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-    chown -R "$SUDO_USER:$SUDO_USER" "$TARGET_DIR" 2>/dev/null || true
-  fi
-elif [ -d "$TARGET_DIR/.git" ]; then
-  echo "==> [1/2] 正在同步工程文件..."
-  if ! git -C "$TARGET_DIR" diff --quiet || ! git -C "$TARGET_DIR" diff --cached --quiet; then
-    echo "[错误] $TARGET_DIR 中存在未提交的源码修改，已停止以避免覆盖。请先提交、保存或清理这些修改后重试。" >&2
-    exit 1
-  fi
-  if ! git -C "$TARGET_DIR" fetch origin main; then
-    echo "[错误] 无法从 GitHub 获取最新工程文件，已保留现有安装。" >&2
-    exit 1
-  fi
-  if ! git -C "$TARGET_DIR" merge --ff-only FETCH_HEAD; then
-    echo "[错误] 本地工程无法 fast-forward 到 origin/main，请手动处理后重试。" >&2
-    exit 1
-  fi
-else
-  echo "[错误] $TARGET_DIR 已存在但不是 Git 工程，无法安全更新。请移动该目录后重试。" >&2
-  exit 1
-fi
-
-cd "$TARGET_DIR"
-chmod +x dsh.sh 2>/dev/null || true
+get_compose_env() {
+  local key="$1" fallback="$2" value
+  value="$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' .env 2>/dev/null || true)"
+  printf '%s' "${value:-$fallback}"
+}
 
 if [ "$(uname -s)" = Linux ]; then
   SYSTEM_DIRS=(
@@ -100,28 +272,184 @@ if [ "$(uname -s)" = Linux ]; then
     data/system/usr/include data/system/usr/libexec
     data/system/usr/games data/system/etc data/system/var/lib data/system/var/cache
   )
-  mkdir -p "${SYSTEM_DIRS[@]}"
+  mkdir -p "${SYSTEM_DIRS[@]}" data/auth
   COMPOSE_ARGS=(-f docker-compose.yml -f docker-compose.system.yml)
 else
   COMPOSE_ARGS=(-f docker-compose.yml)
 fi
 
-if [ -n "$RUN_AS_ROOT_OVERRIDE" ]; then
-  set_compose_env DSH_RUN_AS_ROOT "$RUN_AS_ROOT_OVERRIDE"
-  echo "==> DSH 运行模式：$([ "$RUN_AS_ROOT_OVERRIDE" = true ] && printf 'root（仅容器内）' || printf '普通用户 node')"
-fi
+configure_dsh() {
+  local run_as_root access_mode bind_host trusted_hosts network network_external
+  local route default_route default_network keep_auth confirm_password
 
-echo "==> [2/2] 正在本地构建并启动 DeepSeek Harness 容器..."
-DOCKER compose "${COMPOSE_ARGS[@]}" up -d --build --force-recreate
+  run_as_root="${RUN_AS_ROOT_OVERRIDE:-$(get_compose_env DSH_RUN_AS_ROOT false)}"
+  if [ "$INTERACTIVE" = true ] && [ -z "$RUN_AS_ROOT_OVERRIDE" ]; then
+    prompt "容器内 DSH 权限：1) 普通用户 node（推荐）  2) root" "$([ "$run_as_root" = true ] && printf 2 || printf 1)"
+    case "$PROMPT_RESULT" in
+      1) run_as_root=false ;;
+      2) run_as_root=true ;;
+      *) echo "[错误] 无效权限选项。" >&2; exit 2 ;;
+    esac
+  fi
 
-if DOCKER network inspect dpanel-local >/dev/null 2>&1; then
-  echo "==> 检测到 dpanel 面板环境，已自动打通 dpanel 容器反代网桥！"
-  DOCKER network connect --alias dsh.pod.dpanel.local dpanel-local dsh 2>/dev/null || true
-fi
+  access_mode="${ACCESS_MODE_OVERRIDE:-$(get_compose_env DSH_ACCESS_MODE local)}"
+  if [ "$INTERACTIVE" = true ] && [ -z "$ACCESS_MODE_OVERRIDE" ]; then
+    case "$access_mode" in local) default_route=1 ;; trusted-proxy) default_route=2 ;; basic) default_route=3 ;; *) default_route=1 ;; esac
+    echo
+    echo "访问保护方式："
+    echo "1) 仅本机或 SSH 隧道"
+    echo "2) 已有 Cloudflare Access / 面板认证 / 私有 VPN"
+    echo "3) DSH 内置 Nginx Basic Auth（外层仍须提供 HTTPS）"
+    prompt "请选择" "$default_route"
+    case "$PROMPT_RESULT" in
+      1) access_mode=local ;;
+      2) access_mode=trusted-proxy ;;
+      3) access_mode=basic ;;
+      *) echo "[错误] 无效访问保护选项。" >&2; exit 2 ;;
+    esac
+  fi
+
+  bind_host="${BIND_HOST_OVERRIDE:-$(get_compose_env DSH_BIND_HOST 127.0.0.1)}"
+  trusted_hosts="${TRUSTED_HOSTS_OVERRIDE:-$(get_compose_env DSH_TRUSTED_HOSTS '')}"
+  network="${NETWORK_OVERRIDE:-$(get_compose_env DSH_DOCKER_NETWORK dsh-private)}"
+  network_external="${NETWORK_EXTERNAL_OVERRIDE:-$(get_compose_env DSH_DOCKER_NETWORK_EXTERNAL false)}"
+
+  if [ "$access_mode" = local ]; then
+    bind_host="${BIND_HOST_OVERRIDE:-127.0.0.1}"
+    trusted_hosts="${TRUSTED_HOSTS_OVERRIDE:-}"
+    network="${NETWORK_OVERRIDE:-dsh-private}"
+    network_external="${NETWORK_EXTERNAL_OVERRIDE:-false}"
+  elif [ "$INTERACTIVE" = true ]; then
+    default_route=1
+    if DOCKER network inspect dpanel-local >/dev/null 2>&1 || [ "$network_external" = true ]; then
+      default_route=2
+    fi
+    echo
+    prompt "反向代理在哪里：1) 宿主机  2) Docker 容器/面板" "$default_route"
+    route="$PROMPT_RESULT"
+    case "$route" in
+      1)
+        bind_host="${BIND_HOST_OVERRIDE:-127.0.0.1}"
+        network="${NETWORK_OVERRIDE:-dsh-private}"
+        network_external="${NETWORK_EXTERNAL_OVERRIDE:-false}"
+        ;;
+      2)
+        default_network="$network"
+        if DOCKER network inspect dpanel-local >/dev/null 2>&1; then default_network=dpanel-local; fi
+        prompt "反向代理使用的 Docker 网络" "$default_network"
+        network="$PROMPT_RESULT"
+        network_external=true
+        bind_host="${BIND_HOST_OVERRIDE:-127.0.0.1}"
+        ;;
+      *) echo "[错误] 无效反向代理位置。" >&2; exit 2 ;;
+    esac
+    prompt "公网域名或 trusted host（多个用逗号分隔，不带 https://）" "${trusted_hosts:-agent.example.com}"
+    trusted_hosts="$PROMPT_RESULT"
+    prompt "宿主机端口绑定地址（推荐 127.0.0.1）" "$bind_host"
+    bind_host="$PROMPT_RESULT"
+  fi
+
+  case "$bind_host" in
+    0.0.0.0|::|'[::]'|'*')
+      echo "[错误] 为避免绕过认证，不能使用通配绑定地址；请使用 127.0.0.1 或指定的私有接口。" >&2
+      exit 2
+      ;;
+  esac
+
+  if [ "$network_external" = true ] && ! DOCKER network inspect "$network" >/dev/null 2>&1; then
+    echo "[错误] 外部 Docker 网络 $network 不存在。请先在反向代理面板中创建它。" >&2
+    exit 1
+  fi
+
+  if [ "$access_mode" = basic ]; then
+    if [ -s data/auth/htpasswd ] && [ "$INTERACTIVE" = true ]; then
+      prompt_yes_no "保留现有 Basic Auth 用户名和密码" y
+      keep_auth="$PROMPT_RESULT"
+    elif [ -s data/auth/htpasswd ] && [ -z "$PENDING_BASIC_PASSWORD" ]; then
+      keep_auth=true
+    else
+      keep_auth=false
+    fi
+    if [ "$keep_auth" != true ]; then
+      if [ "$INTERACTIVE" = true ]; then
+        prompt "Basic Auth 用户名" "${PENDING_BASIC_USER:-dsh}"
+        PENDING_BASIC_USER="$PROMPT_RESULT"
+        case "$PENDING_BASIC_USER" in *[!A-Za-z0-9._-]*|'') echo "[错误] 用户名只允许字母、数字、点、下划线和连字符。" >&2; exit 2 ;; esac
+        while :; do
+          prompt_secret "Basic Auth 密码（至少 12 个字符）"
+          PENDING_BASIC_PASSWORD="$PROMPT_RESULT"
+          if [ "${#PENDING_BASIC_PASSWORD}" -lt 12 ]; then
+            echo "密码至少需要 12 个字符。" > /dev/tty
+            continue
+          fi
+          prompt_secret "再次输入密码"
+          confirm_password="$PROMPT_RESULT"
+          [ "$PENDING_BASIC_PASSWORD" = "$confirm_password" ] && break
+          echo "两次密码不一致，请重试。" > /dev/tty
+        done
+      elif [ -z "$PENDING_BASIC_USER" ] || [ "${#PENDING_BASIC_PASSWORD}" -lt 12 ]; then
+        echo "[错误] 非交互 Basic Auth 首次配置需要 DSH_BASIC_AUTH_USER 和至少 12 位的 DSH_BASIC_AUTH_PASSWORD。" >&2
+        exit 2
+      fi
+    else
+      PENDING_BASIC_PASSWORD=""
+    fi
+  fi
+
+  set_compose_env DSH_RUN_AS_ROOT "$run_as_root"
+  set_compose_env DSH_ACCESS_MODE "$access_mode"
+  set_compose_env DSH_BIND_HOST "$bind_host"
+  set_compose_env DSH_DOCKER_NETWORK "$network"
+  set_compose_env DSH_DOCKER_NETWORK_EXTERNAL "$network_external"
+  set_compose_env DSH_TRUSTED_HOSTS "$trusted_hosts"
+
+  echo
+  echo "==> 配置已保存到 $(pwd)/.env"
+  echo "    运行权限: $([ "$run_as_root" = true ] && printf 'root（仅容器内）' || printf 'node')"
+  echo "    访问模式: $access_mode"
+  echo "    端口绑定: $bind_host:3080"
+  [ -z "$trusted_hosts" ] || echo "    Trusted hosts: $trusted_hosts"
+}
+
+write_basic_auth() {
+  local temporary
+  [ "$(get_compose_env DSH_ACCESS_MODE local)" = basic ] || return 0
+  [ -n "$PENDING_BASIC_PASSWORD" ] || return 0
+  mkdir -p data/auth
+  temporary="$(mktemp data/auth/htpasswd.tmp.XXXXXX)"
+  if ! printf '%s\n' "$PENDING_BASIC_PASSWORD" \
+    | DOCKER run --rm -i --entrypoint htpasswd dsh:local -niB "$PENDING_BASIC_USER" > "$temporary"; then
+    rm -f "$temporary"
+    echo "[错误] 无法生成 Basic Auth 密码哈希。" >&2
+    exit 1
+  fi
+  chmod 600 "$temporary"
+  mv "$temporary" data/auth/htpasswd
+  unset PENDING_BASIC_PASSWORD
+  echo "==> Basic Auth 凭据已使用 bcrypt 哈希保存，未写入 .env。"
+}
+
+case "$ACTION" in
+  install|configure)
+    configure_dsh
+    echo "==> 正在构建 DSH 镜像..."
+    DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
+    write_basic_auth
+    echo "==> 正在启动 DSH..."
+    DOCKER compose "${COMPOSE_ARGS[@]}" up -d --force-recreate
+    DOCKER image prune -f >/dev/null 2>&1 || true
+    ;;
+  update) ./dsh.sh update ;;
+  start) ./dsh.sh start ;;
+  stop) ./dsh.sh stop ;;
+  restart) ./dsh.sh restart ;;
+  logs) exec ./dsh.sh logs ;;
+  status) ./dsh.sh status ;;
+esac
 
 echo
 echo "==================================================="
-echo "  安装完成！"
-echo "  Web UI:   http://127.0.0.1:3080"
-echo "  日常管理: ./dsh.sh [start|update|stop|logs]"
+echo "  操作完成：$ACTION"
+echo "  本机入口: http://127.0.0.1:3080"
+echo "  再次运行同一条安装命令即可管理或重新配置"
 echo "==================================================="

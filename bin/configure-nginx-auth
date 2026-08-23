@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+output="${DSH_NGINX_AUTH_CONFIG:-/tmp/dsh-auth.conf}"
+auth_file="${DSH_BASIC_AUTH_FILE:-/opt/dsh-auth/htpasswd}"
+runtime_auth_file="${DSH_RUNTIME_BASIC_AUTH_FILE:-/tmp/dsh-htpasswd}"
+
+case "${DSH_ACCESS_MODE:-local}" in
+  basic)
+    if [ ! -s "$auth_file" ]; then
+      echo "[dsh] DSH_ACCESS_MODE=basic requires $auth_file" >&2
+      exit 78
+    fi
+    cp "$auth_file" "$runtime_auth_file"
+    chmod 600 "$runtime_auth_file"
+    if [ "$(id -u)" = 0 ]; then
+      chown node:node "$runtime_auth_file" 2>/dev/null || true
+    fi
+    {
+      printf '%s\n' 'auth_basic "DeepSeek Harness";'
+      printf 'auth_basic_user_file %s;\n' "$runtime_auth_file"
+    } > "$output"
+    ;;
+  local|trusted-proxy|'')
+    printf '%s\n' 'auth_basic off;' > "$output"
+    ;;
+  *)
+    echo "[dsh] invalid DSH_ACCESS_MODE=${DSH_ACCESS_MODE}; expected local, trusted-proxy, or basic" >&2
+    exit 64
+    ;;
+esac

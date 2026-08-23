@@ -1,14 +1,21 @@
 # Persistence directories (track folder with .gitkeep, ignore data contents)
 data/*
 !data/agents
+data/agents/*
 !data/agents/.gitkeep
 !data/dsh
+data/dsh/*
 !data/dsh/.gitkeep
 !data/mcp
+data/mcp/*
 !data/mcp/.gitkeep
 !data/home
+data/home/*
 !data/home/.gitkeep
-data/system/*
+!data/auth
+data/auth/*
+!data/auth/.gitkeep
+data/system/**
 !data/system/
 !data/system/usr/
 !data/system/usr/bin/
