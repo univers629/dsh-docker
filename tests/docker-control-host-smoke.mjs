@@ -76,7 +76,7 @@ try {
 
   const configPut = response()
   await configRoute.handler(jsonRequest('PUT', { text: 'demo:\n  enabled: false\n', revision: configBody.revision }), configPut)
-  assert.equal(configPut.status, 200)
+  assert.equal(configPut.status, 200, configPut.body)
   assert.equal(await readFile(configPath, 'utf8'), 'demo:\n  enabled: false\n')
   if (process.platform !== 'win32') assert.equal((await stat(configPath)).mode & 0o777, 0o600)
   const savedBody = JSON.parse(configPut.body)

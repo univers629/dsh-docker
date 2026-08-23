@@ -203,10 +203,10 @@ fetch_project() {
   if [ ! -d "$TARGET_DIR" ]; then
     echo "==> 正在获取工程文件..."
     if command -v git >/dev/null 2>&1; then
-      git clone https://github.com/univers629/dsh-docker-dev.git "$TARGET_DIR"
+      git clone https://github.com/univers629/dsh-docker.git "$TARGET_DIR"
     else
       mkdir -p "$TARGET_DIR"
-      curl -fsSL https://github.com/univers629/dsh-docker-dev/archive/refs/heads/main.tar.gz \
+      curl -fsSL https://github.com/univers629/dsh-docker/archive/refs/heads/main.tar.gz \
         | tar -xz -C "$TARGET_DIR" --strip-components=1
     fi
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then

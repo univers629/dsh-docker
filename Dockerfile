@@ -53,7 +53,7 @@ RUN NODE_PATH=/usr/local/lib/node_modules node /tmp/build-fix.mjs \
 
 FROM ${NODE_IMAGE} AS runtime
 
-LABEL org.opencontainers.image.title="DeepSeek Harness Docker" \
+LABEL org.opencontainers.image.title="dsh-docker" \
       org.opencontainers.image.licenses="MIT"
 
 # 保留 APT 软件包缓存；APT 索引不挂载为临时 BuildKit 缓存，确保运行时可继续 apt install。

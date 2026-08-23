@@ -34,6 +34,7 @@ workspace/*
 # Cloned source & local artifacts
 deepseek-harness/
 scratch_repos/
+node_modules/
 *.zip
 *.log
 

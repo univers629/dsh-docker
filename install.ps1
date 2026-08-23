@@ -72,13 +72,13 @@ function Fetch-Project {
     if (-not (Test-Path $Dir)) {
         Write-Host '==> 正在获取工程文件...' -ForegroundColor Yellow
         if (Get-Command git -ErrorAction SilentlyContinue) {
-            git clone https://github.com/univers629/dsh-docker-dev.git $Dir
+            git clone https://github.com/univers629/dsh-docker.git $Dir
         } else {
             $zip = Join-Path $Dir 'archive.zip'
             New-Item -ItemType Directory -Path $Dir -Force | Out-Null
-            Invoke-WebRequest -Uri 'https://github.com/univers629/dsh-docker-dev/archive/refs/heads/main.zip' -OutFile $zip
+            Invoke-WebRequest -Uri 'https://github.com/univers629/dsh-docker/archive/refs/heads/main.zip' -OutFile $zip
             Expand-Archive -Path $zip -DestinationPath (Join-Path $Dir 'temp') -Force
-            Copy-Item (Join-Path $Dir 'temp\dsh-docker-dev-main\*') $Dir -Recurse -Force
+            Copy-Item (Join-Path $Dir 'temp\dsh-docker-main\*') $Dir -Recurse -Force
             Remove-Item (Join-Path $Dir 'temp'), $zip -Recurse -Force
         }
     } elseif (Test-Path (Join-Path $Dir '.git')) {
