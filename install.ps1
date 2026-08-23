@@ -27,11 +27,11 @@ function Set-ComposeEnvValue {
     $lines = if (Test-Path -LiteralPath $Path) { @([IO.File]::ReadAllLines($Path)) } else { @() }
     $pattern = '^\s*' + [regex]::Escape($Key) + '\s*='
     $found = $false
-    $updated = foreach ($line in $lines) {
+    $updated = @(foreach ($line in $lines) {
         if ($line -match $pattern) {
             if (-not $found) { $found = $true; "$Key=$Value" }
         } else { $line }
-    }
+    })
     if (-not $found) { $updated += "$Key=$Value" }
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($Path, (($updated -join [Environment]::NewLine) + [Environment]::NewLine), $utf8NoBom)
