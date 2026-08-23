@@ -45,6 +45,53 @@ function Get-ComposeEnvValue {
     return $Fallback
 }
 
+function Invoke-ComposeWithEnvFile {
+    param([string]$Path, [string[]]$Arguments, [string[]]$EnvironmentKeys)
+    $previous = @{}
+    foreach ($key in $EnvironmentKeys) {
+        $previous[$key] = [pscustomobject]@{
+            Exists = Test-Path -LiteralPath "Env:$key"
+            Value = [Environment]::GetEnvironmentVariable($key, 'Process')
+        }
+        Remove-Item -LiteralPath "Env:$key" -ErrorAction SilentlyContinue
+    }
+    try {
+        & docker compose --env-file $Path @Arguments | Out-Host
+        $exitCode = $LASTEXITCODE
+    } finally {
+        foreach ($key in $EnvironmentKeys) {
+            if ($previous[$key].Exists) { [Environment]::SetEnvironmentVariable($key, $previous[$key].Value, 'Process') }
+            else { [Environment]::SetEnvironmentVariable($key, $null, 'Process') }
+        }
+    }
+    return $exitCode
+}
+
+function Assert-DshRunMode {
+    param([ValidateSet('true','false')][string]$Expected)
+    $environment = @(& docker inspect dsh --format '{{range .Config.Env}}{{println .}}{{end}}' 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw '无法核验 DSH 容器运行模式。' }
+    $line = $environment | Where-Object { $_ -like 'DSH_RUN_AS_ROOT=*' } | Select-Object -Last 1
+    $actual = if ($line) { ($line -split '=', 2)[1].Trim().ToLowerInvariant() } else { '' }
+    if ($actual -ne $Expected) {
+        throw "DSH 运行模式未应用：期望 DSH_RUN_AS_ROOT=$Expected，容器实际为 $actual。"
+    }
+
+    $expectedUid = if ($Expected -eq 'true') { '0' } else { '1000' }
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+        $uid = (& docker exec dsh sh -c 'pid="$(cat /run/dsh.pid 2>/dev/null)" || exit 1; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>$null | Select-Object -Last 1)
+        if ($LASTEXITCODE -eq 0 -and $uid -match '^\d+$') {
+            if ($uid.Trim() -ne $expectedUid) {
+                throw "DSH 进程 UID 核验失败：期望 $expectedUid，实际为 $($uid.Trim())。"
+            }
+            Write-Host "==> 已核验 DSH 进程 UID：$expectedUid" -ForegroundColor Green
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+    throw 'DSH 容器已创建，但无法在 120 秒内核验主进程 UID。'
+}
+
 function Ask {
     param([string]$Message, [string]$Default)
     $answer = Read-Host "$Message [$Default]"
@@ -353,12 +400,6 @@ if ($DshAction -in @('install','configure')) {
         if ($basicUser -notmatch '^[A-Za-z0-9._-]+$') { throw 'Basic Auth 用户名包含不支持的字符。' }
         $writeBasicAuth = $true
     }
-    Set-ComposeEnvValue $envFile 'DSH_RUN_AS_ROOT' $runAsRoot
-    Set-ComposeEnvValue $envFile 'DSH_ACCESS_MODE' $accessMode
-    Set-ComposeEnvValue $envFile 'DSH_BIND_HOST' $bind
-    Set-ComposeEnvValue $envFile 'DSH_TRUSTED_HOSTS' $trusted
-    Set-ComposeEnvValue $envFile 'DSH_DOCKER_NETWORK' $networkName
-    Set-ComposeEnvValue $envFile 'DSH_DOCKER_NETWORK_EXTERNAL' $networkExternalValue
 }
 
 switch ($DshAction) {
@@ -373,8 +414,27 @@ switch ($DshAction) {
             $basicPassword = $null; $env:DSH_BASIC_AUTH_PASSWORD = $null
             Write-Host '==> Basic Auth 凭据已使用 bcrypt 哈希保存，未写入 .env。' -ForegroundColor Yellow
         }
-        docker compose up -d --force-recreate
-        if ($LASTEXITCODE -ne 0) { throw 'DSH 容器启动失败。' }
+        $pendingEnvFile = Join-Path (Get-Location) ('.env.pending.' + $PID + '.' + [guid]::NewGuid().ToString('N'))
+        try {
+            if (Test-Path -LiteralPath $envFile) { Copy-Item -LiteralPath $envFile -Destination $pendingEnvFile }
+            else { [IO.File]::WriteAllText($pendingEnvFile, '', (New-Object System.Text.UTF8Encoding($false))) }
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_RUN_AS_ROOT' $runAsRoot
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_ACCESS_MODE' $accessMode
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_BIND_HOST' $bind
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_TRUSTED_HOSTS' $trusted
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_DOCKER_NETWORK' $networkName
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_DOCKER_NETWORK_EXTERNAL' $networkExternalValue
+            $composeKeys = @('DSH_RUN_AS_ROOT','DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL')
+            $composeExitCode = Invoke-ComposeWithEnvFile -Path $pendingEnvFile -Arguments @('up','-d','--force-recreate') -EnvironmentKeys $composeKeys
+            if ($composeExitCode -ne 0) { throw 'DSH 容器启动失败，原配置未被覆盖。' }
+            Move-Item -LiteralPath $pendingEnvFile -Destination $envFile -Force
+            $pendingEnvFile = $null
+            Assert-DshRunMode -Expected $runAsRoot
+        } finally {
+            if ($pendingEnvFile -and (Test-Path -LiteralPath $pendingEnvFile)) {
+                Remove-Item -LiteralPath $pendingEnvFile -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
     'update' { & .\dsh.bat update }
     'start' { & .\dsh.bat start }

@@ -25,7 +25,7 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-Run the same command again to update, start, stop, restart, view logs/status, or reconfigure. The default is the unprivileged `node` user. Linux users may select in-container root, which does not grant host root, a Docker socket, or privileged-container capabilities.
+Run the same command again to update, start, stop, restart, view logs/status, or reconfigure. Linux and Windows default to in-container `root`, with `node` available as an explicit choice. Container root does not grant host root, a Docker socket, or privileged-container capabilities.
 
 Unattended installation example:
 
@@ -136,7 +136,7 @@ For public domains, the container Nginx presents traffic to DSH as internal loop
 
 ### Permission boundary
 
-The Linux installer defaults to `node`; the Windows installer defaults to container `root` and accepts `-User` to select `node`. The entrypoint corrects mounted-directory ownership and protects credential and SSH private-key permissions. Container root does not enable privileged mode, mount the Docker socket, or grant administrator access on the host.
+Both installers default to container `root`; Linux accepts `--user` and Windows accepts `-User` to select `node`. The entrypoint corrects mounted-directory ownership and protects credential and SSH private-key permissions. Container root does not enable privileged mode, mount the Docker socket, or grant administrator access on the host.
 
 ### Plugins and toolchains
 

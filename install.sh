@@ -13,6 +13,13 @@ TARGET_DIR="${DSH_INSTALL_DIR:-dsh-docker}"
 PROMPT_RESULT=""
 PENDING_BASIC_USER="${DSH_BASIC_AUTH_USER:-}"
 PENDING_BASIC_PASSWORD="${DSH_BASIC_AUTH_PASSWORD:-}"
+PENDING_RUN_AS_ROOT=""
+PENDING_ACCESS_MODE=""
+PENDING_BIND_HOST=""
+PENDING_TRUSTED_HOSTS=""
+PENDING_NETWORK=""
+PENDING_NETWORK_EXTERNAL=""
+PENDING_ENV_FILE=""
 
 usage() {
   cat <<'EOF'
@@ -242,7 +249,7 @@ cd "$TARGET_DIR"
 chmod +x dsh.sh 2>/dev/null || true
 
 set_compose_env() {
-  local key="$1" value="$2" file=.env temporary
+  local key="$1" value="$2" file="${3:-.env}" temporary
   temporary="$(mktemp "${file}.tmp.XXXXXX")"
   if [ -f "$file" ]; then
     awk -v key="$key" -v value="$value" '
@@ -282,12 +289,12 @@ configure_dsh() {
   local run_as_root access_mode bind_host trusted_hosts network network_external
   local route default_route default_network keep_auth confirm_password
 
-  run_as_root="${RUN_AS_ROOT_OVERRIDE:-$(get_compose_env DSH_RUN_AS_ROOT false)}"
+  run_as_root="${RUN_AS_ROOT_OVERRIDE:-$(get_compose_env DSH_RUN_AS_ROOT true)}"
   if [ "$INTERACTIVE" = true ] && [ -z "$RUN_AS_ROOT_OVERRIDE" ]; then
-    prompt "容器内 DSH 权限：1) 普通用户 node（推荐）  2) root" "$([ "$run_as_root" = true ] && printf 2 || printf 1)"
+    prompt "容器内 DSH 权限：1) root（默认）  2) 普通用户 node" "$([ "$run_as_root" = true ] && printf 1 || printf 2)"
     case "$PROMPT_RESULT" in
-      1) run_as_root=false ;;
-      2) run_as_root=true ;;
+      1) run_as_root=true ;;
+      2) run_as_root=false ;;
       *) echo "[错误] 无效权限选项。" >&2; exit 2 ;;
     esac
   fi
@@ -396,24 +403,17 @@ configure_dsh() {
     fi
   fi
 
-  set_compose_env DSH_RUN_AS_ROOT "$run_as_root"
-  set_compose_env DSH_ACCESS_MODE "$access_mode"
-  set_compose_env DSH_BIND_HOST "$bind_host"
-  set_compose_env DSH_DOCKER_NETWORK "$network"
-  set_compose_env DSH_DOCKER_NETWORK_EXTERNAL "$network_external"
-  set_compose_env DSH_TRUSTED_HOSTS "$trusted_hosts"
-
-  echo
-  echo "==> 配置已保存到 $(pwd)/.env"
-  echo "    运行权限: $([ "$run_as_root" = true ] && printf 'root（仅容器内）' || printf 'node')"
-  echo "    访问模式: $access_mode"
-  echo "    端口绑定: $bind_host:3080"
-  [ -z "$trusted_hosts" ] || echo "    Trusted hosts: $trusted_hosts"
+  PENDING_RUN_AS_ROOT="$run_as_root"
+  PENDING_ACCESS_MODE="$access_mode"
+  PENDING_BIND_HOST="$bind_host"
+  PENDING_TRUSTED_HOSTS="$trusted_hosts"
+  PENDING_NETWORK="$network"
+  PENDING_NETWORK_EXTERNAL="$network_external"
 }
 
 write_basic_auth() {
   local temporary
-  [ "$(get_compose_env DSH_ACCESS_MODE local)" = basic ] || return 0
+  [ "$PENDING_ACCESS_MODE" = basic ] || return 0
   [ -n "$PENDING_BASIC_PASSWORD" ] || return 0
   mkdir -p data/auth
   temporary="$(mktemp data/auth/htpasswd.tmp.XXXXXX)"
@@ -429,14 +429,81 @@ write_basic_auth() {
   echo "==> Basic Auth 凭据已使用 bcrypt 哈希保存，未写入 .env。"
 }
 
+prepare_pending_env() {
+  PENDING_ENV_FILE="$(mktemp .env.pending.XXXXXX)"
+  if [ -f .env ]; then cp .env "$PENDING_ENV_FILE"; fi
+  set_compose_env DSH_RUN_AS_ROOT "$PENDING_RUN_AS_ROOT" "$PENDING_ENV_FILE"
+  set_compose_env DSH_ACCESS_MODE "$PENDING_ACCESS_MODE" "$PENDING_ENV_FILE"
+  set_compose_env DSH_BIND_HOST "$PENDING_BIND_HOST" "$PENDING_ENV_FILE"
+  set_compose_env DSH_DOCKER_NETWORK "$PENDING_NETWORK" "$PENDING_ENV_FILE"
+  set_compose_env DSH_DOCKER_NETWORK_EXTERNAL "$PENDING_NETWORK_EXTERNAL" "$PENDING_ENV_FILE"
+  set_compose_env DSH_TRUSTED_HOSTS "$PENDING_TRUSTED_HOSTS" "$PENDING_ENV_FILE"
+}
+
+compose_up_with_pending_env() {
+  (
+    unset DSH_RUN_AS_ROOT DSH_ACCESS_MODE DSH_BIND_HOST DSH_TRUSTED_HOSTS
+    unset DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL
+    DOCKER compose --env-file "$PENDING_ENV_FILE" "${COMPOSE_ARGS[@]}" up -d --force-recreate
+  )
+}
+
+assert_dsh_run_mode() {
+  local expected="$1" actual expected_uid uid attempt
+  actual="$(DOCKER inspect dsh --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | awk -F= '$1 == "DSH_RUN_AS_ROOT" { print $2; exit }')"
+  if [ "$actual" != "$expected" ]; then
+    echo "[错误] DSH 运行模式未应用：期望 DSH_RUN_AS_ROOT=$expected，容器实际为 ${actual:-缺失}。" >&2
+    return 1
+  fi
+
+  if [ "$expected" = true ]; then expected_uid=0; else expected_uid=1000; fi
+  for ((attempt = 0; attempt < 120; attempt++)); do
+    uid="$(DOCKER exec dsh sh -c 'pid="$(cat /run/dsh.pid 2>/dev/null)" || exit 1; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>/dev/null || true)"
+    if [ -n "$uid" ]; then
+      if [ "$uid" != "$expected_uid" ]; then
+        echo "[错误] DSH 进程 UID 核验失败：期望 $expected_uid，实际为 $uid。" >&2
+        return 1
+      fi
+      echo "==> 已核验 DSH 进程 UID：$expected_uid"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "[错误] DSH 容器已创建，但无法在 120 秒内核验主进程 UID。" >&2
+  return 1
+}
+
+print_config_summary() {
+  echo
+  echo "==> 配置已保存到 $(pwd)/.env"
+  echo "    运行权限: $([ "$PENDING_RUN_AS_ROOT" = true ] && printf 'root（仅容器内）' || printf 'node')"
+  echo "    访问模式: $PENDING_ACCESS_MODE"
+  echo "    端口绑定: $PENDING_BIND_HOST:3080"
+  [ -z "$PENDING_TRUSTED_HOSTS" ] || echo "    Trusted hosts: $PENDING_TRUSTED_HOSTS"
+}
+
+cleanup_pending_env() {
+  [ -z "$PENDING_ENV_FILE" ] || rm -f "$PENDING_ENV_FILE"
+}
+trap cleanup_pending_env EXIT
+
 case "$ACTION" in
   install|configure)
     configure_dsh
     echo "==> 正在构建 DSH 镜像..."
     DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
     write_basic_auth
+    prepare_pending_env
     echo "==> 正在启动 DSH..."
-    DOCKER compose "${COMPOSE_ARGS[@]}" up -d --force-recreate
+    if ! compose_up_with_pending_env; then
+      echo "[错误] DSH 容器启动失败，原配置未被覆盖。" >&2
+      exit 1
+    fi
+    mv "$PENDING_ENV_FILE" .env
+    PENDING_ENV_FILE=""
+    assert_dsh_run_mode "$PENDING_RUN_AS_ROOT"
+    print_config_summary
     DOCKER image prune -f >/dev/null 2>&1 || true
     ;;
   update) ./dsh.sh update ;;

@@ -18,12 +18,12 @@ services:
       DSH_HOME: /data/dsh
       DSH_AGENTS_HOME: /data/agents
       DSH_PERMISSION_MODE: "danger-full-access"
-      # false keeps the DSH agent on the unprivileged container user `node`.
-      # Set DSH_RUN_AS_ROOT=true only when the operator explicitly opts in.
+      # true runs DSH as root inside the container by default. Set false to
+      # keep the DSH agent on the unprivileged container user `node`.
       # This does not add Docker socket access, privileged mode, or host-root
       # capabilities; it only changes the UID of the DSH process inside this
       # container.
-      DSH_RUN_AS_ROOT: "${DSH_RUN_AS_ROOT:-false}"
+      DSH_RUN_AS_ROOT: "${DSH_RUN_AS_ROOT:-true}"
       DSH_ACCESS_MODE: "${DSH_ACCESS_MODE:-local}"
       DSH_WEB_PORT: "3081"
       DSH_TRUSTED_HOSTS: "${DSH_TRUSTED_HOSTS:-}"
