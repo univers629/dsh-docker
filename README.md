@@ -136,7 +136,7 @@ flowchart LR
 
 ### 权限边界
 
-容器默认以 `node` 运行，入口脚本会修正挂载目录属主、保护凭据和 SSH 私钥权限。`DSH_RUN_AS_ROOT=true` 只改变容器内 DSH 进程 UID，不启用 privileged、不挂载 Docker socket，也不获得宿主机 root。
+Linux 安装器默认以 `node` 运行；Windows 安装器默认使用容器内 `root`，可传入 `-User` 改为 `node`。入口脚本会修正挂载目录属主并保护凭据和 SSH 私钥权限。容器内 `root` 不启用 privileged、不挂载 Docker socket，也不获得宿主机管理员权限。
 
 ### 插件与工具链
 

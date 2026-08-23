@@ -71,6 +71,76 @@ function Ask-YesNo {
     }
 }
 
+function Get-DockerEngineOs {
+    try {
+        $engineOs = (& docker info --format '{{.OSType}}' 2>$null | Select-Object -Last 1)
+        if ($LASTEXITCODE -eq 0 -and $engineOs) { return $engineOs.Trim().ToLowerInvariant() }
+    } catch { }
+    return $null
+}
+
+function Get-DockerDesktopExecutable {
+    $candidates = @(
+        (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Docker\Docker Desktop.exe')
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
+    }
+    return $null
+}
+
+function Ensure-DockerEngine {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        throw '未检测到 Docker，请先安装 Docker Desktop。'
+    }
+
+    $engineOs = Get-DockerEngineOs
+    if ($engineOs -eq 'linux') { return }
+    if ($engineOs -eq 'windows') {
+        throw 'DSH 需要 Linux 容器。请在 Docker Desktop 菜单中选择“Switch to Linux containers”后重试。'
+    }
+
+    Write-Host '==> Docker Desktop Linux Engine 未运行，正在启动...' -ForegroundColor Yellow
+    $startRequested = $false
+    try {
+        & docker desktop start *> $null
+        $startRequested = ($LASTEXITCODE -eq 0)
+    } catch { }
+
+    if (-not $startRequested) {
+        $desktop = Get-DockerDesktopExecutable
+        if ($desktop) {
+            Start-Process -FilePath $desktop -WindowStyle Hidden
+            $startRequested = $true
+        } elseif (Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue) {
+            $startRequested = $true
+        }
+    }
+    if (-not $startRequested) {
+        throw '无法自动启动 Docker Desktop。请手动启动 Docker Desktop 后重试。'
+    }
+
+    $deadline = [DateTime]::UtcNow.AddMinutes(3)
+    $nextNotice = [DateTime]::UtcNow
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $engineOs = Get-DockerEngineOs
+        if ($engineOs -eq 'linux') {
+            Write-Host '==> Docker Desktop Linux Engine 已就绪。' -ForegroundColor Green
+            return
+        }
+        if ($engineOs -eq 'windows') {
+            throw 'Docker Desktop 当前使用 Windows Containers。请切换到 Linux containers 后重试。'
+        }
+        if ([DateTime]::UtcNow -ge $nextNotice) {
+            Write-Host '    等待 Docker Engine 就绪...'
+            $nextNotice = [DateTime]::UtcNow.AddSeconds(10)
+        }
+        Start-Sleep -Seconds 2
+    }
+    throw 'Docker Desktop Linux Engine 在 3 分钟内未就绪。请打开 Docker Desktop 查看启动错误后重试。'
+}
+
 function Get-GitHubSshKeys {
     $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
     $sshDir = Join-Path $userHome '.ssh'
@@ -217,7 +287,7 @@ function Fetch-Project {
     } else { throw "$Dir 已存在但不是 dsh-docker 工程。" }
 }
 
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw '未检测到 Docker，请先安装并启动 Docker Desktop。' }
+Ensure-DockerEngine
 if (-not $DshAction -and $interactive) {
     $installLabel = if (Test-Path $Dir) { '重新配置并启动（保留数据）' } else { '全新安装' }
     Write-Host "1) $installLabel`n2) 更新源码并重建`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态"
@@ -233,7 +303,7 @@ if (-not (Test-Path (Join-Path $Dir 'docker-compose.yml'))) { throw "未找到 $
 Set-Location $Dir
 $env:DOCKER_BUILDKIT = '1'; $env:COMPOSE_DOCKER_CLI_BUILD = '1'
 $envFile = Join-Path (Get-Location) '.env'
-$runAsRoot = if ($Root) { 'true' } elseif ($User) { 'false' } else { Get-ComposeEnvValue $envFile 'DSH_RUN_AS_ROOT' 'false' }
+$runAsRoot = if ($Root) { 'true' } elseif ($User) { 'false' } else { Get-ComposeEnvValue $envFile 'DSH_RUN_AS_ROOT' 'true' }
 $accessMode = if ($Access) { $Access } else { Get-ComposeEnvValue $envFile 'DSH_ACCESS_MODE' 'local' }
 $bind = if ($BindHost) { $BindHost } else { Get-ComposeEnvValue $envFile 'DSH_BIND_HOST' '127.0.0.1' }
 $trusted = if ($TrustedHosts) { $TrustedHosts } else { Get-ComposeEnvValue $envFile 'DSH_TRUSTED_HOSTS' '' }
@@ -244,10 +314,7 @@ $basicPassword = $env:DSH_BASIC_AUTH_PASSWORD
 $writeBasicAuth = $false
 
 if ($DshAction -in @('install','configure')) {
-    if ($interactive -and -not $Root -and -not $User) {
-        $runDefault = if ($runAsRoot -eq 'true') { '2' } else { '1' }
-        $runAsRoot = if ((Ask '容器内权限：1=node（推荐） 2=root' $runDefault) -eq '2') { 'true' } else { 'false' }
-    }
+    Write-Host "==> Windows DSH 进程：$(if ($runAsRoot -eq 'true') { '容器内 root（默认）' } else { '容器内 node（-User）' })" -ForegroundColor Yellow
     if ($interactive -and -not $Access) {
         $accessDefault = switch ($accessMode) { 'trusted-proxy' {'2'}; 'basic' {'3'}; default {'1'} }
         $accessMode = switch (Ask "访问保护：1=本机/SSH  2=已有 Access/面板  3=内置 Basic Auth" $accessDefault) { '2' {'trusted-proxy'}; '3' {'basic'}; default {'local'} }
