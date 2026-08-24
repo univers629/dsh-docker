@@ -105,7 +105,7 @@ flowchart LR
 
 持久化目录：
 
-前五项适用于所有平台；`data/system` 由 Linux 安装器启用，Windows 使用镜像内的系统层。
+前五项适用于所有平台；Linux 安装器额外启用由 `data/system` 目录支持的 Docker 系统软件卷，Windows 使用镜像内的系统层。Linux 脚本会在首次挂载前从新镜像初始化空目录，但不会覆盖已有目录；之后容器内通过 `apt` 安装的软件和下载缓存会跨镜像重建保留。
 
 | 容器路径 | 宿主机路径 | 内容 |
 | --- | --- | --- |
@@ -114,10 +114,10 @@ flowchart LR
 | `/data/mcp` | `data/mcp` | 自定义 MCP 源码、虚拟环境和数据 |
 | `/data/agents` | `data/agents` | 子智能体共享状态 |
 | `/workspace` | `workspace` | Agent 工作区 |
-| `/usr/bin`<br>`/usr/lib`<br>`/usr/share`<br>`/usr/include`<br>`/usr/libexec`<br>`/usr/games` | `data/system/usr/*` | Debian 软件包安装内容 |
-| `/etc`、`/var/lib`、`/var/cache` | `data/system/etc`、`data/system/var/*` | Debian 配置、软件数据库和 apt 缓存 |
+| `/usr/bin`、`/usr/sbin`<br>`/usr/lib`、`/usr/share`<br>`/usr/include`、`/usr/libexec`<br>`/usr/games`、`/usr/src` | `data/system/usr/*` | Debian 软件包安装内容；`/bin`、`/sbin`、`/lib` 在 Debian usr-merge 下跟随对应 `/usr/*` 路径 |
+| `/etc`、`/var/lib`、`/var/cache`、`/var/backups` | `data/system/etc`、`data/system/var/*` | Debian 配置、软件数据库、apt 缓存和包维护备份 |
 
-`/usr/local`、`/usr/sbin` 和 Docker init 保留在镜像层，不覆盖这些路径。删除 `data/system` 会删除容器内通过 apt 安装的软件；删除 `data/dsh` 会删除 DSH 配置和会话。
+`/usr/local` 和 Docker init 保留在镜像层，不被系统卷覆盖，因此 DSH runtime 与 skill 模板会随镜像更新。删除 `data/system` 会删除容器内通过 apt 安装的软件与包缓存；删除 `data/dsh` 会删除 DSH 配置和会话。
 
 ## 项目特殊处理
 
@@ -140,7 +140,7 @@ Linux 与 Windows 安装器均默认使用容器内 `root`；Linux 可传入 `--
 
 ### 插件与工具链
 
-插件安装、会话管理和 MCP 部署所需的 `/data` 写权限已纳入沙箱。Linux 上通过 `apt` 安装的软件写入标准 Debian 路径并持久化到 `data/system`；Python/Node 工具链分别放在 `/data/home/.local` 和 `/data/home/.npm-global`。
+插件安装、会话管理和 MCP 部署所需的 `/data` 写权限已纳入沙箱。Linux 上通过 `apt` 安装的软件写入标准 Debian 路径并持久化到 Docker 系统 volumes；Python/Node 工具链分别放在 `/data/home/.local` 和 `/data/home/.npm-global`。容器启动时会根据 `DSH_SYSTEM_*`、`DSH_RUN_AS_ROOT` 和权限变量渲染实际的 `container-environment` skill。
 
 </details>
 

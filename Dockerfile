@@ -90,14 +90,16 @@ COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY bin/configure-nginx-auth /usr/local/bin/configure-nginx-auth
 COPY bin/patch-profile-plugins.mjs /usr/local/bin/patch-profile-plugins.mjs
 COPY bin/install-docker-control.mjs /usr/local/bin/install-docker-control.mjs
-COPY dsh-home/ /etc/dsh-home/
+COPY dsh-home/ /usr/local/share/dsh-home/
 COPY dsh-home/docker-control/ /opt/dsh-docker-control/
-COPY nginx/dsh-nginx.conf /etc/dsh/nginx.conf
+COPY nginx/dsh-nginx.conf /usr/local/share/dsh/nginx.conf
 
 RUN cd /opt/dsh-docker-control \
     && npm install --omit=dev --ignore-scripts --no-package-lock \
     && npm cache clean --force \
     && mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
+       /usr/bin /usr/sbin /usr/lib /usr/share /usr/include /usr/libexec \
+       /usr/games /usr/src /var/lib /var/cache /var/backups \
     && chown -R node:node /opt /data /workspace \
     && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/configure-nginx-auth /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs \
     && printf '%s\n' 'export PATH="/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:$PATH"' > /etc/profile.d/dsh-toolchain.sh
@@ -105,8 +107,12 @@ RUN cd /opt/dsh-docker-control \
 ENV DSH_HOME=/data/dsh \
     DSH_AGENTS_HOME=/data/agents \
     HOME=/data/home \
+    DSH_PERMISSION_MODE=danger-full-access \
+    DSH_HOST_ACCESS=mounted-paths-only \
+    DSH_WRITABLE_PATHS=/data/dsh,/data/home,/data/mcp,/data/agents,/workspace \
+    DSH_SYSTEM_PACKAGES_PERSISTENT=false \
     NODE_PATH=/app/dsh/node_modules:/data/dsh/profiles/node_modules \
-    PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:${PATH}
+    PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 WORKDIR /workspace
 

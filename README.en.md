@@ -105,7 +105,7 @@ flowchart LR
 
 Persistent paths:
 
-The first five mounts apply on every platform. The Linux installer additionally enables `data/system`; Windows uses the system layer in the image.
+The first five mounts apply on every platform. The Linux installer additionally enables Docker system-package volumes backed by `data/system`; Windows uses the system layer in the image. Before the first mount, the Linux scripts seed empty directories from the new image without replacing existing directories. Packages installed with `apt` and the download cache then survive image rebuilds.
 
 | Container path | Host path | Contents |
 | --- | --- | --- |
@@ -114,10 +114,10 @@ The first five mounts apply on every platform. The Linux installer additionally 
 | `/data/mcp` | `data/mcp` | Custom MCP source, environments, and data |
 | `/data/agents` | `data/agents` | Shared subagent state |
 | `/workspace` | `workspace` | Agent workspace |
-| `/usr/bin`, `/usr/lib`, `/usr/share`, `/usr/include`, `/usr/libexec`, `/usr/games` | `data/system/usr/*` | Debian package files |
-| `/etc`, `/var/lib`, `/var/cache` | `data/system/etc`, `data/system/var/*` | Debian configuration, package databases, and apt cache |
+| `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/share`, `/usr/include`, `/usr/libexec`, `/usr/games`, `/usr/src` | `data/system/usr/*` | Debian package files; `/bin`, `/sbin`, and `/lib` follow the corresponding canonical `/usr/*` paths under Debian usr-merge |
+| `/etc`, `/var/lib`, `/var/cache`, `/var/backups` | `data/system/etc`, `data/system/var/*` | Debian configuration, package databases, apt cache, and package-maintenance backups |
 
-`/usr/local`, `/usr/sbin`, and Docker init remain in the image layer and are not shadowed. Removing `data/system` removes software installed with apt inside the container. Removing `data/dsh` removes DSH configuration and sessions.
+`/usr/local` and Docker init remain in the image layer and are not shadowed, so the DSH runtime and skill templates update with the image. Removing `data/system` removes software installed with apt and its package cache. Removing `data/dsh` removes DSH configuration and sessions.
 
 ## Project-specific behavior
 
@@ -140,7 +140,7 @@ Both installers default to container `root`; Linux accepts `--user` and Windows 
 
 ### Plugins and toolchains
 
-The sandbox permits the `/data` writes required for plugins, session management, and MCP deployments. On Linux, apt packages use standard Debian paths persisted under `data/system`. Python and Node user toolchains live under `/data/home/.local` and `/data/home/.npm-global`.
+The sandbox permits the `/data` writes required for plugins, session management, and MCP deployments. On Linux, apt packages use standard Debian paths persisted in Docker-managed system volumes. Python and Node user toolchains live under `/data/home/.local` and `/data/home/.npm-global`. At startup, the container renders the deployed `container-environment` skill from the `DSH_SYSTEM_*`, `DSH_RUN_AS_ROOT`, and permission variables.
 
 </details>
 

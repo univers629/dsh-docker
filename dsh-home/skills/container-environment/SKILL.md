@@ -5,7 +5,7 @@ description: "Use whenever the user asks to install, update, remove, or manage D
 
 # Container Environment Specification & Autonomous SOP
 
-You run inside a production Docker container for DeepSeek Harness (DSH). This document defines your runtime specifications, system architecture, environment variable paths, and strict directory placement standards.
+You run inside a production Docker container for DeepSeek Harness (DSH). The values below are rendered at container startup from runtime variables; do not assume that a different host, image, or architecture has the same values.
 
 ---
 
@@ -13,8 +13,11 @@ You run inside a production Docker container for DeepSeek Harness (DSH). This do
 
 | Property | Specification | Notes |
 |---|---|---|
-| **OS Base** | **Debian GNU/Linux 13 (Trixie)** | Standard Linux Debian 13 rootfs |
-| **Architecture** | **Multi-Arch (`x86_64` / `aarch64`)** | Check via `uname -m` to download matching precompiled binary wheels (`amd64` / `arm64`) |
+| **OS Base** | **@@DSH_SYSTEM_OS@@ @@DSH_SYSTEM_RELEASE@@** | Container userspace; it shares the host Linux kernel |
+| **Kernel architecture** | **`@@DSH_SYSTEM_ARCH@@`** | `uname -m` value used for native binaries |
+| **Debian package architecture** | **`@@DSH_SYSTEM_PACKAGE_ARCH@@`** | `dpkg --print-architecture` value (`amd64`, `arm64`, etc.) |
+| **GNU ABI** | **`@@DSH_SYSTEM_ABI@@`** | Use this GNU triplet when selecting compiled wheels or binaries |
+| **C library ABI** | **`@@DSH_SYSTEM_LIBC@@`** | The runtime libc family, normally `glibc` on Debian |
 | **Node.js** | **v24 (LTS)** | `/usr/local/bin/node`, npm & pnpm 11 built-in |
 | **Python** | **Python 3.13** | `/usr/bin/python3`, `/usr/local/bin/python`, pip3, venv |
 | **Tool Runner** | **uv & uvx** | `/usr/local/bin/uv`, `/usr/local/bin/uvx` (Ultrafast Python package & MCP runner) |
@@ -31,10 +34,25 @@ The following environment variables are pre-configured in your runtime:
 HOME=/data/home
 DSH_HOME=/data/dsh
 DSH_AGENTS_HOME=/data/agents
-DSH_PERMISSION_MODE=danger-full-access
+DSH_PERMISSION_MODE=@@DSH_PERMISSION_MODE@@
+DSH_RUN_AS_ROOT=@@DSH_RUN_AS_ROOT@@
+DSH_CONTAINER_USER=@@DSH_CONTAINER_USER@@
+DSH_CONTAINER_UID=@@DSH_CONTAINER_UID@@
+DSH_CONTAINER_GID=@@DSH_CONTAINER_GID@@
+DSH_HOST_ACCESS=@@DSH_HOST_ACCESS@@
+DSH_WRITABLE_PATHS=@@DSH_WRITABLE_PATHS@@
+DSH_SYSTEM_PACKAGES_PERSISTENT=@@DSH_SYSTEM_PACKAGES_PERSISTENT@@
+DSH_CAN_INSTALL_SYSTEM_PACKAGES=@@DSH_CAN_INSTALL_SYSTEM_PACKAGES@@
+DSH_DOCKER_SOCKET_AVAILABLE=@@DSH_DOCKER_SOCKET_AVAILABLE@@
+DSH_SYSTEM_OS=@@DSH_SYSTEM_OS@@
+DSH_SYSTEM_RELEASE=@@DSH_SYSTEM_RELEASE@@
+DSH_SYSTEM_ARCH=@@DSH_SYSTEM_ARCH@@
+DSH_SYSTEM_PACKAGE_ARCH=@@DSH_SYSTEM_PACKAGE_ARCH@@
+DSH_SYSTEM_ABI=@@DSH_SYSTEM_ABI@@
+DSH_SYSTEM_LIBC=@@DSH_SYSTEM_LIBC@@
 DSH_WEB_PORT=3081
 NODE_PATH=/app/dsh/node_modules:/data/dsh/profiles/node_modules
-PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ```
 
 ---
@@ -66,7 +84,7 @@ To guarantee that your work, toolchains, and user data survive container restart
 ```
 
 ### 🚫 Anti-Patterns (Forbidden Placement)
-- **NEVER** write persistent user tools to `/usr`, `/root`, or `/var` manually. On Linux installs, the Compose system overlay persists Debian-managed paths in their standard container locations; user-level tools still belong under `/data/home`.
+- **NEVER** write persistent user tools to `/usr`, `/root`, or `/var` manually. Debian-managed packages installed with `apt` persist in Docker-managed system volumes; user-level tools still belong under `/data/home`.
 - **NEVER** install Python tools with `sudo` — always use `uv tool install <pkg>`, `pip install --user <pkg>`, or create a virtual environment in `/data/mcp/` or `/workspace/`.
 
 ---
@@ -116,9 +134,12 @@ uv pip install mcp httpx
 
 ## 6. Privileges & Permissions
 
-- You run as non-root user `node` (UID 1000).
-- You have full read, write, modify, and delete permissions across `/workspace`, `/data/home`, `/data/dsh`, `/data/mcp`, `/data/agents`, and `/opt`.
-- Sandbox permissions are in `danger-full-access` mode; execute bash commands directly without sandbox escalation barriers.
+- DSH runs as container user `@@DSH_CONTAINER_USER@@` (UID `@@DSH_CONTAINER_UID@@`, GID `@@DSH_CONTAINER_GID@@`). `DSH_RUN_AS_ROOT=@@DSH_RUN_AS_ROOT@@` controls only this container process.
+- The DSH sandbox permission mode is `@@DSH_PERMISSION_MODE@@`.
+- The writable roots declared for DSH are `@@DSH_WRITABLE_PATHS@@`.
+- Host access is `@@DSH_HOST_ACCESS@@`. Docker socket availability is `@@DSH_DOCKER_SOCKET_AVAILABLE@@`; container root is not host root and this deployment does not use privileged mode or host-root mounts.
+- System-package installation is `@@DSH_CAN_INSTALL_SYSTEM_PACKAGES@@`; installed Debian package state is persistent across rebuilds: `@@DSH_SYSTEM_PACKAGES_PERSISTENT@@`.
+- If system-package installation is false, do not attempt `apt install`; ask for a Dockerfile change or a container-root deployment. Prefer adding repeatable system packages to the Dockerfile and keep user tools under `/data/home`.
 
 ---
 
