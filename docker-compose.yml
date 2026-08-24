@@ -26,7 +26,7 @@ services:
       DSH_PERMISSION_MODE: "${DSH_PERMISSION_MODE:-danger-full-access}"
       DSH_HOST_ACCESS: "${DSH_HOST_ACCESS:-mounted-paths-only}"
       DSH_WRITABLE_PATHS: "${DSH_WRITABLE_PATHS:-/data/dsh,/data/home,/data/mcp,/data/agents,/workspace}"
-      DSH_SYSTEM_PACKAGES_PERSISTENT: "false"
+      DSH_SYSTEM_PACKAGES_PERSISTENT: "true"
       DSH_SYSTEM_OS: "${DSH_SYSTEM_OS:-}"
       DSH_SYSTEM_RELEASE: "${DSH_SYSTEM_RELEASE:-}"
       DSH_SYSTEM_ARCH: "${DSH_SYSTEM_ARCH:-}"

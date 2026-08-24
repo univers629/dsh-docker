@@ -59,7 +59,7 @@ PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/usr/local/
 
 ## 3. Strict Directory Placement Standards (目录存放规范)
 
-To guarantee that your work, toolchains, and user data survive container restarts, rebuilds, and updates, **strictly follow this directory taxonomy**:
+To guarantee that your work, toolchains, and user data survive container restarts and DSH updates, **strictly follow this directory taxonomy**. The `/data` and `/workspace` mounts also survive an intentional container recreation.
 
 ```text
 / (Container Root)
@@ -84,8 +84,14 @@ To guarantee that your work, toolchains, and user data survive container restart
 ```
 
 ### 🚫 Anti-Patterns (Forbidden Placement)
-- **NEVER** write persistent user tools to `/usr`, `/root`, or `/var` manually. Debian-managed packages installed with `apt` persist in Docker-managed system volumes; user-level tools still belong under `/data/home`.
+- **NEVER** write user project data or credentials to `/usr`, `/root`, or `/var` manually. Debian-managed packages installed with `apt` persist in this container's writable layer; user-level tools still belong under `/data/home`.
 - **NEVER** install Python tools with `sudo` — always use `uv tool install <pkg>`, `pip install --user <pkg>`, or create a virtual environment in `/data/mcp/` or `/workspace/`.
+
+### Container lifecycle
+
+This deployment uses one long-lived Debian 13 container. `docker stop`, `docker start`, and `docker compose restart` keep the container writable layer, so packages installed by an in-container root Agent remain available. `docker rm` and `docker compose down` delete that layer; only `/data` and `/workspace` bind mounts remain. Do not rebuild or recreate the container for an ordinary DSH update.
+
+The WebUI settings page exposes the DSH version and an **Update DSH** action. It runs `/usr/local/bin/update-dsh` inside the existing container, reapplies `/etc/dsh-patches`, builds in a temporary directory, atomically replaces `/app/dsh`, validates Nginx, and restarts the DSH process. A failed patch or build leaves the previous DSH directory in place.
 
 ---
 
@@ -138,8 +144,8 @@ uv pip install mcp httpx
 - The DSH sandbox permission mode is `@@DSH_PERMISSION_MODE@@`.
 - The writable roots declared for DSH are `@@DSH_WRITABLE_PATHS@@`.
 - Host access is `@@DSH_HOST_ACCESS@@`. Docker socket availability is `@@DSH_DOCKER_SOCKET_AVAILABLE@@`; container root is not host root and this deployment does not use privileged mode or host-root mounts.
-- System-package installation is `@@DSH_CAN_INSTALL_SYSTEM_PACKAGES@@`; installed Debian package state is persistent across rebuilds: `@@DSH_SYSTEM_PACKAGES_PERSISTENT@@`.
-- If system-package installation is false, do not attempt `apt install`; ask for a Dockerfile change or a container-root deployment. Prefer adding repeatable system packages to the Dockerfile and keep user tools under `/data/home`.
+- System-package installation is `@@DSH_CAN_INSTALL_SYSTEM_PACKAGES@@`; installed Debian package state is persistent for this container: `@@DSH_SYSTEM_PACKAGES_PERSISTENT@@`.
+- If system-package installation is false, do not attempt `apt install`; ask for a container-root deployment. Prefer user tools under `/data/home` when a system package is not required. To reclaim downloaded package files after a large install, use `apt-get clean` inside the container; this does not remove installed packages.
 
 ---
 

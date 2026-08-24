@@ -93,8 +93,9 @@ assert.deepEqual(dictionaries.map(({ namespace, language }) => [namespace, langu
   ['dsh-docker-control', 'en'],
 ])
 assert.equal(effects[0].label, 'dsh-docker-control: dictionaries')
-assert.equal(slots.length, 2)
+assert.equal(slots.length, 3)
 const configSlot = slots.find(({ options }) => options.id === 'open-document')
+const updateSlot = slots.find(({ options }) => options.id === 'dsh-docker-control-update')
 const restartSlot = slots.find(({ options }) => options.id === 'dsh-docker-control-restart')
 assert.deepEqual(JSON.parse(JSON.stringify(configSlot.options)), {
   name: 'settings.action',
@@ -110,6 +111,12 @@ assert.deepEqual(JSON.parse(JSON.stringify(restartSlot.options)), {
   locale: 'dsh-docker-control',
 })
 assert.equal(Object.hasOwn(restartSlot.options, 'inject'), false)
+assert.deepEqual(JSON.parse(JSON.stringify(updateSlot.options)), {
+  name: 'settings.action',
+  id: 'dsh-docker-control-update',
+  order: 5,
+  locale: 'dsh-docker-control',
+})
 
 const safeTree = restartSlot.component({ t: key => ({ restart: 'Restart DSH' })[key] ?? key })
 const actionTree = safeTree.props.children
@@ -124,6 +131,14 @@ const configRendered = configActionTree.type(configActionTree.props)
 const configButton = configRendered.props.children[0]
 assert.equal(configButton.type, primitives.Button)
 assert.equal(configButton.props.children, 'Open configuration file')
+
+const updateSafeTree = updateSlot.component({ t: key => ({ dshVersion: 'DSH version', updateDsh: 'Update DSH', updateLoading: 'Reading DSH version…' })[key] ?? key })
+const updateActionTree = updateSafeTree.props.children
+const updateRendered = updateActionTree.type(updateActionTree.props)
+assert.equal(updateRendered.type, 'span')
+assert.equal(updateRendered.props.children[0].props.children, 'DSH version: unknown')
+assert.equal(updateRendered.props.children[1].type, primitives.Button)
+assert.equal(updateRendered.props.children[1].props.children, 'Update DSH')
 
 assert.doesNotThrow(() => {
   client.apply({

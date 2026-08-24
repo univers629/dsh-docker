@@ -32,6 +32,18 @@ window.__ModuleLoader__.load({
       configLoadFailed: '读取配置文件失败',
       configSaveFailed: '保存配置文件失败',
       configConflict: '配置文件已在其他地方修改，请重新打开后再保存。',
+      dshVersion: 'DSH 版本',
+      updateDsh: '更新 DSH',
+      confirmUpdate: '确认更新 DSH？构建完成后服务会重启。',
+      updateLoading: '正在读取 DSH 版本…',
+      updateQueued: '正在拉取源码…',
+      updateInstalling: '正在安装构建依赖…',
+      updateBuilding: '正在编译 DSH…',
+      updateRestarting: '正在重启 DSH…',
+      updateSuccess: 'DSH 已更新并重启',
+      updateFailed: 'DSH 更新失败',
+      updateTimeout: 'DSH 未在 90 秒内完成重启',
+      dshInfoFailed: '读取 DSH 版本失败',
     }
 
     const en = {
@@ -53,6 +65,18 @@ window.__ModuleLoader__.load({
       configLoadFailed: 'Could not read configuration file',
       configSaveFailed: 'Could not save configuration file',
       configConflict: 'The configuration changed elsewhere. Reopen it before saving.',
+      dshVersion: 'DSH version',
+      updateDsh: 'Update DSH',
+      confirmUpdate: 'Update DSH? The service will restart after the build completes.',
+      updateLoading: 'Reading DSH version…',
+      updateQueued: 'Fetching DSH source…',
+      updateInstalling: 'Installing build dependencies…',
+      updateBuilding: 'Building DSH…',
+      updateRestarting: 'Restarting DSH…',
+      updateSuccess: 'DSH updated and restarted',
+      updateFailed: 'DSH update failed',
+      updateTimeout: 'DSH did not restart within 90 seconds',
+      dshInfoFailed: 'Could not read DSH version',
     }
 
     function fallbackText(key) {
@@ -199,6 +223,142 @@ window.__ModuleLoader__.load({
 
     function SafeRestartAction(props) {
       return h(RestartActionBoundary, null, h(RestartAction, props))
+    }
+
+    function DshUpdateAction({ t }) {
+      const [info, setInfo] = React.useState(null)
+      const [phase, setPhase] = React.useState('loading')
+      const [error, setError] = React.useState(null)
+
+      const loadInfo = React.useCallback(() => {
+        fetch('/dsh-docker-control/info', { cache: 'no-store' })
+          .then(async response => {
+            const body = await readJson(response)
+            if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
+            return body
+          })
+          .then(body => {
+            setInfo(body)
+            setPhase('idle')
+            setError(null)
+          })
+          .catch(cause => {
+            setPhase('idle')
+            setError(`${translate(t, 'dshInfoFailed')}: ${String(cause && cause.message ? cause.message : cause)}`)
+          })
+      }, [t])
+
+      React.useEffect(() => { loadInfo() }, [loadInfo])
+
+      const waitForBoot = React.useCallback(previousBoot => {
+        const deadline = Date.now() + 90000
+        const poll = () => {
+          if (Date.now() > deadline) {
+            setPhase('idle')
+            setError(translate(t, 'updateTimeout'))
+            return
+          }
+          fetch('/dsh-docker-control/status', { cache: 'no-store' })
+            .then(async response => {
+              const body = await readJson(response)
+              if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+              return body
+            })
+            .then(body => {
+              if (typeof body.boot === 'string' && body.boot !== previousBoot) {
+                setPhase('idle')
+                setError(null)
+                loadInfo()
+                window.setTimeout(() => { window.location.reload() }, 900)
+                return
+              }
+              window.setTimeout(poll, 1000)
+            })
+            .catch(() => { window.setTimeout(poll, 1000) })
+        }
+        poll()
+      }, [loadInfo, t])
+
+      const pollUpdate = React.useCallback(previousBoot => {
+        const poll = () => {
+          fetch('/dsh-docker-control/update/status', { cache: 'no-store' })
+            .then(async response => {
+              const body = await readJson(response)
+              if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+              return body
+            })
+            .then(body => {
+              if (body.state === 'failed') {
+                setPhase('idle')
+                setError(`${translate(t, 'updateFailed')}: ${body.message || ''}`)
+                return
+              }
+              if (body.state === 'success') {
+                setPhase('restarting')
+                waitForBoot(previousBoot)
+                return
+              }
+              if (body.message === '正在安装构建依赖') setPhase('installing')
+              else if (body.message === '正在编译 DSH') setPhase('building')
+              else setPhase('running')
+              window.setTimeout(poll, 1000)
+            })
+            .catch(() => { window.setTimeout(poll, 1000) })
+        }
+        poll()
+      }, [t, waitForBoot])
+
+      const update = React.useCallback(() => {
+        if (phase !== 'idle') return
+        if (typeof window.confirm === 'function' && !window.confirm(translate(t, 'confirmUpdate'))) return
+        setPhase('starting')
+        setError(null)
+        fetch('/dsh-docker-control/status', { cache: 'no-store' })
+          .then(async response => {
+            const body = await readJson(response)
+            if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+            return body
+          })
+          .then(before => fetch('/dsh-docker-control/update', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: '{}',
+          }).then(async response => {
+            const body = await readJson(response)
+            if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
+            pollUpdate(typeof before.boot === 'string' ? before.boot : '')
+          }))
+          .catch(cause => {
+            setPhase('idle')
+            setError(`${translate(t, 'updateFailed')}: ${String(cause && cause.message ? cause.message : cause)}`)
+          })
+      }, [phase, pollUpdate, t])
+
+      const version = info?.dsh?.version || 'unknown'
+      const statusText = phase === 'loading'
+        ? translate(t, 'updateLoading')
+        : phase === 'starting' || phase === 'running'
+          ? translate(t, 'updateQueued')
+          : phase === 'installing'
+            ? translate(t, 'updateInstalling')
+            : phase === 'building'
+              ? translate(t, 'updateBuilding')
+              : phase === 'restarting'
+                ? translate(t, 'updateRestarting')
+                : error
+      const icon = typeof IconRefreshOutline14 === 'function' ? h(IconRefreshOutline14, { size: 14 }) : undefined
+      const button = typeof Button === 'function'
+        ? h(Button, { variant: 'outline', size: 'sm', icon, disabled: phase !== 'idle', onClick: update }, translate(t, 'updateDsh'))
+        : h('button', { type: 'button', disabled: phase !== 'idle', onClick: update }, translate(t, 'updateDsh'))
+      return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+        h('span', { role: 'status' }, `${translate(t, 'dshVersion')}: ${version}`),
+        button,
+        statusText ? h('span', { role: error ? 'alert' : 'status', style: { color: error ? '#b42318' : 'var(--dsw-alias-label-secondary, #6b7280)' } }, statusText) : null,
+      )
+    }
+
+    function SafeDshUpdateAction(props) {
+      return h(RestartActionBoundary, null, h(DshUpdateAction, props))
     }
 
     function ConfigEditor({ t }) {
@@ -394,6 +554,13 @@ window.__ModuleLoader__.load({
           order: 0,
           locale: NS,
         }, SafeConfigEditor))
+
+        ctx.slots.inject('settings.action', () => ctx.slots.register({
+          name: 'settings.action',
+          id: 'dsh-docker-control-update',
+          order: 5,
+          locale: NS,
+        }, SafeDshUpdateAction))
 
         ctx.slots.inject('settings.action', () => ctx.slots.register({
           name: 'settings.action',

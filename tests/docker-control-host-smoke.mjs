@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const originalDshHome = process.env.DSH_HOME
+const originalDshAppDir = process.env.DSH_APP_DIR
+const originalUpdateState = process.env.DSH_UPDATE_STATE
+const originalUpdateExecutable = process.env.DSH_UPDATE_EXECUTABLE
 const testHome = await mkdtemp(join(tmpdir(), 'dsh-docker-control-'))
 process.env.DSH_HOME = testHome
+process.env.DSH_APP_DIR = join(testHome, 'app')
+process.env.DSH_UPDATE_STATE = join(testHome, 'update')
+process.env.DSH_UPDATE_EXECUTABLE = join(testHome, 'update-dsh')
 const { apply, inject, name } = await import(`../dsh-home/docker-control/lib/index.js?test=${Date.now()}`)
 
 try {
@@ -23,6 +29,9 @@ try {
   })
 
   assert.deepEqual(routes.map(route => route.path), [
+    '/dsh-docker-control/info',
+    '/dsh-docker-control/update/status',
+    '/dsh-docker-control/update',
     '/dsh-docker-control/config',
     '/dsh-docker-control/status',
     '/dsh-docker-control/restart',
@@ -43,13 +52,58 @@ try {
     }
   }
 
-  const statusRoute = routes.find(route => route.path.endsWith('/status'))
+  const statusRoute = routes.find(route => route.path === '/dsh-docker-control/status')
   const statusResponse = response()
   statusRoute.handler({ method: 'GET', socket: { remoteAddress: '127.0.0.1' }, headers: {} }, statusResponse)
   assert.equal(statusResponse.status, 200)
   const statusBody = JSON.parse(statusResponse.body)
   assert.equal(statusBody.ok, true)
   assert.equal(typeof statusBody.boot, 'string')
+
+  const infoRoute = routes.find(route => route.path.endsWith('/info'))
+  const infoResponse = response()
+  await infoRoute.handler({
+    method: 'GET',
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
+  }, infoResponse)
+  assert.equal(infoResponse.status, 200)
+  const infoBody = JSON.parse(infoResponse.body)
+  assert.equal(infoBody.ok, true)
+  assert.equal(infoBody.dsh.version, 'unknown')
+  assert.equal(typeof infoBody.system.nodeVersion, 'string')
+
+  const updateStatusRoute = routes.find(route => route.path.endsWith('/update/status'))
+  const updateStatusResponse = response()
+  updateStatusRoute.handler({
+    method: 'GET',
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
+  }, updateStatusResponse)
+  assert.equal(updateStatusResponse.status, 200)
+  assert.equal(JSON.parse(updateStatusResponse.body).state, 'idle')
+
+  const updateRoute = routes.find(route => route.path.endsWith('/update'))
+  const deniedUpdate = response()
+  updateRoute.handler({
+    method: 'POST',
+    socket: { remoteAddress: '203.0.113.10' },
+    headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
+  }, deniedUpdate)
+  assert.equal(deniedUpdate.status, 403)
+
+  const updater = join(testHome, 'update-dsh')
+  await writeFile(updater, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  await mkdir(join(testHome, 'update', '.lock'), { recursive: true })
+  await writeFile(join(testHome, 'update', '.lock', 'pid'), `${process.pid}\n`)
+  const busyUpdate = response()
+  updateRoute.handler({
+    method: 'POST',
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
+  }, busyUpdate)
+  assert.equal(busyUpdate.status, 409)
+  await rm(join(testHome, 'update', '.lock'), { recursive: true, force: true })
 
   const configRoute = routes.find(route => route.path.endsWith('/config'))
   const configPath = join(testHome, 'settings.yaml')
@@ -154,5 +208,11 @@ try {
 } finally {
   if (originalDshHome === undefined) delete process.env.DSH_HOME
   else process.env.DSH_HOME = originalDshHome
+  if (originalDshAppDir === undefined) delete process.env.DSH_APP_DIR
+  else process.env.DSH_APP_DIR = originalDshAppDir
+  if (originalUpdateState === undefined) delete process.env.DSH_UPDATE_STATE
+  else process.env.DSH_UPDATE_STATE = originalUpdateState
+  if (originalUpdateExecutable === undefined) delete process.env.DSH_UPDATE_EXECUTABLE
+  else process.env.DSH_UPDATE_EXECUTABLE = originalUpdateExecutable
   await rm(testHome, { recursive: true, force: true })
 }

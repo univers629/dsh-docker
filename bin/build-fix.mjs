@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
-const appDir = '/app/dsh';
+const appDir = process.env.DSH_BUILD_APP_DIR || '/app/dsh';
 const rootModules = path.join(appDir, 'node_modules');
 const require = createRequire(path.join(appDir, 'package.json'));
 
