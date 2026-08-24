@@ -124,7 +124,9 @@ Removing the container with `docker rm` or `docker compose down` removes the sys
 
 ### Built-in control plugin
 
-The image includes `dsh-docker-control` and restores it when the web profile is empty on first boot. The settings page shows the DSH version and provides an Update DSH button. The update runs inside the container, reapplies the current patch set, builds into a temporary directory, and atomically swaps the app; failures leave the old version running. No SSH session is required. The page also provides Restart DSH and a WebUI editor for `/data/dsh/settings.yaml`. The editor validates YAML and protects against concurrent overwrites.
+The image includes `dsh-docker-control` and restores it when the web profile is empty on first boot. The settings page shows the DSH version and provides an Update DSH button. The update runs inside the container, reapplies the current patch set, builds into a temporary directory, and atomically swaps the app; failures leave the old version running. No SSH session is required. Updates and Restart DSH replace only the DSH child managed by the Supervisor; neither action restarts the Debian container or Nginx. The page also provides a WebUI editor for `/data/dsh/settings.yaml`. The editor validates YAML and protects against concurrent overwrites.
+
+In-container Agents should install, update, and remove plugins through `manage-dsh-plugin`. It creates a same-volume temporary profile under `/data/dsh/profiles`, permits the build scripts required by pnpm packages, validates configuration plus runtime resolution and import, then atomically replaces the live profile. Normal completion immediately removes the temporary profile and pnpm Git-build directories created by that transaction; the next DSH start or plugin operation recovers and cleans transactions or backups left by power loss or forced termination. The content-addressable pnpm store under `/data/home` is an intentional persistent download cache and can be reclaimed explicitly with `pnpm store prune`.
 
 ### WebUI and reverse-proxy stability
 

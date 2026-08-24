@@ -1,9 +1,8 @@
-import { existsSync, appendFileSync, mkdirSync, openSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, openSync, readFileSync } from 'node:fs'
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createHash, randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { join, basename } from 'node:path'
-import { tmpdir } from 'node:os'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 
@@ -35,6 +34,10 @@ function updateStateDir() {
 
 function updateExecutable() {
   return process.env.DSH_UPDATE_EXECUTABLE ?? '/usr/local/bin/update-dsh'
+}
+
+function restartExecutable() {
+  return process.env.DSH_RESTART_EXECUTABLE ?? '/usr/local/bin/restart-dsh'
 }
 
 function readJsonFileSync(file, fallback) {
@@ -226,53 +229,20 @@ function trustedLoopbackRequest(request) {
   }
 }
 
-function nodeExecutable() {
-  if (process.argv0 && process.argv0.startsWith('/') && existsSync(process.argv0)) return process.argv0
-  return process.execPath
-}
-
-function restartLaunch() {
-  const entry = process.argv[1]
-  if (entry !== undefined && /[\\/](?:bin\\.(?:js|ts)|dsh)$/.test(entry)) {
-    return {
-      file: nodeExecutable(),
-      args: [...process.execArgv, entry, ...process.argv.slice(2)],
-      cwd: process.cwd(),
-    }
+async function scheduleRestart() {
+  const executable = restartExecutable()
+  if (!existsSync(executable)) {
+    throw new Error('容器内没有 DSH Supervisor 重启程序 / DSH supervisor restart helper is not installed')
   }
-  return { file: process.execPath, args: [...process.execArgv, ...process.argv.slice(1)], cwd: process.cwd() }
-}
-
-function scheduleRestart() {
-  const launch = restartLaunch()
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-  const outPath = join(tmpdir(), `dsh-docker-control-${stamp}.out.log`)
-  const errPath = join(tmpdir(), `dsh-docker-control-${stamp}.err.log`)
-  const out = openSync(outPath, 'a')
-  const err = openSync(errPath, 'a')
-  const helper = spawn(nodeExecutable(), ['-e', `
-const { spawn } = require('node:child_process')
-const fs = require('node:fs')
-const file = ${JSON.stringify(launch.file)}
-const args = ${JSON.stringify(launch.args)}
-const cwd = ${JSON.stringify(launch.cwd)}
-const outPath = ${JSON.stringify(outPath)}
-const errPath = ${JSON.stringify(errPath)}
-setTimeout(() => {
-  try {
-    const out = fs.openSync(outPath, 'a')
-    const err = fs.openSync(errPath, 'a')
-    const child = spawn(file, args, { cwd, detached: true, stdio: ['ignore', out, err], env: process.env })
-    child.on('error', e => { try { fs.appendFileSync(errPath, '[dsh-docker-control] ' + e.message + '\\n') } catch {} })
-    child.unref()
-  } catch (e) {
-    try { fs.appendFileSync(errPath, '[dsh-docker-control] ' + String(e) + '\\n') } catch {}
-  }
-}, 1200)
-`], { detached: true, stdio: ['ignore', out, err], env: process.env })
+  await execFileAsync(executable, ['check'], { timeout: 5000, windowsHide: true })
+  const helper = spawn(executable, ['request', '1'], {
+    detached: true,
+    stdio: 'ignore',
+    env: process.env,
+    windowsHide: true,
+  })
   helper.unref()
-  setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500)
-  return { boot: BOOT_ID, pid: process.pid, helperPid: helper.pid, logOut: outPath, logErr: errPath }
+  return { boot: BOOT_ID, pid: process.pid, helperPid: helper.pid }
 }
 
 export function apply(ctx) {
@@ -402,7 +372,7 @@ export function apply(ctx) {
   webServer.register({
     kind: 'exact',
     path: '/dsh-docker-control/restart',
-    handler: (request, response) => {
+    handler: async (request, response) => {
       if (request.method !== 'POST') {
         response.writeHead(405, { allow: 'POST' })
         response.end()
@@ -413,7 +383,7 @@ export function apply(ctx) {
         return
       }
       try {
-        sendJson(response, 202, { ok: true, ...scheduleRestart() })
+        sendJson(response, 202, { ok: true, ...await scheduleRestart() })
       } catch (error) {
         sendJson(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
       }

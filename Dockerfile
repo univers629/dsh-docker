@@ -89,7 +89,11 @@ COPY bin/write-dsh-update-status.mjs /usr/local/lib/dsh/write-dsh-update-status.
 COPY bin/build-fix.mjs /usr/local/lib/dsh/build-fix.mjs
 COPY patches/ /etc/dsh-patches/
 COPY bin/dsh /usr/local/bin/dsh
+COPY bin/dsh-supervisor /usr/local/bin/dsh-supervisor
+COPY bin/restart-dsh /usr/local/bin/restart-dsh
 COPY bin/manage-dsh-plugin /usr/local/bin/manage-dsh-plugin
+COPY bin/cleanup-dsh-plugin-transactions /usr/local/bin/cleanup-dsh-plugin-transactions
+COPY bin/validate-dsh-profile.mjs /usr/local/lib/dsh/validate-dsh-profile.mjs
 COPY bin/link-modules.mjs /usr/local/bin/link-modules.mjs
 COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY bin/configure-nginx-auth /usr/local/bin/configure-nginx-auth
@@ -100,12 +104,12 @@ COPY dsh-home/docker-control/ /opt/dsh-docker-control/
 COPY nginx/dsh-nginx.conf /usr/local/share/dsh/nginx.conf
 
 RUN cd /opt/dsh-docker-control \
-    && npm install --omit=dev --ignore-scripts --no-package-lock \
+    && npm install --omit=dev --no-package-lock \
     && npm cache clean --force \
     && mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
        /usr/bin /usr/sbin /usr/lib /usr/share /usr/include /usr/libexec \
        /usr/games /usr/src /var/lib /var/cache /var/backups \
-    && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/configure-nginx-auth /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs /usr/local/bin/apply-dsh-patches /usr/local/bin/update-dsh \
+    && chmod +x /usr/local/bin/dsh /usr/local/bin/dsh-supervisor /usr/local/bin/restart-dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/cleanup-dsh-plugin-transactions /usr/local/bin/entrypoint.sh /usr/local/bin/configure-nginx-auth /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs /usr/local/bin/apply-dsh-patches /usr/local/bin/update-dsh \
     && printf '%s\n' 'export PATH="/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:$PATH"' > /etc/profile.d/dsh-toolchain.sh
 
 ENV DSH_HOME=/data/dsh \
