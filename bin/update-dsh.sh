@@ -102,7 +102,7 @@ if ! mv "$SOURCE_DIR" "$APP_DIR"; then
   exit 1
 fi
 
-if ! nginx -t -c "$NGINX_CONFIG"; then
+if ! gosu node nginx -t -c "$NGINX_CONFIG"; then
   rm -rf "$APP_DIR"
   mv "$OLD_DIR" "$APP_DIR"
   write_status failed 'Nginx 配置检查失败，当前版本已恢复'
