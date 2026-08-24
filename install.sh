@@ -224,7 +224,7 @@ require_project() {
 }
 
 container_exists() {
-  [ -n "$(DOCKER inspect dsh 2>/dev/null || true)" ]
+  DOCKER container inspect dsh >/dev/null 2>&1
 }
 
 case "$ACTION" in

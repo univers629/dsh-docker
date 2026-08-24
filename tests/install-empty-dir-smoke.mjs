@@ -58,9 +58,13 @@ if [ "\${1:-}" = run ]; then
   printf '%s\\n' 'dsh:$2y$05$installerSmokeHash'
 fi
 if [ "\${1:-}" = inspect ]; then
-  if [ "\${2:-}" = dsh ] && [ "\${3:-}" != --format ]; then exit 1; fi
+  if [ "\${2:-}" = dsh ] && [ "\${3:-}" != --format ]; then printf '%s\\n' '[]'; exit 1; fi
   [ -f "$MOCK_DOCKER_STATE" ] || exit 1
   cat "$MOCK_DOCKER_STATE"
+fi
+if [ "\${1:-}" = container ] && [ "\${2:-}" = inspect ] && [ "\${3:-}" = dsh ]; then
+  printf '%s\\n' '[]'
+  exit 1
 fi
 if [ "\${1:-}" = exec ]; then
   printf '%s\\n' 0
@@ -128,6 +132,7 @@ try {
   assert.doesNotMatch(rollbackEnv, /DSH_RUN_AS_ROOT/)
 
   const calls = await readFile(dockerLog, 'utf8')
+  assert.match(calls, /container inspect dsh/)
   assert.match(calls, /compose .* build dsh/)
   assert.match(calls, /compose .* up -d --force-recreate/)
   assert.match(calls, /run --rm -i --entrypoint htpasswd dsh:local -niB dsh/)
