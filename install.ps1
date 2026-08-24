@@ -123,6 +123,11 @@ function Get-DockerEngineOs {
     return $null
 }
 
+function Test-DshContainer {
+    & docker container inspect dsh *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
 function Get-DockerDesktopExecutable {
     $candidates = @(
         (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'),
@@ -347,6 +352,9 @@ if (-not $DshAction -and $interactive) {
 if ($DshAction -in @('install','configure','update')) { Fetch-Project }
 if (-not (Test-Path (Join-Path $Dir 'docker-compose.yml'))) { throw "未找到 $Dir 的 docker-compose.yml，工程获取失败。" }
 Set-Location $Dir
+if ($DshAction -in @('install','configure') -and (Test-DshContainer)) {
+    throw "dsh 容器已经存在；为保护容器内 apt 软件和系统修改，安装器不会隐式重建它。`n使用 .\dsh.bat start|restart 管理现有容器；如需全新系统，请明确执行 .\dsh.bat remove 后再安装。"
+}
 $env:DOCKER_BUILDKIT = '1'; $env:COMPOSE_DOCKER_CLI_BUILD = '1'
 $envFile = Join-Path (Get-Location) '.env'
 $accessMode = if ($Access) { $Access } else { Get-ComposeEnvValue $envFile 'DSH_ACCESS_MODE' 'local' }
