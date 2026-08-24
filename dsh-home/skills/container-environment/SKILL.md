@@ -95,8 +95,9 @@ For one-shot servers, uvx and npx use caches below /data/home:
 The WebUI settings page shows the DSH version and provides **Update DSH** and
 **Restart DSH** actions. The updater pulls source into /tmp, reapplies
 /etc/dsh-patches, builds, validates Nginx, atomically replaces /app/dsh,
-and restarts DSH. Failed patching, building, or validation restores the
-previous application.
+and asks the in-container Supervisor to replace only the DSH child process.
+The Debian container and Nginx process stay running. Failed patching, building,
+or validation restores the previous application.
 
 Do not rebuild or recreate the container for an ordinary DSH update. Those
 operations discard apt-installed tools and other changes in the writable
@@ -124,12 +125,28 @@ Use the built-in helper for DSH plugins:
     manage-dsh-plugin remove <package-name>
     manage-dsh-plugin restart
 
-The helper validates the combined profile and schedules one targeted graceful
-restart after the current Agent turn. Do not append pkill, kill, kill -9, or a
-second restart command. When the helper succeeds, report that the profile was
-updated and that the page may disconnect for 30 to 60 seconds. Profile
-validation proves that configuration parses; it does not prove that a plugin's
-UI or runtime behavior works. Verify those separately before claiming success.
+The helper copies the live profile into a same-volume transaction directory,
+runs package installation and required lifecycle/build scripts there, validates
+every configured runtime entry, then atomically replaces the live profile. It
+temporarily enables pnpm's Git dependency builds only inside that transaction;
+the live pnpm-workspace.yaml never retains dangerouslyAllowAllBuilds. Install
+only trusted packages because their build scripts execute as container root.
+
+Normal success, failure, and termination remove the transaction immediately.
+After SIGKILL or power loss, the next plugin operation or DSH start removes the
+stale transaction, its recorded pnpm Git-build temporary directories, and
+restores the last complete profile if a swap was interrupted. The content-
+addressable pnpm store under /data/home is a deliberate persistent download
+cache, not transaction garbage; use `pnpm store prune` only when reclaiming
+space is more important than avoiding future downloads.
+
+The helper schedules one targeted DSH child-process restart after the current
+Agent turn. The Supervisor, Debian container, and Nginx process remain alive.
+Do not append pkill, kill, kill -9, or a second restart command. When the helper
+succeeds, report that the profile was updated and that the page may disconnect
+for 30 to 60 seconds. Entry validation proves that the plugin can be resolved
+and imported; it does not prove that its UI or runtime behavior works. Verify
+those separately before claiming success.
 
 If the helper fails, report its failing command and output. Check the current
 installation state before retrying an operation with side effects.

@@ -12,6 +12,8 @@ window.__ModuleLoader__.load({
     const NS = 'dsh-docker-control'
     const h = React.createElement
     const inject = ['slots', 'locale']
+    let dshInfoCache = null
+    let dshInfoRequest = null
 
     const zh = {
       restart: '重启 DSH',
@@ -102,6 +104,23 @@ window.__ModuleLoader__.load({
         const summary = raw.replace(/\s+/g, ' ').trim().slice(0, 180)
         throw new Error(`HTTP ${response.status}: ${summary || 'invalid response'}`)
       }
+    }
+
+    function requestDshInfo(force = false) {
+      if (!force && dshInfoCache !== null) return Promise.resolve(dshInfoCache)
+      if (!force && dshInfoRequest !== null) return dshInfoRequest
+      const request = fetch('/dsh-docker-control/info', { cache: 'no-store' })
+        .then(async response => {
+          const body = await readJson(response)
+          if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
+          dshInfoCache = body
+          return body
+        })
+      dshInfoRequest = request
+      request.finally(() => {
+        if (dshInfoRequest === request) dshInfoRequest = null
+      }).catch(() => {})
+      return request
     }
 
     class RestartActionBoundary extends React.Component {
@@ -226,17 +245,13 @@ window.__ModuleLoader__.load({
     }
 
     function DshUpdateAction({ t }) {
-      const [info, setInfo] = React.useState(null)
-      const [phase, setPhase] = React.useState('loading')
+      const [info, setInfo] = React.useState(dshInfoCache)
+      const [phase, setPhase] = React.useState(dshInfoCache === null ? 'loading' : 'idle')
       const [error, setError] = React.useState(null)
 
-      const loadInfo = React.useCallback(() => {
-        fetch('/dsh-docker-control/info', { cache: 'no-store' })
-          .then(async response => {
-            const body = await readJson(response)
-            if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
-            return body
-          })
+      const loadInfo = React.useCallback((force = false) => {
+        if (dshInfoCache === null) setPhase('loading')
+        return requestDshInfo(force)
           .then(body => {
             setInfo(body)
             setPhase('idle')
@@ -268,7 +283,7 @@ window.__ModuleLoader__.load({
               if (typeof body.boot === 'string' && body.boot !== previousBoot) {
                 setPhase('idle')
                 setError(null)
-                loadInfo()
+                loadInfo(true)
                 window.setTimeout(() => { window.location.reload() }, 900)
                 return
               }
@@ -334,10 +349,8 @@ window.__ModuleLoader__.load({
           })
       }, [phase, pollUpdate, t])
 
-      const version = info?.dsh?.version || 'unknown'
-      const statusText = phase === 'loading'
-        ? translate(t, 'updateLoading')
-        : phase === 'starting' || phase === 'running'
+      const version = info?.dsh?.version || '...'
+      const statusText = phase === 'starting' || phase === 'running'
           ? translate(t, 'updateQueued')
           : phase === 'installing'
             ? translate(t, 'updateInstalling')
@@ -351,7 +364,7 @@ window.__ModuleLoader__.load({
         ? h(Button, { variant: 'outline', size: 'sm', icon, disabled: phase !== 'idle', onClick: update }, translate(t, 'updateDsh'))
         : h('button', { type: 'button', disabled: phase !== 'idle', onClick: update }, translate(t, 'updateDsh'))
       return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-        h('span', { role: 'status' }, `${translate(t, 'dshVersion')}: ${version}`),
+        h('span', { role: 'status', style: { display: 'inline-block', minWidth: '10rem', whiteSpace: 'nowrap' } }, `${translate(t, 'dshVersion')}: ${version}`),
         button,
         statusText ? h('span', { role: error ? 'alert' : 'status', style: { color: error ? '#b42318' : 'var(--dsw-alias-label-secondary, #6b7280)' } }, statusText) : null,
       )
@@ -538,6 +551,7 @@ window.__ModuleLoader__.load({
       }
 
       try {
+        requestDshInfo().catch(() => {})
         ctx.effect(() => {
           const offZh = ctx.locale.register(NS, 'zh', zh)
           const offEn = ctx.locale.register(NS, 'en', en)

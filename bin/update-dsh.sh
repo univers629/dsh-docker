@@ -11,6 +11,7 @@ BUILD_FIX=${DSH_BUILD_FIX:-/usr/local/lib/dsh/build-fix.mjs}
 METADATA_WRITER=${DSH_METADATA_WRITER:-/usr/local/lib/dsh/write-dsh-metadata.mjs}
 STATUS_WRITER=${DSH_STATUS_WRITER:-/usr/local/lib/dsh/write-dsh-update-status.mjs}
 NGINX_CONFIG=${DSH_NGINX_CONFIG:-/usr/local/share/dsh/nginx.conf}
+RESTART_EXECUTABLE=${DSH_RESTART_EXECUTABLE:-/usr/local/bin/restart-dsh}
 
 mkdir -p "$STATE_DIR"
 
@@ -111,6 +112,10 @@ fi
 
 write_status success 'DSH 更新完成，正在重启服务'
 
-if [ "${DSH_UPDATE_NO_RESTART:-false}" != true ] && [ -f /run/dsh.pid ]; then
-  kill -TERM "$(cat /run/dsh.pid)" 2>/dev/null || true
+if [ "${DSH_UPDATE_NO_RESTART:-false}" != true ]; then
+  if ! "$RESTART_EXECUTABLE" check; then
+    write_status failed 'DSH 已更新，但容器内 Supervisor 当前不可用，请手动执行 restart-dsh request'
+    exit 1
+  fi
+  setsid "$RESTART_EXECUTABLE" request 1 </dev/null >/dev/null 2>&1 &
 fi

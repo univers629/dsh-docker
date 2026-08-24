@@ -7,11 +7,20 @@ const originalDshHome = process.env.DSH_HOME
 const originalDshAppDir = process.env.DSH_APP_DIR
 const originalUpdateState = process.env.DSH_UPDATE_STATE
 const originalUpdateExecutable = process.env.DSH_UPDATE_EXECUTABLE
+const originalRestartExecutable = process.env.DSH_RESTART_EXECUTABLE
+const originalCwd = process.cwd()
 const testHome = await mkdtemp(join(tmpdir(), 'dsh-docker-control-'))
 process.env.DSH_HOME = testHome
 process.env.DSH_APP_DIR = join(testHome, 'app')
 process.env.DSH_UPDATE_STATE = join(testHome, 'update')
 process.env.DSH_UPDATE_EXECUTABLE = join(testHome, 'update-dsh')
+process.env.DSH_RESTART_EXECUTABLE = process.execPath
+process.chdir(testHome)
+await writeFile(join(testHome, 'check'), '')
+await writeFile(join(testHome, 'request'), `
+const { writeFileSync } = require('node:fs')
+writeFileSync(${JSON.stringify(join(testHome, 'restart-requested'))}, process.argv.slice(2).join(' '))
+`)
 const { apply, inject, name } = await import(`../dsh-home/docker-control/lib/index.js?test=${Date.now()}`)
 
 try {
@@ -190,7 +199,7 @@ try {
 
   const restartRoute = routes.find(route => route.path.endsWith('/restart'))
   const rejected = response()
-  restartRoute.handler({
+  await restartRoute.handler({
     method: 'POST', socket: { remoteAddress: '203.0.113.10' },
     headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
   }, rejected)
@@ -198,11 +207,30 @@ try {
   assert.equal(JSON.parse(rejected.body).ok, false)
 
   const forwarded = response()
-  restartRoute.handler({
+  await restartRoute.handler({
     method: 'POST', socket: { remoteAddress: '127.0.0.1' },
     headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081', 'x-forwarded-for': '203.0.113.10' },
   }, forwarded)
   assert.equal(forwarded.status, 403)
+
+  const accepted = response()
+  await restartRoute.handler({
+    method: 'POST', socket: { remoteAddress: '127.0.0.1' },
+    headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
+  }, accepted)
+  assert.equal(accepted.status, 202, accepted.body)
+  const acceptedBody = JSON.parse(accepted.body)
+  assert.equal(acceptedBody.ok, true)
+  assert.equal(acceptedBody.boot, statusBody.boot)
+  assert.equal(Number.isInteger(acceptedBody.helperPid), true)
+  const restartMarker = join(testHome, 'restart-requested')
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      if (await readFile(restartMarker, 'utf8') === '1') break
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  assert.equal(await readFile(restartMarker, 'utf8'), '1')
 
   console.log('docker-control host smoke: ok')
 } finally {
@@ -214,5 +242,8 @@ try {
   else process.env.DSH_UPDATE_STATE = originalUpdateState
   if (originalUpdateExecutable === undefined) delete process.env.DSH_UPDATE_EXECUTABLE
   else process.env.DSH_UPDATE_EXECUTABLE = originalUpdateExecutable
+  if (originalRestartExecutable === undefined) delete process.env.DSH_RESTART_EXECUTABLE
+  else process.env.DSH_RESTART_EXECUTABLE = originalRestartExecutable
+  process.chdir(originalCwd)
   await rm(testHome, { recursive: true, force: true })
 }

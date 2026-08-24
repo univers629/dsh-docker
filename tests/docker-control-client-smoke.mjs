@@ -5,6 +5,7 @@ import vm from 'node:vm'
 const source = await readFile(new URL('../dsh-home/docker-control/client/client.js', import.meta.url), 'utf8')
 let registration
 const errors = []
+const fetches = []
 
 class Component {
   constructor(props) {
@@ -41,6 +42,14 @@ const ReactDOM = { createPortal: element => element }
 
 vm.runInNewContext(source, {
   console: { error: (...args) => { errors.push(args) }, log() {}, warn() {} },
+  fetch: async (path, options) => {
+    fetches.push({ path, options })
+    return {
+      ok: true,
+      status: 200,
+      async text() { return JSON.stringify({ ok: true, dsh: { version: '1.2.3' } }) },
+    }
+  },
   window: {
     __ModuleLoader__: {
       load(value) { registration = value },
@@ -88,6 +97,8 @@ const ctx = {
 }
 
 client.apply(ctx)
+assert.equal(fetches.length, 1)
+assert.equal(fetches[0].path, '/dsh-docker-control/info')
 assert.deepEqual(dictionaries.map(({ namespace, language }) => [namespace, language]), [
   ['dsh-docker-control', 'zh'],
   ['dsh-docker-control', 'en'],
@@ -136,7 +147,8 @@ const updateSafeTree = updateSlot.component({ t: key => ({ dshVersion: 'DSH vers
 const updateActionTree = updateSafeTree.props.children
 const updateRendered = updateActionTree.type(updateActionTree.props)
 assert.equal(updateRendered.type, 'span')
-assert.equal(updateRendered.props.children[0].props.children, 'DSH version: unknown')
+assert.equal(updateRendered.props.children[0].props.children, 'DSH version: ...')
+assert.equal(updateRendered.props.children[0].props.style.minWidth, '10rem')
 assert.equal(updateRendered.props.children[1].type, primitives.Button)
 assert.equal(updateRendered.props.children[1].props.children, 'Update DSH')
 

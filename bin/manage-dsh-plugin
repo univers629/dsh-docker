@@ -1,6 +1,15 @@
 #!/bin/sh
 set -eu
 
+RESTART_EXECUTABLE=${DSH_RESTART_EXECUTABLE:-/usr/local/bin/restart-dsh}
+VALIDATOR=${DSH_PLUGIN_VALIDATOR:-/usr/local/lib/dsh/validate-dsh-profile.mjs}
+CLEANUP_EXECUTABLE=${DSH_PLUGIN_CLEANUP_EXECUTABLE:-/usr/local/bin/cleanup-dsh-plugin-transactions}
+LOCK_DIR=${DSH_PLUGIN_LOCK_DIR:-/data/dsh/plugin-transaction.lock}
+transaction_root=
+lock_owned=false
+pnpm_store=
+pnpm_tmp_before=
+
 usage() {
   printf '%s\n' '用法：manage-dsh-plugin install|update|remove <package> | restart' >&2
   exit 2
@@ -11,20 +20,45 @@ fail() {
   exit 1
 }
 
+cleanup() {
+  cleanup_new_pnpm_tmp
+  [ -z "$transaction_root" ] || rm -rf "$transaction_root"
+  [ "$lock_owned" != true ] || rm -rf "$LOCK_DIR"
+}
+
+cleanup_new_pnpm_tmp() {
+  [ -n "$transaction_root" ] && [ -n "$pnpm_store" ] && [ -f "$pnpm_tmp_before" ] || return 0
+  case "$pnpm_store/tmp" in /data/home/*/tmp) ;; *) return 0 ;; esac
+  [ -d "$pnpm_store/tmp" ] || return 0
+  pnpm_tmp_after="$transaction_root/pnpm-tmp.after"
+  find "$pnpm_store/tmp" -mindepth 1 -maxdepth 1 -type d -name '_tmp_*' \
+    -printf '%f\n' 2>/dev/null | sort -u > "$pnpm_tmp_after"
+  comm -13 "$pnpm_tmp_before" "$pnpm_tmp_after" | while IFS= read -r entry; do
+    case "$entry" in _tmp_[A-Za-z0-9_-]*) rm -rf -- "$pnpm_store/tmp/$entry" ;; esac
+  done
+}
+
+write_lock_record() {
+  lock_start=$(awk '{ print $22 }' "/proc/$$/stat" 2>/dev/null || true)
+  case "$$:$lock_start" in ''|*[!0-9:]*) return 1 ;; esac
+  printf '%s\n%s\n' "$$" "$lock_start" > "$LOCK_DIR/pid"
+}
+
+lock_is_live() {
+  lock_pid=$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)
+  expected_start=$(sed -n '2p' "$LOCK_DIR/pid" 2>/dev/null || true)
+  case "$lock_pid:$expected_start" in ''|*[!0-9:]*) return 1 ;; esac
+  [ -r "/proc/$lock_pid/stat" ] || return 1
+  current_start=$(awk '{ print $22 }' "/proc/$lock_pid/stat" 2>/dev/null || true)
+  [ "$current_start" = "$expected_start" ]
+}
+
 restart_after_turn() {
-  [ "$#" -eq 4 ] || exit 2
-  target_pid=$1
-  target_start=$2
-  session_log=$3
-  baseline_bytes=$4
+  [ "$#" -eq 2 ] || exit 2
+  session_log=$1
+  baseline_bytes=$2
+  case "$baseline_bytes" in ''|*[!0-9]*) exit 2 ;; esac
 
-  case "$target_pid:$target_start:$baseline_bytes" in
-    ''|*[!0-9:]*|*::*|:*|*:) exit 2 ;;
-  esac
-
-  # Wait for the durable turn boundary before stopping the process that owns
-  # the current Bash call. The timeout is finite so a missing/stale log cannot
-  # prevent the requested plugin change from eventually taking effect.
   if [ -n "$session_log" ] && [ -f "$session_log" ]; then
     attempts=0
     while [ "$attempts" -lt 240 ]; do
@@ -42,14 +76,7 @@ restart_after_turn() {
     sleep 5
   fi
   sleep 1
-
-  [ -r "/proc/$target_pid/stat" ] || exit 0
-  current_start=$(awk '{ print $22 }' "/proc/$target_pid/stat" 2>/dev/null || true)
-  [ "$current_start" = "$target_start" ] || exit 0
-  command_line=$(tr '\000' ' ' < "/proc/$target_pid/cmdline" 2>/dev/null || true)
-  case "$command_line" in
-    *'/app/dsh/apps/cli/lib/bin.js'*) kill -TERM "$target_pid" 2>/dev/null || true ;;
-  esac
+  "$RESTART_EXECUTABLE" request
 }
 
 [ "${1:-}" != '__restart-after-turn' ] || {
@@ -59,18 +86,7 @@ restart_after_turn() {
 }
 
 schedule_restart() {
-  pid_file=${DSH_PID_FILE:-/run/dsh.pid}
-  [ -r "$pid_file" ] || fail "找不到 DSH 主进程记录：$pid_file"
-  target_pid=$(sed -n '1p' "$pid_file")
-  case "$target_pid" in ''|*[!0-9]*) fail "DSH 主进程记录无效：$target_pid" ;; esac
-  [ -r "/proc/$target_pid/stat" ] || fail "DSH 主进程不存在：$target_pid"
-  target_start=$(awk '{ print $22 }' "/proc/$target_pid/stat" 2>/dev/null || true)
-  case "$target_start" in ''|*[!0-9]*) fail '无法确认 DSH 主进程的启动标识。' ;; esac
-  command_line=$(tr '\000' ' ' < "/proc/$target_pid/cmdline" 2>/dev/null || true)
-  case "$command_line" in
-    */app/dsh/apps/cli/lib/bin.js*) ;;
-    *) fail "PID $target_pid 不是预期的 DSH 主进程。" ;;
-  esac
+  "$RESTART_EXECUTABLE" check || fail '容器内 DSH Supervisor 不可用，未安排重启。'
 
   session_log=${DSH_SESSION_JSONL:-}
   baseline_bytes=0
@@ -87,16 +103,15 @@ schedule_restart() {
   setsid_bin=${DSH_SETSID_BIN:-/usr/bin/setsid}
   [ -x "$setsid_bin" ] || fail "找不到 setsid：$setsid_bin"
 
-  "$setsid_bin" "$self" __restart-after-turn \
-    "$target_pid" "$target_start" "$session_log" "$baseline_bytes" \
+  "$setsid_bin" "$self" __restart-after-turn "$session_log" "$baseline_bytes" \
     </dev/null >/dev/null 2>&1 &
 }
 
 if [ "${1:-}" = restart ]; then
   [ "$#" -eq 1 ] || usage
-  printf '%s\n' '【DSH】正在确认 DSH 主进程，并安排本轮回复结束后的优雅重启……'
+  printf '%s\n' '【DSH】正在确认容器内 Supervisor，并安排本轮回复结束后的进程级重启……'
   schedule_restart
-  printf '%s\n' '【DSH】已安排重启：当前回复结束后只会重启 DSH 主进程，不会影响其他 Docker 容器。'
+  printf '%s\n' '【DSH】已安排重启：当前回复结束后只重启 DSH 子进程，Debian 容器和 Nginx 会保持运行。'
   printf '%s\n' '【DSH】页面会短暂断开；服务恢复后再刷新。重启结果将在下一次检查中确认。'
   exit 0
 fi
@@ -104,19 +119,32 @@ fi
 [ "$#" -eq 2 ] || usage
 operation=$1
 package=$2
+case "$operation" in install|update|remove) ;; *) usage ;; esac
+case "$package" in ''|'-'*) fail '插件包名不能为空，也不能以 - 开头。' ;; esac
 
-case "$operation" in
-  install|update|remove) ;;
-  *) usage ;;
-esac
-
-case "$package" in
-  ''|'-'*) fail '插件包名不能为空，也不能以 - 开头。' ;;
-esac
-
-profile=/data/dsh/profiles/web
+profile=${DSH_PROFILE_ROOT:-/data/dsh/profiles/web}
+DSH_PROFILE_ROOT="$profile" "$CLEANUP_EXECUTABLE"
 [ -d "$profile" ] || fail "找不到 web profile：$profile"
-cd "$profile"
+profiles_root=$(dirname "$profile")
+"$RESTART_EXECUTABLE" check || fail '容器内 DSH Supervisor 不可用，实时 profile 尚未修改。'
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if mkdir "$LOCK_DIR" 2>/dev/null; then
+  lock_owned=true
+  write_lock_record || fail '无法记录插件事务锁。'
+else
+  if lock_is_live; then
+    fail '另一个插件事务正在执行。'
+  fi
+  rm -rf "$LOCK_DIR"
+  mkdir "$LOCK_DIR"
+  lock_owned=true
+  write_lock_record || fail '无法记录插件事务锁。'
+fi
 
 case "$package" in
   git+*|github:*|http://*|https://*|file:*|link:*|./*|../*|/*|*.tgz) spec=$package ;;
@@ -129,36 +157,80 @@ case "$package" in
 esac
 
 case "$operation" in
-  install) verb=安装; pnpm_verb=add; target=$spec ;;
-  update) verb=更新; pnpm_verb=update; target=$spec ;;
-  remove) verb=删除; pnpm_verb=remove; target=$package ;;
+  install) verb=安装; target=$spec ;;
+  update) verb=更新; target=$spec ;;
+  remove) verb=删除; target=$package ;;
 esac
 
-printf '【DSH 插件】开始%s：%s\n' "$verb" "$target"
-printf '%s\n' '【DSH 插件】正在执行包管理操作，下面会显示 pnpm/DSH 的实际输出。'
-case "$operation" in
-  install)
-    dsh plugin --profile web add "$target" --ignore-scripts || \
-      fail "${verb} ${target} 未完成；DSH 不会自动重启。"
-    ;;
-  update)
-    dsh plugin --profile web update "$target" || \
-      fail "${verb} ${target} 未完成；DSH 不会自动重启。"
-    ;;
-  remove)
-    dsh plugin --profile web remove "$target" || \
-      fail "${verb} ${target} 未完成；DSH 不会自动重启。"
-    ;;
-esac
+transaction_root=$(mktemp -d "$profiles_root/.plugin-transaction.XXXXXX")
+stage_home="$transaction_root/home"
+stage_profile="$stage_home/profiles/web"
+mkdir -p "$stage_home/profiles"
+cp -a "$profile" "$stage_profile"
+ln -s /app/dsh/node_modules "$stage_home/profiles/node_modules"
+[ ! -f /data/dsh/cordis.patch.yml ] || cp -a /data/dsh/cordis.patch.yml "$stage_home/cordis.patch.yml"
 
-printf '【DSH 插件】包管理操作已完成并写入持久化 web profile：%s\n' "$target"
-printf '%s\n' '【DSH 插件】正在校验 web profile 的组合配置……'
-if ! dsh --profile web --dump-config >/dev/null; then
-  fail "配置解析失败，未确认 ${target} 能随 web profile 启动；DSH 不会自动重启。"
+workspace="$stage_profile/pnpm-workspace.yaml"
+workspace_backup="$transaction_root/pnpm-workspace.yaml.original"
+workspace_existed=false
+if [ -f "$workspace" ]; then
+  workspace_existed=true
+  cp "$workspace" "$workspace_backup"
+else
+  : > "$workspace"
+fi
+if grep -q '^dangerouslyAllowAllBuilds:' "$workspace"; then
+  sed -i 's/^dangerouslyAllowAllBuilds:.*/dangerouslyAllowAllBuilds: true/' "$workspace"
+else
+  printf '\ndangerouslyAllowAllBuilds: true\n' >> "$workspace"
 fi
 
-schedule_restart
+pnpm_store=$(cd "$stage_profile" && pnpm store path 2>/dev/null || true)
+pnpm_tmp_before="$transaction_root/pnpm-tmp.before"
+printf '%s\n' "$pnpm_store" > "$transaction_root/pnpm-store.path"
+if [ -n "$pnpm_store" ] && [ -d "$pnpm_store/tmp" ]; then
+  find "$pnpm_store/tmp" -mindepth 1 -maxdepth 1 -type d -name '_tmp_*' \
+    -printf '%f\n' 2>/dev/null | sort -u > "$pnpm_tmp_before"
+else
+  : > "$pnpm_tmp_before"
+fi
 
-printf '%s\n' '【DSH 插件】profile 配置解析通过，插件变更已写入持久化 web profile，但前端尚未确认生效。'
-printf '%s\n' '【DSH 插件】DSH 会在本轮回复结束后自动重启，并重新链接依赖、加载插件；不会等待重启完成后再补发一条通知。'
-printf '%s\n' '【DSH 插件】页面会短暂断开。请等待约 30～60 秒（复杂插件可能接近 1 分钟）后再刷新；过早刷新仍看不到插件属于正常现象。超过 90 秒仍未出现时，再检查最近 500 行日志和插件自身入口。'
+printf '【DSH 插件】开始%s事务：%s\n' "$verb" "$target"
+printf '%s\n' '【DSH 插件】正在临时 profile 中运行包管理和必要构建脚本；实时 profile 尚未修改。'
+case "$operation" in
+  install)
+    DSH_HOME="$stage_home" dsh plugin --profile web add "$target" || \
+      fail "${verb} ${target} 未完成；实时 profile 保持不变。"
+    ;;
+  update)
+    DSH_HOME="$stage_home" dsh plugin --profile web update "$target" || \
+      fail "${verb} ${target} 未完成；实时 profile 保持不变。"
+    ;;
+  remove)
+    DSH_HOME="$stage_home" dsh plugin --profile web remove "$target" || \
+      fail "${verb} ${target} 未完成；实时 profile 保持不变。"
+    ;;
+esac
+
+if [ "$workspace_existed" = true ]; then cp "$workspace_backup" "$workspace"; else rm -f "$workspace"; fi
+
+printf '%s\n' '【DSH 插件】正在验证组合配置、运行时入口和模块导入……'
+DSH_HOME="$stage_home" dsh --profile web --dump-config >/dev/null || \
+  fail "配置解析失败；${target} 未提交，实时 profile 保持不变。"
+node "$VALIDATOR" "$stage_profile" || \
+  fail "插件运行时验证失败；${target} 未提交，实时 profile 保持不变。"
+
+backup="$profiles_root/.web.previous.$$"
+mv "$profile" "$backup" || fail '无法准备 profile 原子替换。'
+if mv "$stage_profile" "$profile"; then
+  rm -rf "$backup"
+else
+  mv "$backup" "$profile" 2>/dev/null || true
+  fail '无法提交新 profile，旧 profile 已恢复。'
+fi
+
+printf '【DSH 插件】事务已提交到持久化 web profile：%s\n' "$target"
+schedule_restart
+printf '%s\n' '【DSH 插件】构建、配置和运行时入口验证均已通过。'
+printf '%s\n' '【DSH 插件】本轮回复结束后只会重启 DSH 子进程；Debian 容器、Nginx 和已安装系统工具保持运行。'
+printf '%s\n' '【DSH 插件】页面可能短暂断开。请等待约 30～60 秒后刷新；超过 90 秒仍未恢复时，再检查 DSH Supervisor 和插件日志。'

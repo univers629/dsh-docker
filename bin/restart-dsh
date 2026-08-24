@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+DSH_PID_FILE=${DSH_PID_FILE:-/run/dsh.pid}
+DSH_SUPERVISOR_PID_FILE=${DSH_SUPERVISOR_PID_FILE:-/run/dsh-supervisor.pid}
+DSH_RESTART_REQUEST_FILE=${DSH_RESTART_REQUEST_FILE:-/run/dsh.restart}
+
+usage() {
+  echo 'usage: restart-dsh check | request [delay-seconds]' >&2
+  exit 2
+}
+
+read_record() {
+  file=$1
+  [ -r "$file" ] || return 1
+  pid=$(sed -n '1p' "$file")
+  expected_start=$(sed -n '2p' "$file")
+  case "$pid:$expected_start" in ''|*[!0-9:]*) return 1 ;; esac
+  [ -r "/proc/$pid/stat" ] || return 1
+  current_start=$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null || true)
+  [ "$current_start" = "$expected_start" ] || return 1
+}
+
+check_processes() {
+  read_record "$DSH_SUPERVISOR_PID_FILE" || {
+    echo '[restart-dsh] DSH supervisor is not running' >&2
+    return 1
+  }
+  supervisor_pid=$pid
+  read_record "$DSH_PID_FILE" || {
+    echo '[restart-dsh] DSH child process is not running' >&2
+    return 1
+  }
+  dsh_pid=$pid
+  dsh_start=$expected_start
+}
+
+action=${1:-}
+case "$action" in
+  check)
+    [ "$#" -eq 1 ] || usage
+    check_processes
+    ;;
+  request)
+    [ "$#" -le 2 ] || usage
+    delay=${2:-0}
+    case "$delay" in ''|*[!0-9.]*) usage ;; esac
+    [ "$delay" = 0 ] || sleep "$delay"
+    check_processes
+    temporary="${DSH_RESTART_REQUEST_FILE}.tmp.$$"
+    printf '%s\n%s\n' "$dsh_pid" "$dsh_start" > "$temporary"
+    chmod 600 "$temporary"
+    mv "$temporary" "$DSH_RESTART_REQUEST_FILE"
+    kill -TERM "$dsh_pid"
+    ;;
+  *) usage ;;
+esac

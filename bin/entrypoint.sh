@@ -87,18 +87,8 @@ render_container_skill() {
   rm -f "$temporary"
 }
 
-mkdir -p /workspace /data/dsh/profiles
+mkdir -p /workspace /data/dsh/profiles /data/home /data/agents /data/mcp
 rm -rf "$DSH_HOME/profiles/node_modules" "$DSH_HOME/node_modules" 2>/dev/null || true
-
-if [ -f /usr/local/bin/link-modules.mjs ]; then
-  node /usr/local/bin/link-modules.mjs
-fi
-if [ -f /usr/local/bin/install-docker-control.mjs ]; then
-  node /usr/local/bin/install-docker-control.mjs
-fi
-if [ -f /usr/local/bin/patch-profile-plugins.mjs ]; then
-  node /usr/local/bin/patch-profile-plugins.mjs
-fi
 
 if [ ! -f "$DSH_HOME/cordis.patch.yml" ]; then
   install -m 600 /usr/local/share/dsh-home/cordis.patch.yml "$DSH_HOME/cordis.patch.yml"
@@ -122,12 +112,5 @@ if [ ! -f "$HOME/.npmrc" ]; then
   printf "prefix=%s/.npm-global\n" "$HOME" > "$HOME/.npmrc"
 fi
 
-# The final DSH process keeps this PID, allowing the control helper to signal
-# only the intended service process.
-printf '%s\n' "$$" > /run/dsh.pid
-chmod 644 /run/dsh.pid
-
-nginx -c /usr/local/share/dsh/nginx.conf -g "daemon off;" &
-sleep 1
-echo "[dsh] starting DSH as root inside the container" >&2
-exec /usr/local/bin/dsh "$@"
+echo "[dsh] starting the in-container DSH supervisor as root" >&2
+exec /usr/local/bin/dsh-supervisor "$@"

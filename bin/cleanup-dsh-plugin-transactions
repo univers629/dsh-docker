@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+profile=${DSH_PROFILE_ROOT:-/data/dsh/profiles/web}
+profiles_root=$(dirname "$profile")
+lock_dir=${DSH_PLUGIN_LOCK_DIR:-/data/dsh/plugin-transaction.lock}
+[ -d "$profiles_root" ] || exit 0
+
+if [ -d "$lock_dir" ]; then
+  lock_pid=$(sed -n '1p' "$lock_dir/pid" 2>/dev/null || true)
+  expected_start=$(sed -n '2p' "$lock_dir/pid" 2>/dev/null || true)
+  case "$lock_pid:$expected_start" in
+    ''|*[!0-9:]*) ;;
+    *)
+      current_start=$(awk '{ print $22 }' "/proc/$lock_pid/stat" 2>/dev/null || true)
+      [ "$current_start" != "$expected_start" ] || exit 0
+      ;;
+  esac
+  rm -rf "$lock_dir"
+fi
+
+latest_backup=$(find "$profiles_root" -maxdepth 1 -type d -name '.web.previous.*' \
+  -printf '%T@ %p\n' 2>/dev/null | sort -nr | sed -n '1s/^[^ ]* //p')
+if [ ! -d "$profile" ] && [ -n "$latest_backup" ]; then
+  mv "$latest_backup" "$profile"
+  echo '[dsh-plugin] restored the last complete web profile transaction' >&2
+fi
+
+find "$profiles_root" -maxdepth 1 -type d -name '.plugin-transaction.*' -print \
+  | while IFS= read -r transaction; do
+      [ -f "$transaction/pnpm-store.path" ] && [ -f "$transaction/pnpm-tmp.before" ] || continue
+      pnpm_store=$(sed -n '1p' "$transaction/pnpm-store.path" 2>/dev/null || true)
+      case "$pnpm_store/tmp" in /data/home/*/tmp) ;; *) continue ;; esac
+      [ -d "$pnpm_store/tmp" ] || continue
+      pnpm_tmp_after="$transaction/pnpm-tmp.after"
+      find "$pnpm_store/tmp" -mindepth 1 -maxdepth 1 -type d -name '_tmp_*' \
+        -printf '%f\n' 2>/dev/null | sort -u > "$pnpm_tmp_after"
+      comm -13 "$transaction/pnpm-tmp.before" "$pnpm_tmp_after" | while IFS= read -r entry; do
+        case "$entry" in _tmp_[A-Za-z0-9_-]*) rm -rf -- "$pnpm_store/tmp/$entry" ;; esac
+      done
+    done
+
+find "$profiles_root" -maxdepth 1 -type d \
+  \( -name '.plugin-transaction.*' -o -name '.web.previous.*' \) \
+  -exec rm -rf -- {} +
