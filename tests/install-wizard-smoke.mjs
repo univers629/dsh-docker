@@ -102,4 +102,15 @@ assert.doesNotMatch(`${installSh}\n${installPs1}\n${readmeZh}\n${readmeEn}`, leg
 assert.match(envExample, /^DSH_ACCESS_MODE=local$/m)
 assert.doesNotMatch(dshSh, /network connect.*dpanel-local/)
 
+assert.match(installSh, /DSH_DELETE_DETACHED/)
+assert.match(installSh, /DSH_DELETE_CONFIRMED/)
+assert.match(installSh, /mktemp "\$\{TMPDIR:-\/tmp\}\/dsh-delete-XXXXXX"/)
+assert.match(installPs1, /DSH_DELETE_DETACHED/)
+assert.match(installPs1, /DSH_DELETE_CONFIRMED/)
+assert.match(installPs1, /\[Environment\]::CurrentDirectory/)
+assert.match(installPs1, /PSNativeCommandUseErrorActionPreference = \$false/)
+assert.match(installPs1, /UTF8Encoding\(\$false\)[\s\S]*htpasswd dsh:local -niB/)
+assert.match(dshSh, /^unset DSH_ACCESS_MODE DSH_BIND_HOST DSH_TRUSTED_HOSTS DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL$/m)
+assert.match(dshBat, /set "DSH_BIND_HOST="/)
+
 console.log('install wizard smoke: ok')

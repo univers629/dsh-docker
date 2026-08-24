@@ -14,6 +14,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 原生命令（docker/git）靠退出码判断结果；如果调用方或 profile 打开了
+# PSNativeCommandUseErrorActionPreference，非零退出会变成终止错误并中断向导。
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
 if ($NetworkExternal -and $NetworkInternal) { throw '--NetworkExternal 与 --NetworkInternal 不能同时使用。' }
 $interactive = -not $NonInteractive -and [Environment]::UserInteractive
 $GitHubSshUrl = 'ssh://git@ssh.github.com:443/univers629/dsh-docker.git'
@@ -183,6 +186,8 @@ function Remove-DshProject {
     if (Test-Path -LiteralPath $Dir -PathType Container) {
         $resolvedDir = (Resolve-Path -LiteralPath $Dir).Path
         $composeFile = Join-Path $resolvedDir 'docker-compose.yml'
+        # 当前版本的工程不再包含 docker-compose.system.yml；仅当目标目录是旧版安装
+        # （曾把 /usr、/etc、/var 拆成 data/system 下的绑定卷）时才叠加它，以便清掉遗留卷。
         $systemFile = Join-Path $resolvedDir 'docker-compose.system.yml'
         if ((Test-Path -LiteralPath $composeFile -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $resolvedDir 'Dockerfile') -PathType Leaf)) {
             Push-Location $resolvedDir
@@ -538,7 +543,13 @@ switch ($DshAction) {
         docker compose build dsh
         if ($LASTEXITCODE -ne 0) { throw 'DSH 镜像构建失败。' }
         if ($accessMode -eq 'basic' -and $writeBasicAuth) {
-            $hashLine = $basicPassword | docker run --rm -i --entrypoint htpasswd dsh:local -niB $basicUser
+            # Windows PowerShell 5.1 的 $OutputEncoding 默认是 ASCII，会把非 ASCII
+            # 密码字符替换成 '?' 并生成错误的哈希，所以显式使用无 BOM 的 UTF-8。
+            $previousOutputEncoding = $OutputEncoding
+            $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+            try {
+                $hashLine = $basicPassword | docker run --rm -i --entrypoint htpasswd dsh:local -niB $basicUser
+            } finally { $OutputEncoding = $previousOutputEncoding }
             if ($LASTEXITCODE -ne 0) { throw 'Basic Auth bcrypt 哈希生成失败。' }
             $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
             [IO.File]::WriteAllText((Join-Path (Get-Location) 'data\auth\htpasswd'), (($hashLine -join [Environment]::NewLine) + [Environment]::NewLine), $utf8NoBom)

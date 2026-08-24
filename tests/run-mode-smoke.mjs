@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 
 const files = Object.fromEntries(await Promise.all([
   ['compose', 'docker-compose.yml'],
-  ['systemCompose', 'docker-compose.system.yml'],
   ['dockerfile', 'Dockerfile'],
   ['entrypoint', 'bin/entrypoint.sh'],
   ['skill', 'dsh-home/skills/container-environment/SKILL.md'],
@@ -32,7 +32,7 @@ assert.match(runtimeDockerfile, /^\s+gcc \\$/m)
 assert.match(runtimeDockerfile, /^\s+g\+\+ \\$/m)
 assert.doesNotMatch(runtimeDockerfile, /\bgosu\b|useradd|groupadd|node:node|--chown=node/)
 
-assert.match(files.systemCompose, /dsh-system-usr-bin/)
+assert.equal(existsSync(new URL('../docker-compose.system.yml', import.meta.url)), false, 'legacy system compose overlay must not ship in the project')
 assert.match(files.compose, /DSH_SYSTEM_PACKAGES_PERSISTENT:\s*"true"/)
 assert.doesNotMatch(files.dshSh, /docker-compose\.system\.yml/)
 assert.match(files.installSh, /delete[\s\S]*docker-compose\.system\.yml/)

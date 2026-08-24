@@ -295,6 +295,9 @@ delete_project() {
     (
       cd "$TARGET_DIR"
       compose_files=(-f docker-compose.yml)
+      # 当前版本的工程不再包含 docker-compose.system.yml；仅当目标目录是
+      # 旧版安装（曾把 /usr、/etc、/var 拆成 data/system 下的绑定卷）时才叠加它，
+      # 以便一次性清掉那些遗留卷。
       [ -f docker-compose.system.yml ] && compose_files+=( -f docker-compose.system.yml )
       DOCKER compose -p "$project_name" "${compose_files[@]}" down --volumes --remove-orphans
     ) || true
