@@ -23,7 +23,7 @@ usage() {
   cat <<'EOF'
 用法：install.sh [操作] [选项]
 
-操作：install（默认）、configure、update（容器内更新 DSH）、start、stop、restart、logs、status
+操作：install（默认）、configure、update（容器内更新 DSH）、start、stop、restart、logs、status、delete（删除）
 选项：
   --access local|trusted-proxy|basic
   --bind-host ADDRESS             Docker 发布端口绑定地址
@@ -37,7 +37,7 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    install|configure|update|start|stop|restart|logs|status)
+    install|configure|update|start|stop|restart|logs|status|delete)
       ACTION="$1"
       ;;
     --action)
@@ -93,7 +93,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$ACTION" in
-  ''|install|configure|update|start|stop|restart|logs|status) ;;
+  ''|install|configure|update|start|stop|restart|logs|status|delete) ;;
   *) echo "[错误] 未知操作：$ACTION" >&2; exit 2 ;;
 esac
 case "$ACCESS_MODE_OVERRIDE" in
@@ -165,6 +165,7 @@ if [ -z "$ACTION" ]; then
     echo "5) 重启"
     echo "6) 查看日志"
     echo "7) 查看状态"
+    echo "8) 删除"
     prompt "这次要做什么" "1"
     case "$PROMPT_RESULT" in
       1) ACTION=install ;;
@@ -174,6 +175,7 @@ if [ -z "$ACTION" ]; then
       5) ACTION=restart ;;
       6) ACTION=logs ;;
       7) ACTION=status ;;
+      8) ACTION=delete ;;
       *) echo "[错误] 无效选项。" >&2; exit 2 ;;
     esac
   else
@@ -226,6 +228,103 @@ require_project() {
 container_exists() {
   DOCKER container inspect dsh >/dev/null 2>&1
 }
+
+confirm_delete() {
+  local answer
+  if [ "$INTERACTIVE" != true ]; then
+    echo "[错误] delete 是破坏性操作，需要交互确认；请不要使用 --non-interactive。" >&2
+    exit 2
+  fi
+  echo "[警告] 将删除 dsh 容器、dsh:* 镜像、本项目 Compose 挂载和网络、全局 Docker 构建缓存，以及 $TARGET_DIR。"
+  printf '请输入 DELETE 继续，其他输入取消: ' > /dev/tty
+  IFS= read -r answer < /dev/tty || exit 1
+  if [ "$answer" != DELETE ]; then
+    echo "已取消。"
+    exit 0
+  fi
+}
+
+delete_project() {
+  local project_name=dsh-docker image_refs ref ids id target_abs network_ids network_project container_ids
+  confirm_delete
+
+  if container_exists; then
+    project_name="$(DOCKER inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' dsh 2>/dev/null || true)"
+    case "$project_name" in ''|'<no value>') project_name=dsh-docker ;; esac
+  fi
+
+  if [ -f "$TARGET_DIR/docker-compose.yml" ]; then
+    (
+      cd "$TARGET_DIR"
+      compose_files=(-f docker-compose.yml)
+      [ -f docker-compose.system.yml ] && compose_files+=( -f docker-compose.system.yml )
+      DOCKER compose -p "$project_name" "${compose_files[@]}" down --volumes --remove-orphans
+    ) || true
+  fi
+
+  container_ids="$(DOCKER container ls -aq --filter "label=com.docker.compose.project=$project_name" 2>/dev/null || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] && DOCKER container rm -f "$id" >/dev/null 2>&1 || true
+  done <<< "$container_ids"
+  DOCKER container rm -f dsh >/dev/null 2>&1 || true
+  image_refs="$(DOCKER image ls --format '{{.Repository}}:{{.Tag}}' --filter 'reference=dsh:*' 2>/dev/null | sort -u || true)"
+  while IFS= read -r ref; do
+    [ -n "$ref" ] && DOCKER image rm -f "$ref" >/dev/null 2>&1 || true
+  done <<< "$image_refs"
+  ids="$(DOCKER image ls -q --filter "label=com.docker.compose.project=$project_name" 2>/dev/null | sort -u || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] && DOCKER image rm -f "$id" >/dev/null 2>&1 || true
+  done <<< "$ids"
+  ids="$(DOCKER image ls -q --filter 'label=org.opencontainers.image.title=dsh-docker' 2>/dev/null | sort -u || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] && DOCKER image rm -f "$id" >/dev/null 2>&1 || true
+  done <<< "$ids"
+  ids="$(DOCKER volume ls -q --filter "label=com.docker.compose.project=$project_name" 2>/dev/null || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] && DOCKER volume rm -f "$id" >/dev/null 2>&1 || true
+  done <<< "$ids"
+  network_ids="$(DOCKER network ls -q --filter "label=com.docker.compose.project=$project_name" 2>/dev/null || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] && DOCKER network rm "$id" >/dev/null 2>&1 || true
+  done <<< "$network_ids"
+  network_project="$(DOCKER network inspect --format '{{ index .Labels "com.docker.compose.project" }}' dsh-private 2>/dev/null || true)"
+  if [ "$network_project" = "$project_name" ]; then
+    DOCKER network rm dsh-private >/dev/null 2>&1 || true
+  fi
+  DOCKER builder prune -af
+
+  if [ -d "$TARGET_DIR" ]; then
+    target_abs="$(cd "$TARGET_DIR" && pwd -P)"
+    case "$target_abs" in
+      /|"$HOME")
+        echo "[错误] 拒绝删除不安全的工程目录：$target_abs" >&2
+        exit 1
+        ;;
+    esac
+    if [ -f "$target_abs/docker-compose.yml" ] && [ -f "$target_abs/Dockerfile" ] && [ -f "$target_abs/install.sh" ]; then
+      cd "$(dirname "$target_abs")"
+      if ! rm -rf -- "$target_abs" 2>/dev/null; then
+        if command -v sudo >/dev/null 2>&1; then
+          sudo rm -rf -- "$target_abs"
+        else
+          echo "[错误] 无法删除包含容器 root 文件的工程目录：$target_abs" >&2
+          exit 1
+        fi
+      fi
+    else
+      echo "==> $target_abs 不是可识别的 dsh-docker 工程，已保留。"
+    fi
+  fi
+  echo "==> DSH 删除完成。"
+}
+
+if [ "$ACTION" = delete ]; then
+  if [ ! -f "$TARGET_DIR/docker-compose.yml" ] && [ -f docker-compose.yml ] && [ -f Dockerfile ] && [ -f install.sh ]; then
+    TARGET_DIR="."
+  fi
+  delete_project
+  exit 0
+fi
 
 case "$ACTION" in
   install|configure) fetch_project ;;

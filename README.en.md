@@ -47,6 +47,20 @@ Windows: .\dsh.bat [start|update|stop|restart|logs|status|shell|remove]
 
 `start` builds the Debian 13 image only when the container does not exist; later starts reuse the same container. `stop`, `restart`, and `apt install` performed by an in-container agent keep the container writable layer. `remove`/`down` deletes that layer, while `/data` and `/workspace` bind mounts remain. The `update` action is an in-container DSH source update, not a project or image rebuild.
 
+To completely clear this project before a fresh install on a server, run the installer from the project directory and choose `delete` (menu item 8), or run:
+
+```bash
+./install.sh delete
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete
+```
+
+Deletion precisely removes the `dsh` container, `dsh:*` images, project mounts and networks, the global Docker build cache, and the project directory after a `DELETE` confirmation. It does not use a substring `name=dsh` filter and does not remove external shared networks such as `dpanel-local`.
+
 ## Public access and authentication
 
 DSH does not provide native login authentication. The installer binds port 3080 to `127.0.0.1` by default. Public access must use HTTPS and an authenticated entry point; do not use `0.0.0.0`, `::`, or another wildcard bind.

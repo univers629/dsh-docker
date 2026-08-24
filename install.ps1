@@ -1,6 +1,6 @@
 param(
     [Alias('Action')]
-    [ValidateSet('','install','configure','update','start','stop','restart','logs','status')]
+    [ValidateSet('','install','configure','update','start','stop','restart','logs','status','delete')]
     [string]$DshAction,
     [ValidateSet('','local','trusted-proxy','basic')]
     [string]$Access = '',
@@ -126,6 +126,76 @@ function Get-DockerEngineOs {
 function Test-DshContainer {
     & docker container inspect dsh *> $null
     return ($LASTEXITCODE -eq 0)
+}
+
+function Confirm-DshDelete {
+    if ($NonInteractive) { throw '删除是破坏性操作，需要交互确认；请不要使用 -NonInteractive。' }
+    Write-Host "[警告] 将删除 dsh 容器、dsh:* 镜像、本项目挂载和网络、全局 Docker 构建缓存，以及 $Dir。" -ForegroundColor Yellow
+    $answer = Read-Host '请输入 DELETE 继续，其他输入取消'
+    if ($answer -ne 'DELETE') { Write-Host '已取消。'; exit 0 }
+}
+
+function Remove-DshProject {
+    Confirm-DshDelete
+    $projectName = 'dsh-docker'
+    if (Test-DshContainer) {
+        $detectedProject = (& docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' dsh 2>$null | Select-Object -Last 1)
+        if ($detectedProject -and $detectedProject -ne '<no value>') { $projectName = $detectedProject.Trim() }
+    }
+
+    $resolvedDir = $null
+    if (Test-Path -LiteralPath $Dir -PathType Container) {
+        $resolvedDir = (Resolve-Path -LiteralPath $Dir).Path
+        $composeFile = Join-Path $resolvedDir 'docker-compose.yml'
+        $systemFile = Join-Path $resolvedDir 'docker-compose.system.yml'
+        if ((Test-Path -LiteralPath $composeFile -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $resolvedDir 'Dockerfile') -PathType Leaf)) {
+            Push-Location $resolvedDir
+            try {
+                $composeArgs = @('-p',$projectName,'-f','docker-compose.yml')
+                if (Test-Path -LiteralPath $systemFile -PathType Leaf) { $composeArgs += @('-f','docker-compose.system.yml') }
+                & docker compose @composeArgs down --volumes --remove-orphans | Out-Host
+            } finally { Pop-Location }
+        }
+    }
+
+    $containerIds = @(& docker container ls -aq --filter "label=com.docker.compose.project=$projectName" 2>$null)
+    $namedContainer = (& docker container inspect --format '{{.Id}}' dsh 2>$null | Select-Object -Last 1)
+    if ($namedContainer) { $containerIds += $namedContainer.Trim() }
+    foreach ($id in @($containerIds | Where-Object { $_ } | Sort-Object -Unique)) { & docker container rm -f $id *> $null }
+
+    $imageRefs = @(& docker image ls --format '{{.Repository}}:{{.Tag}}' --filter 'reference=dsh:*' 2>$null | Sort-Object -Unique)
+    foreach ($ref in $imageRefs) { if ($ref) { & docker image rm -f $ref *> $null } }
+    $imageIds = @(& docker image ls -q --filter "label=com.docker.compose.project=$projectName" 2>$null | Sort-Object -Unique)
+    foreach ($id in $imageIds) { if ($id) { & docker image rm -f $id *> $null } }
+    $imageIds = @(& docker image ls -q --filter 'label=org.opencontainers.image.title=dsh-docker' 2>$null | Sort-Object -Unique)
+    foreach ($id in $imageIds) { if ($id) { & docker image rm -f $id *> $null } }
+
+    $volumeIds = @(& docker volume ls -q --filter "label=com.docker.compose.project=$projectName" 2>$null)
+    foreach ($id in $volumeIds) { if ($id) { & docker volume rm -f $id *> $null } }
+    $networkIds = @(& docker network ls -q --filter "label=com.docker.compose.project=$projectName" 2>$null)
+    foreach ($id in $networkIds) { if ($id) { & docker network rm $id *> $null } }
+    $defaultNetworkProject = (& docker network inspect --format '{{ index .Labels "com.docker.compose.project" }}' dsh-private 2>$null | Select-Object -Last 1)
+    if ($defaultNetworkProject -and $defaultNetworkProject.Trim() -eq $projectName) { & docker network rm dsh-private *> $null }
+    & docker builder prune -af | Out-Host
+
+    if ($resolvedDir) {
+        $normalizedDir = $resolvedDir.TrimEnd('\')
+        $root = [IO.Path]::GetPathRoot($resolvedDir).TrimEnd('\')
+        $profile = [Environment]::GetFolderPath('UserProfile').TrimEnd('\')
+        if ($normalizedDir -eq $root -or $normalizedDir -eq $profile) { throw "拒绝删除不安全的工程目录：$resolvedDir" }
+        if ((Test-Path -LiteralPath (Join-Path $resolvedDir 'install.ps1') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $resolvedDir 'docker-compose.yml') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $resolvedDir 'Dockerfile') -PathType Leaf)) {
+            $currentPath = (Get-Location).Path.TrimEnd('\')
+            if ($currentPath -eq $normalizedDir -or $currentPath.StartsWith($normalizedDir + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                Set-Location (Split-Path -Parent $resolvedDir)
+            }
+            Remove-Item -LiteralPath $resolvedDir -Recurse -Force
+        } else {
+            Write-Host "==> $resolvedDir 不是可识别的 dsh-docker 工程，已保留。"
+        }
+    }
+    Write-Host '==> DSH 删除完成。' -ForegroundColor Green
 }
 
 function Get-DockerDesktopExecutable {
@@ -341,13 +411,24 @@ function Fetch-Project {
 Ensure-DockerEngine
 if (-not $DshAction -and $interactive) {
     $installLabel = if (Test-Path $Dir) { '重新配置并重建容器（保留挂载数据）' } else { '全新安装' }
-    Write-Host "1) $installLabel`n2) 在容器内更新 DSH`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态"
+    Write-Host "1) $installLabel`n2) 在容器内更新 DSH`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态`n8) 删除"
     switch (Ask '这次要做什么' '1') {
         '1' { $DshAction = 'install' }; '2' { $DshAction = 'update' }; '3' { $DshAction = 'start' }; '4' { $DshAction = 'stop' }
-        '5' { $DshAction = 'restart' }; '6' { $DshAction = 'logs' }; '7' { $DshAction = 'status' }
+        '5' { $DshAction = 'restart' }; '6' { $DshAction = 'logs' }; '7' { $DshAction = 'status' }; '8' { $DshAction = 'delete' }
         default { throw '无效操作。' }
     }
 } elseif (-not $DshAction) { $DshAction = 'install' }
+
+if ($DshAction -eq 'delete') {
+    if (-not (Test-Path -LiteralPath (Join-Path $Dir 'docker-compose.yml') -PathType Leaf) -and
+        (Test-Path -LiteralPath 'docker-compose.yml' -PathType Leaf) -and
+        (Test-Path -LiteralPath 'Dockerfile' -PathType Leaf) -and
+        (Test-Path -LiteralPath 'install.ps1' -PathType Leaf)) {
+        $Dir = (Get-Location).Path
+    }
+    Remove-DshProject
+    exit 0
+}
 
 if ($DshAction -in @('install','configure','update')) { Fetch-Project }
 if (-not (Test-Path (Join-Path $Dir 'docker-compose.yml'))) { throw "未找到 $Dir 的 docker-compose.yml，工程获取失败。" }
