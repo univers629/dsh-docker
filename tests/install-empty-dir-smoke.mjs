@@ -50,8 +50,7 @@ if [ "\${1:-}" = compose ]; then
       if [ "\${MOCK_FAIL_BUILD:-}" = 1 ]; then exit 42; fi
       ;;
     *" up -d --force-recreate "*)
-      printf '%s\\n' "compose-env DSH_RUN_AS_ROOT=\${DSH_RUN_AS_ROOT-unset}" >> "$MOCK_DOCKER_LOG"
-      awk -F= '$1 == "DSH_RUN_AS_ROOT" { print $0; exit }' "$env_file" > "$MOCK_DOCKER_STATE"
+      : > "$MOCK_DOCKER_STATE"
       ;;
   esac
 fi
@@ -64,7 +63,7 @@ if [ "\${1:-}" = inspect ]; then
   cat "$MOCK_DOCKER_STATE"
 fi
 if [ "\${1:-}" = exec ]; then
-  if grep -q '=true$' "$MOCK_DOCKER_STATE"; then printf '%s\\n' 0; else printf '%s\\n' 1000; fi
+  printf '%s\\n' 0
 fi
 exit 0
 `
@@ -94,10 +93,10 @@ const runInstall = (target, args, extraEnv = {}) => spawnSync(bash, [
 })
 
 try {
-  const local = runInstall('local-install', ['--user', '--access', 'local'])
+  const local = runInstall('local-install', ['--access', 'local'])
   assert.equal(local.status, 0, `${local.stdout}\n${local.stderr}`)
   const localEnv = await readFile(join(sandbox, 'local-install', '.env'), 'utf8')
-  assert.match(localEnv, /^DSH_RUN_AS_ROOT=false$/m)
+  assert.doesNotMatch(localEnv, /DSH_RUN_AS_ROOT/)
   assert.match(localEnv, /^DSH_ACCESS_MODE=local$/m)
   assert.match(localEnv, /^DSH_BIND_HOST=127\.0\.0\.1$/m)
 
@@ -112,23 +111,26 @@ try {
   const basicEnv = await readFile(join(sandbox, 'basic-install', '.env'), 'utf8')
   const htpasswd = await readFile(join(sandbox, 'basic-install', 'data', 'auth', 'htpasswd'), 'utf8')
   assert.match(basicEnv, /^DSH_ACCESS_MODE=basic$/m)
-  assert.match(basicEnv, /^DSH_RUN_AS_ROOT=true$/m)
+  assert.doesNotMatch(basicEnv, /DSH_RUN_AS_ROOT/)
   assert.match(basicEnv, /^DSH_TRUSTED_HOSTS=dsh\.example\.com$/m)
   assert.doesNotMatch(basicEnv, /installer-smoke-password/)
   assert.match(htpasswd, /^dsh:\$2y\$/)
 
-  const rollback = runInstall('rollback-install', ['--user', '--access', 'local'])
+  const rollback = runInstall('rollback-install', ['--access', 'local'])
   assert.equal(rollback.status, 0, `${rollback.stdout}\n${rollback.stderr}`)
-  const failedRoot = runInstall('rollback-install', ['--root', '--access', 'local'], { MOCK_FAIL_BUILD: '1' })
-  assert.notEqual(failedRoot.status, 0, 'Mock build failure unexpectedly succeeded.')
+  await writeFile(join(sandbox, 'rollback-install', '.env'), 'DSH_RUN_AS_ROOT=false\nDSH_ACCESS_MODE=local\n')
+  const migrated = runInstall('rollback-install', ['--access', 'local'])
+  assert.equal(migrated.status, 0, `${migrated.stdout}\n${migrated.stderr}`)
+  const failedInstall = runInstall('rollback-install', ['--access', 'basic'], { MOCK_FAIL_BUILD: '1' })
+  assert.notEqual(failedInstall.status, 0, 'Mock build failure unexpectedly succeeded.')
   const rollbackEnv = await readFile(join(sandbox, 'rollback-install', '.env'), 'utf8')
-  assert.match(rollbackEnv, /^DSH_RUN_AS_ROOT=false$/m)
+  assert.match(rollbackEnv, /^DSH_ACCESS_MODE=local$/m)
+  assert.doesNotMatch(rollbackEnv, /DSH_RUN_AS_ROOT/)
 
   const calls = await readFile(dockerLog, 'utf8')
   assert.match(calls, /compose .* build dsh/)
   assert.match(calls, /compose .* up -d --force-recreate/)
   assert.match(calls, /run --rm -i --entrypoint htpasswd dsh:local -niB dsh/)
-  assert.match(calls, /compose-env DSH_RUN_AS_ROOT=unset/)
 } finally {
   await rm(sandbox, { recursive: true, force: true })
 }

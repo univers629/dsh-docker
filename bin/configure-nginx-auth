@@ -13,9 +13,6 @@ case "${DSH_ACCESS_MODE:-local}" in
     fi
     cp "$auth_file" "$runtime_auth_file"
     chmod 600 "$runtime_auth_file"
-    if [ "$(id -u)" = 0 ]; then
-      chown node:node "$runtime_auth_file" 2>/dev/null || true
-    fi
     {
       printf '%s\n' 'auth_basic "DeepSeek Harness";'
       printf 'auth_basic_user_file %s;\n' "$runtime_auth_file"

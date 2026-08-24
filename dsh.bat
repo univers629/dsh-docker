@@ -23,19 +23,42 @@ if /i "%ACTION%"=="start" goto :start
 if /i "%ACTION%"=="up" goto :start
 if /i "%ACTION%"=="update" goto :update
 if /i "%ACTION%"=="stop" goto :stop
-if /i "%ACTION%"=="down" goto :stop
 if /i "%ACTION%"=="restart" goto :restart
 if /i "%ACTION%"=="logs" goto :logs
 if /i "%ACTION%"=="status" goto :status
+if /i "%ACTION%"=="ps" goto :status
+if /i "%ACTION%"=="shell" goto :shell
+if /i "%ACTION%"=="remove" goto :remove
+if /i "%ACTION%"=="down" goto :remove
 
-echo 用法: %~nx0 [start^|update^|stop^|restart^|logs^|status]
-exit /b 0
+echo 用法: %~nx0 [start^|update^|stop^|restart^|logs^|status^|shell^|remove]
+exit /b 1
+
+:ensure_container
+docker container inspect dsh >nul 2>nul
+if not errorlevel 1 exit /b 0
+docker image inspect dsh:local >nul 2>nul
+if errorlevel 1 (
+  echo ==^> 首次创建容器，正在构建 Debian 13 镜像...
+  docker compose build dsh
+  if errorlevel 1 exit /b 1
+)
+docker compose up -d --no-build dsh
+exit /b %errorlevel%
+
+:start_container
+call :ensure_container
+if errorlevel 1 exit /b 1
+set "CONTAINER_STATUS="
+for /f "delims=" %%i in ('docker inspect --format "{{.State.Status}}" dsh 2^>nul') do set "CONTAINER_STATUS=%%i"
+if /i "%CONTAINER_STATUS%"=="running" exit /b 0
+docker start dsh >nul
+exit /b %errorlevel%
 
 :start_and_open
 echo [1/3] 正在启动 DeepSeek Harness 容器...
-docker compose up -d --build --force-recreate
+call :start_container
 if errorlevel 1 goto :error
-docker image prune -f >nul 2>&1
 echo [2/3] 服务正在就绪...
 timeout /t 3 /nobreak >nul
 echo [3/3] 正在打开浏览器访问 http://127.0.0.1:3080 ...
@@ -45,26 +68,37 @@ echo ===================================================
 echo   Web UI:   http://127.0.0.1:3080
 echo   查看日志: %~nx0 logs
 echo   停止服务: %~nx0 stop
-echo   更新源码: %~nx0 update
+echo   更新 DSH: %~nx0 update
 echo ===================================================
 pause
 exit /b 0
 
 :start
-docker compose up -d --build --force-recreate
-docker image prune -f >nul 2>&1
+call :start_container
 exit /b %errorlevel%
 
 :update
-echo ==> 从官方源码重新拉取并构建最新镜像...
-docker compose build dsh
-if errorlevel 1 goto :error
-docker compose up -d --force-recreate
-docker image prune -f >nul 2>&1
-echo ==> 更新构建完成！
-exit /b 0
+docker container inspect dsh >nul 2>nul
+if errorlevel 1 (
+  echo [错误] 容器尚未创建，请先运行 %~nx0 start。
+  exit /b 1
+)
+set "CONTAINER_STATUS="
+for /f "delims=" %%i in ('docker inspect --format "{{.State.Status}}" dsh 2^>nul') do set "CONTAINER_STATUS=%%i"
+if /i not "%CONTAINER_STATUS%"=="running" (
+  echo [错误] 容器当前未运行，请先运行 %~nx0 start。
+  exit /b 1
+)
+echo ==^> 在现有 Debian 13 容器内更新 DSH...
+docker exec dsh /usr/local/bin/update-dsh
+exit /b %errorlevel%
 
 :stop
+docker compose stop dsh
+exit /b %errorlevel%
+
+:remove
+echo ==^> 即将删除容器可写层；/data 和 /workspace 挂载数据不会删除。
 docker compose down
 exit /b %errorlevel%
 
@@ -75,6 +109,10 @@ exit /b %errorlevel%
 :logs
 docker compose logs -f dsh
 exit /b 0
+
+:shell
+docker exec -it dsh bash
+exit /b %errorlevel%
 
 :status
 docker compose ps

@@ -2,8 +2,6 @@ param(
     [Alias('Action')]
     [ValidateSet('','install','configure','update','start','stop','restart','logs','status')]
     [string]$DshAction,
-    [switch]$Root,
-    [switch]$User,
     [ValidateSet('','local','trusted-proxy','basic')]
     [string]$Access = '',
     [string]$BindHost = '',
@@ -16,7 +14,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if ($Root -and $User) { throw '--Root 与 --User 不能同时使用。' }
 if ($NetworkExternal -and $NetworkInternal) { throw '--NetworkExternal 与 --NetworkInternal 不能同时使用。' }
 $interactive = -not $NonInteractive -and [Environment]::UserInteractive
 $GitHubSshUrl = 'ssh://git@ssh.github.com:443/univers629/dsh-docker.git'
@@ -35,6 +32,16 @@ function Set-ComposeEnvValue {
     if (-not $found) { $updated += "$Key=$Value" }
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($Path, (($updated -join [Environment]::NewLine) + [Environment]::NewLine), $utf8NoBom)
+}
+
+function Remove-ComposeEnvValue {
+    param([string]$Path, [string]$Key)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $pattern = '^\s*' + [regex]::Escape($Key) + '\s*='
+    $lines = @([IO.File]::ReadAllLines($Path) | Where-Object { $_ -notmatch $pattern })
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $content = if ($lines.Count) { ($lines -join [Environment]::NewLine) + [Environment]::NewLine } else { '' }
+    [IO.File]::WriteAllText($Path, $content, $utf8NoBom)
 }
 
 function Get-ComposeEnvValue {
@@ -67,24 +74,14 @@ function Invoke-ComposeWithEnvFile {
     return $exitCode
 }
 
-function Assert-DshRunMode {
-    param([ValidateSet('true','false')][string]$Expected)
-    $environment = @(& docker inspect dsh --format '{{range .Config.Env}}{{println .}}{{end}}' 2>$null)
-    if ($LASTEXITCODE -ne 0) { throw '无法核验 DSH 容器运行模式。' }
-    $line = $environment | Where-Object { $_ -like 'DSH_RUN_AS_ROOT=*' } | Select-Object -Last 1
-    $actual = if ($line) { ($line -split '=', 2)[1].Trim().ToLowerInvariant() } else { '' }
-    if ($actual -ne $Expected) {
-        throw "DSH 运行模式未应用：期望 DSH_RUN_AS_ROOT=$Expected，容器实际为 $actual。"
-    }
-
-    $expectedUid = if ($Expected -eq 'true') { '0' } else { '1000' }
+function Assert-DshRoot {
     for ($attempt = 0; $attempt -lt 120; $attempt++) {
         $uid = (& docker exec dsh sh -c 'pid="$(cat /run/dsh.pid 2>/dev/null)" || exit 1; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>$null | Select-Object -Last 1)
         if ($LASTEXITCODE -eq 0 -and $uid -match '^\d+$') {
-            if ($uid.Trim() -ne $expectedUid) {
-                throw "DSH 进程 UID 核验失败：期望 $expectedUid，实际为 $($uid.Trim())。"
+            if ($uid.Trim() -ne '0') {
+                throw "DSH 进程 UID 核验失败：期望 0，实际为 $($uid.Trim())。"
             }
-            Write-Host "==> 已核验 DSH 进程 UID：$expectedUid" -ForegroundColor Green
+            Write-Host '==> 已核验 DSH 进程 UID：0' -ForegroundColor Green
             return
         }
         Start-Sleep -Seconds 1
@@ -338,8 +335,8 @@ function Fetch-Project {
 
 Ensure-DockerEngine
 if (-not $DshAction -and $interactive) {
-    $installLabel = if (Test-Path $Dir) { '重新配置并启动（保留数据）' } else { '全新安装' }
-    Write-Host "1) $installLabel`n2) 更新源码并重建`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态"
+    $installLabel = if (Test-Path $Dir) { '重新配置并重建容器（保留挂载数据）' } else { '全新安装' }
+    Write-Host "1) $installLabel`n2) 在容器内更新 DSH`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态"
     switch (Ask '这次要做什么' '1') {
         '1' { $DshAction = 'install' }; '2' { $DshAction = 'update' }; '3' { $DshAction = 'start' }; '4' { $DshAction = 'stop' }
         '5' { $DshAction = 'restart' }; '6' { $DshAction = 'logs' }; '7' { $DshAction = 'status' }
@@ -352,7 +349,6 @@ if (-not (Test-Path (Join-Path $Dir 'docker-compose.yml'))) { throw "未找到 $
 Set-Location $Dir
 $env:DOCKER_BUILDKIT = '1'; $env:COMPOSE_DOCKER_CLI_BUILD = '1'
 $envFile = Join-Path (Get-Location) '.env'
-$runAsRoot = if ($Root) { 'true' } elseif ($User) { 'false' } else { Get-ComposeEnvValue $envFile 'DSH_RUN_AS_ROOT' 'true' }
 $accessMode = if ($Access) { $Access } else { Get-ComposeEnvValue $envFile 'DSH_ACCESS_MODE' 'local' }
 $bind = if ($BindHost) { $BindHost } else { Get-ComposeEnvValue $envFile 'DSH_BIND_HOST' '127.0.0.1' }
 $trusted = if ($TrustedHosts) { $TrustedHosts } else { Get-ComposeEnvValue $envFile 'DSH_TRUSTED_HOSTS' '' }
@@ -363,7 +359,6 @@ $basicPassword = $env:DSH_BASIC_AUTH_PASSWORD
 $writeBasicAuth = $false
 
 if ($DshAction -in @('install','configure')) {
-    Write-Host "==> Windows DSH 进程：$(if ($runAsRoot -eq 'true') { '容器内 root（默认）' } else { '容器内 node（-User）' })" -ForegroundColor Yellow
     if ($interactive -and -not $Access) {
         $accessDefault = switch ($accessMode) { 'trusted-proxy' {'2'}; 'basic' {'3'}; default {'1'} }
         $accessMode = switch (Ask "访问保护：1=本机/SSH  2=已有 Access/面板  3=内置 Basic Auth" $accessDefault) { '2' {'trusted-proxy'}; '3' {'basic'}; default {'local'} }
@@ -418,18 +413,18 @@ switch ($DshAction) {
         try {
             if (Test-Path -LiteralPath $envFile) { Copy-Item -LiteralPath $envFile -Destination $pendingEnvFile }
             else { [IO.File]::WriteAllText($pendingEnvFile, '', (New-Object System.Text.UTF8Encoding($false))) }
-            Set-ComposeEnvValue $pendingEnvFile 'DSH_RUN_AS_ROOT' $runAsRoot
+            Remove-ComposeEnvValue $pendingEnvFile 'DSH_RUN_AS_ROOT'
             Set-ComposeEnvValue $pendingEnvFile 'DSH_ACCESS_MODE' $accessMode
             Set-ComposeEnvValue $pendingEnvFile 'DSH_BIND_HOST' $bind
             Set-ComposeEnvValue $pendingEnvFile 'DSH_TRUSTED_HOSTS' $trusted
             Set-ComposeEnvValue $pendingEnvFile 'DSH_DOCKER_NETWORK' $networkName
             Set-ComposeEnvValue $pendingEnvFile 'DSH_DOCKER_NETWORK_EXTERNAL' $networkExternalValue
-            $composeKeys = @('DSH_RUN_AS_ROOT','DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL')
+            $composeKeys = @('DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL')
             $composeExitCode = Invoke-ComposeWithEnvFile -Path $pendingEnvFile -Arguments @('up','-d','--force-recreate') -EnvironmentKeys $composeKeys
             if ($composeExitCode -ne 0) { throw 'DSH 容器启动失败，原配置未被覆盖。' }
             Move-Item -LiteralPath $pendingEnvFile -Destination $envFile -Force
             $pendingEnvFile = $null
-            Assert-DshRunMode -Expected $runAsRoot
+            Assert-DshRoot
         } finally {
             if ($pendingEnvFile -and (Test-Path -LiteralPath $pendingEnvFile)) {
                 Remove-Item -LiteralPath $pendingEnvFile -Force -ErrorAction SilentlyContinue
@@ -444,4 +439,4 @@ switch ($DshAction) {
     'status' { docker compose ps }
 }
 if ($DshAction -in @('install','configure')) { Start-Sleep -Seconds 3; Start-Process 'http://127.0.0.1:3080' }
-Write-Host "完成：$DshAction`n工程目录：$(Get-Location)`n管理：.\dsh.bat [start|update|stop|restart|logs|status]" -ForegroundColor Green
+Write-Host "完成：$DshAction`n工程目录：$(Get-Location)`n管理：.\dsh.bat [start|update|stop|restart|logs|status|shell|remove]" -ForegroundColor Green

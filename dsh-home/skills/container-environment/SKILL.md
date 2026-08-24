@@ -1,186 +1,139 @@
 ---
 name: container-environment
-description: "Use whenever the user asks to install, update, remove, or manage DSH plugins (e.g. dsh-better-sidebar, dsh-vision-router, MCP tools, profile bundles); or when configuring/running MCP servers (Model Context Protocol); or when installing toolchains/subagent CLIs (python, uv, uvx, node, npm, rust, claude-cli, aider); or when querying container system version, architecture, environment variables, directory standards, persistence, permissions, and restarting."
+description: "Use when managing DSH plugins, MCP servers, development toolchains, system packages, container paths, persistence, permissions, architecture, or DSH restarts and updates."
 ---
 
-# Container Environment Specification & Autonomous SOP
+# DSH Container Environment
 
-You run inside a production Docker container for DeepSeek Harness (DSH). The values below are rendered at container startup from runtime variables; do not assume that a different host, image, or architecture has the same values.
+You run as root inside a long-lived Debian 13 Docker container. Treat the
+container as an Agent development environment, but keep user data in the bind
+mounts described below.
 
----
+## Runtime facts
 
-## 1. System Version & Hardware Architecture
+| Property | Value |
+| --- | --- |
+| OS | @@DSH_SYSTEM_OS@@ @@DSH_SYSTEM_RELEASE@@ |
+| Kernel architecture | @@DSH_SYSTEM_ARCH@@ |
+| Debian package architecture | @@DSH_SYSTEM_PACKAGE_ARCH@@ |
+| GNU ABI | @@DSH_SYSTEM_ABI@@ |
+| C library | @@DSH_SYSTEM_LIBC@@ |
+| Container identity | @@DSH_CONTAINER_USER@@ (@@DSH_CONTAINER_UID@@:@@DSH_CONTAINER_GID@@) |
+| Node.js | v24 LTS with npm and pnpm 11 |
+| Python | Python 3.13 with pip, venv, uv, and uvx |
+| Native build tools | make, GCC, and G++ |
+| Reverse proxy | Nginx on container port 3080, forwarding to DSH on loopback port 3081 |
 
-| Property | Specification | Notes |
-|---|---|---|
-| **OS Base** | **@@DSH_SYSTEM_OS@@ @@DSH_SYSTEM_RELEASE@@** | Container userspace; it shares the host Linux kernel |
-| **Kernel architecture** | **`@@DSH_SYSTEM_ARCH@@`** | `uname -m` value used for native binaries |
-| **Debian package architecture** | **`@@DSH_SYSTEM_PACKAGE_ARCH@@`** | `dpkg --print-architecture` value (`amd64`, `arm64`, etc.) |
-| **GNU ABI** | **`@@DSH_SYSTEM_ABI@@`** | Use this GNU triplet when selecting compiled wheels or binaries |
-| **C library ABI** | **`@@DSH_SYSTEM_LIBC@@`** | The runtime libc family, normally `glibc` on Debian |
-| **Node.js** | **v24 (LTS)** | `/usr/local/bin/node`, npm & pnpm 11 built-in |
-| **Python** | **Python 3.13** | `/usr/bin/python3`, `/usr/local/bin/python`, pip3, venv |
-| **Tool Runner** | **uv & uvx** | `/usr/local/bin/uv`, `/usr/local/bin/uvx` (Ultrafast Python package & MCP runner) |
-| **Process Manager**| **procps** | `pkill`, `pgrep`, `ps`, `kill` built-in |
-| **Reverse Proxy** | **Nginx 1.26+** | Built-in loopback rewrite proxy listening on private `127.0.0.1:3080` (or an explicitly configured private Docker gateway) and forwarding to `127.0.0.1:3081` |
+Important environment variables:
 
----
+    HOME=/data/home
+    DSH_HOME=/data/dsh
+    DSH_AGENTS_HOME=/data/agents
+    DSH_WEB_PORT=3081
+    DSH_PERMISSION_MODE=@@DSH_PERMISSION_MODE@@
+    DSH_HOST_ACCESS=@@DSH_HOST_ACCESS@@
+    DSH_WRITABLE_PATHS=@@DSH_WRITABLE_PATHS@@
+    DSH_SYSTEM_PACKAGES_PERSISTENT=@@DSH_SYSTEM_PACKAGES_PERSISTENT@@
+    DSH_CAN_INSTALL_SYSTEM_PACKAGES=@@DSH_CAN_INSTALL_SYSTEM_PACKAGES@@
+    DSH_DOCKER_SOCKET_AVAILABLE=@@DSH_DOCKER_SOCKET_AVAILABLE@@
+    NODE_PATH=/app/dsh/node_modules:/data/dsh/profiles/node_modules
+    PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-## 2. Core Environment Variables
+## Storage and persistence
 
-The following environment variables are pre-configured in your runtime:
+Use these bind-mounted paths for anything that must survive intentional
+container replacement:
 
-```text
-HOME=/data/home
-DSH_HOME=/data/dsh
-DSH_AGENTS_HOME=/data/agents
-DSH_PERMISSION_MODE=@@DSH_PERMISSION_MODE@@
-DSH_RUN_AS_ROOT=@@DSH_RUN_AS_ROOT@@
-DSH_CONTAINER_USER=@@DSH_CONTAINER_USER@@
-DSH_CONTAINER_UID=@@DSH_CONTAINER_UID@@
-DSH_CONTAINER_GID=@@DSH_CONTAINER_GID@@
-DSH_HOST_ACCESS=@@DSH_HOST_ACCESS@@
-DSH_WRITABLE_PATHS=@@DSH_WRITABLE_PATHS@@
-DSH_SYSTEM_PACKAGES_PERSISTENT=@@DSH_SYSTEM_PACKAGES_PERSISTENT@@
-DSH_CAN_INSTALL_SYSTEM_PACKAGES=@@DSH_CAN_INSTALL_SYSTEM_PACKAGES@@
-DSH_DOCKER_SOCKET_AVAILABLE=@@DSH_DOCKER_SOCKET_AVAILABLE@@
-DSH_SYSTEM_OS=@@DSH_SYSTEM_OS@@
-DSH_SYSTEM_RELEASE=@@DSH_SYSTEM_RELEASE@@
-DSH_SYSTEM_ARCH=@@DSH_SYSTEM_ARCH@@
-DSH_SYSTEM_PACKAGE_ARCH=@@DSH_SYSTEM_PACKAGE_ARCH@@
-DSH_SYSTEM_ABI=@@DSH_SYSTEM_ABI@@
-DSH_SYSTEM_LIBC=@@DSH_SYSTEM_LIBC@@
-DSH_WEB_PORT=3081
-NODE_PATH=/app/dsh/node_modules:/data/dsh/profiles/node_modules
-PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-```
+    /workspace       Project source and working trees
+    /data/dsh        DSH sessions, settings, credentials, profiles, and skills
+    /data/home       HOME, SSH files, user-level tools, and caches
+    /data/mcp        MCP source, virtual environments, databases, and state
+    /data/agents     Shared Agent state
 
----
+The Debian system directories, including /usr, /etc, and /var, live in the
+container writable layer. Apt packages and system configuration survive
+docker stop, docker start, and restart of the same container. They do not
+survive docker rm, docker compose down, or another operation that recreates
+the container. /tmp is ordinary temporary container storage, not a persistent
+mount.
 
-## 3. Strict Directory Placement Standards (目录存放规范)
+/app/dsh contains the managed DSH application. Do not store projects or
+credentials there because the built-in updater replaces it.
 
-To guarantee that your work, toolchains, and user data survive container restarts and DSH updates, **strictly follow this directory taxonomy**. The `/data` and `/workspace` mounts also survive an intentional container recreation.
+## Installing tools
 
-```text
-/ (Container Root)
-├── workspace/                     # 💻 [PERSISTENT] User project code & working directory
-├── data/                          # 💾 [PERSISTENT] All persistent app and user state
-│   ├── dsh/                       # ⚙️ DSH engine state ($DSH_HOME)
-│   │   ├── sessions/              # 📜 Chat session history (*.jsonl)
-│   │   ├── profiles/              # 🧩 Custom DSH plugins and profile bundles
-│   │   ├── settings.yaml          # 🔑 User settings & model API credentials
-│   │   └── skills/                # 💡 Installed skills
-│   ├── home/                      # 👤 User home root ($HOME, UID 1000 node)
-│   │   ├── .local/bin/            # 🚀 Python CLI tools & Subagent binaries (pip --user, uv tool)
-│   │   ├── .npm-global/bin/       # 🚀 Node global CLI tools (npm install -g)
-│   │   ├── bin/                   # 🚀 Custom standalone scripts and executable binaries
-│   │   ├── .cache/                # ⚡ Toolchain caches (uv, pip, npm, npx)
-│   │   └── .ssh/                  # 🔐 Git SSH keys and credentials
-│   ├── mcp/                       # 🌟 Dedicated MCP server projects & virtual environments
-│   │   └── <mcp-server-name>/     # Custom MCP source code, .venv, and SQLite/data files
-│   └── agents/                    # 🤖 Subagent shared storage, memory, and cross-session state
-├── opt/                           # 📦 [EPHEMERAL] Optional local scratch space (chowned to node)
-└── tmp/                           # ⚡ [EPHEMERAL] Fast tmpfs temporary scratch
-```
+- System packages: apt-get update && apt-get install -y <packages>.
+- Reclaim downloaded apt archives when needed: apt-get clean.
+- Python CLIs: uv tool install <package>; binaries persist under
+  /data/home/.local/bin.
+- Python projects and MCP servers: create a virtual environment inside the
+  project, for example uv venv /data/mcp/<name>/.venv.
+- Node CLIs: npm install -g <package>; the configured npm prefix is
+  /data/home/.npm-global.
+- Standalone tools: place executables in /data/home/.local/bin or
+  /data/home/bin.
 
-### 🚫 Anti-Patterns (Forbidden Placement)
-- **NEVER** write user project data or credentials to `/usr`, `/root`, or `/var` manually. Debian-managed packages installed with `apt` persist in this container's writable layer; user-level tools still belong under `/data/home`.
-- **NEVER** install Python tools with `sudo` — always use `uv tool install <pkg>`, `pip install --user <pkg>`, or create a virtual environment in `/data/mcp/` or `/workspace/`.
+Do not manually place user projects, secrets, or downloaded binaries under
+Debian-managed /usr, /etc, or /var. Apt itself may write there normally.
 
-### Container lifecycle
+## MCP layout
 
-This deployment uses one long-lived Debian 13 container. `docker stop`, `docker start`, and `docker compose restart` keep the container writable layer, so packages installed by an in-container root Agent remain available. `docker rm` and `docker compose down` delete that layer; only `/data` and `/workspace` bind mounts remain. Do not rebuild or recreate the container for an ordinary DSH update.
+Keep each custom MCP server self-contained:
 
-The WebUI settings page exposes the DSH version and an **Update DSH** action. It runs `/usr/local/bin/update-dsh` inside the existing container, reapplies `/etc/dsh-patches`, builds in a temporary directory, atomically replaces `/app/dsh`, validates Nginx, and restarts the DSH process. A failed patch or build leaves the previous DSH directory in place.
+    mkdir -p /data/mcp/my-server
+    cd /data/mcp/my-server
+    uv venv
+    uv pip install mcp httpx
 
----
+For one-shot servers, uvx and npx use caches below /data/home:
 
-## 4. Subagent CLI & Toolchain Recipes
+    uvx mcp-server-fetch
+    npx -y @modelcontextprotocol/server-filesystem /workspace
 
-Because `$HOME/.local/bin`, `$HOME/bin`, and `$HOME/.npm-global/bin` are pre-set in `$PATH` and stored in `./data/home`, **any tool installed here is immediately executable and 100% persistent**:
+## DSH lifecycle
 
-- **Python Subagent CLIs (e.g. `aider`, `goose`, `gpt-engineer`)**:
-  ```sh
-  uv tool install <package-name>
-  # or
-  pip install --user <package-name>
-  ```
-- **Node-based Subagent CLIs (e.g. `claude-code`, `@anthropic-ai/sdk`)**:
-  ```sh
-  npm install -g <package-name>
-  ```
-- **Standalone Binary Downloads**:
-  Download, `chmod +x`, and move to `/data/home/.local/bin/<binary-name>`.
+The WebUI settings page shows the DSH version and provides **Update DSH** and
+**Restart DSH** actions. The updater pulls source into /tmp, reapplies
+/etc/dsh-patches, builds, validates Nginx, atomically replaces /app/dsh,
+and restarts DSH. Failed patching, building, or validation restores the
+previous application.
 
----
+Do not rebuild or recreate the container for an ordinary DSH update. Those
+operations discard apt-installed tools and other changes in the writable
+system layer.
 
-## 5. MCP Server (Model Context Protocol) SOP
+## Security boundary
 
-### 1. Instant Stdio MCP Execution (uvx / npx)
-```sh
-# Python MCPs (auto-cached to /data/home/.cache/uv)
-uvx mcp-server-fetch
-uvx mcp-server-sqlite --db-path /data/mcp/sqlite.db
+- DSH runs as container root so the Agent can install Debian packages.
+- Container root is not host root. This deployment is not privileged and does
+  not mount the Docker socket by default.
+- Host access is @@DSH_HOST_ACCESS@@; declared writable paths are
+  @@DSH_WRITABLE_PATHS@@.
+- The DSH sandbox mode is @@DSH_PERMISSION_MODE@@.
+- Docker socket availability is @@DSH_DOCKER_SOCKET_AVAILABLE@@.
+- The host publishes port 3080 on loopback by default. Public access requires
+  HTTPS plus built-in Basic Auth or an authenticated outer proxy; never assume
+  DSH_TRUSTED_HOSTS is authentication.
 
-# Node MCPs (auto-cached to /data/home/.npm-global)
-npx -y @modelcontextprotocol/server-filesystem /workspace
-```
+## Plugin management
 
-### 2. Custom MCP Development & Hosting
-Always create custom MCP servers under `/data/mcp/<server-name>/`:
-```sh
-mkdir -p /data/mcp/my-custom-mcp
-cd /data/mcp/my-custom-mcp
-uv venv
-uv pip install mcp httpx
-# Executable target: /data/mcp/my-custom-mcp/.venv/bin/python server.py
-```
+Use the built-in helper for DSH plugins:
 
----
+    manage-dsh-plugin install <package-name>@latest
+    manage-dsh-plugin update <package-name>@latest
+    manage-dsh-plugin remove <package-name>
+    manage-dsh-plugin restart
 
-## 6. Privileges & Permissions
+The helper validates the combined profile and schedules one targeted graceful
+restart after the current Agent turn. Do not append pkill, kill, kill -9, or a
+second restart command. When the helper succeeds, report that the profile was
+updated and that the page may disconnect for 30 to 60 seconds. Profile
+validation proves that configuration parses; it does not prove that a plugin's
+UI or runtime behavior works. Verify those separately before claiming success.
 
-- DSH runs as container user `@@DSH_CONTAINER_USER@@` (UID `@@DSH_CONTAINER_UID@@`, GID `@@DSH_CONTAINER_GID@@`). `DSH_RUN_AS_ROOT=@@DSH_RUN_AS_ROOT@@` controls only this container process.
-- The DSH sandbox permission mode is `@@DSH_PERMISSION_MODE@@`.
-- The writable roots declared for DSH are `@@DSH_WRITABLE_PATHS@@`.
-- Host access is `@@DSH_HOST_ACCESS@@`. Docker socket availability is `@@DSH_DOCKER_SOCKET_AVAILABLE@@`; container root is not host root and this deployment does not use privileged mode or host-root mounts.
-- System-package installation is `@@DSH_CAN_INSTALL_SYSTEM_PACKAGES@@`; installed Debian package state is persistent for this container: `@@DSH_SYSTEM_PACKAGES_PERSISTENT@@`.
-- If system-package installation is false, do not attempt `apt install`; ask for a container-root deployment. Prefer user tools under `/data/home` when a system package is not required. To reclaim downloaded package files after a large install, use `apt-get clean` inside the container; this does not remove installed packages.
+If the helper fails, report its failing command and output. Check the current
+installation state before retrying an operation with side effects.
 
----
-
-## 7. DSH 插件管理标准流程
-
-当用户要求安装、更新或删除 DSH 插件（例如 `dsh-better-sidebar`、`dsh-vision-router`）时：
-
-使用内置的 `/usr/local/bin/manage-dsh-plugin`。它会用中文标明每个阶段、保留 pnpm/DSH 的真实输出、校验组合后的 profile，并且只在当前 Agent 回合完成持久化后安排 DSH 重启。这里的 profile 校验只证明配置能够解析，不证明插件的前端入口或功能已经生效；安装命令返回时，重启和依赖重新链接尚未开始。
-
-```sh
-manage-dsh-plugin install <package-name>@latest
-manage-dsh-plugin update <package-name>@latest
-manage-dsh-plugin remove <package-name>
-```
-
-当用户明确要求“重启 DSH”或“重启服务”时，使用通用重启入口：
-
-```sh
-manage-dsh-plugin restart
-```
-
-该入口会校验 `/run/dsh.pid` 对应的确实是 DSH 主进程，并在当前 Agent 回合结束后只终止这个目标进程；容器现有的 `restart: unless-stopped` 策略会负责重新拉起它。不要在容器内执行 `docker compose`，也不要在前台 Bash 中使用 `pkill`、`kill` 或 `kill -9`。重启命令返回后应先用中文说明“已安排重启”，让当前回复正常结束，再在下一轮查看状态和最近 500 行日志确认结果。
-
-Vision Router 的 `allowRemoteSettings` 是用户明确控制的安全权限，不是插件安装或 trusted host 配置的一部分。除非用户在当前请求中明确要求开启或关闭它，否则 Agent 不得代为调用授权接口、修改 `/data/dsh/settings.yaml`，或声称该权限已经改变。`DSH_TRUSTED_HOSTS` 只声明允许的请求 authority，不等于远程设置授权。
-
-公网访问使用 host 设置的前提是：前置入口已经完成认证，且宿主机的 3080 只监听私有接口。`DSH_PUBLIC_LOCAL_MODE` Cookie 仅用于让浏览器选择官方 host 设置镜像，不是后端授权凭据；不要把 3080 绑定到 `0.0.0.0`。
-
-不要在前台 Bash 调用后追加 `pkill`、`kill` 或第二条重启命令。辅助脚本已经在回合边界后安排了一次精确的优雅重启。在前台调用内杀死 DSH 会让界面只显示“调用被中断，结果未知”。
-
-辅助脚本成功后，立即发送一条简短的中文完成回复，让当前回合结束并执行已安排的重启。例如：
-
-```text
-插件 `<package-name>` 已写入持久化 web profile，profile 配置解析通过，但前端尚未确认生效。DSH 会在本轮回复结束后自动重启并加载插件；本轮不会等待重启完成后再补发通知。页面会短暂断开，请等待约 30～60 秒（复杂插件可能接近 1 分钟）后再刷新，过早刷新仍看不到插件属于正常现象。超过 90 秒仍未出现时，再查看最近 500 行日志和插件自身入口。
-```
-
-不要假定所有插件都有设置页、侧边栏或按钮。只有在阅读该插件说明或源码并实际验证页面后，才向用户说明它的具体入口和生效状态。
-
-辅助脚本失败后，用中文报告失败行和命令输出。不要声称安装、删除、校验或重启成功；在确认当前安装状态前，不要重试有副作用的插件操作。
+Plugin-specific remote settings remain user-controlled. Do not change
+allowRemoteSettings, credentials, or /data/dsh/settings.yaml unless the user
+explicitly requests that change.

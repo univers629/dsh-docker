@@ -6,6 +6,7 @@ services:
     image: dsh:local
     container_name: dsh
     hostname: dsh
+    user: "0:0"
     restart: unless-stopped
     ports:
       # Keep the public entry behind the authenticated reverse proxy. Docker
@@ -17,12 +18,6 @@ services:
     environment:
       DSH_HOME: /data/dsh
       DSH_AGENTS_HOME: /data/agents
-      # true runs DSH as root inside the container by default. Set false to
-      # keep the DSH agent on the unprivileged container user `node`.
-      # This does not add Docker socket access, privileged mode, or host-root
-      # capabilities; it only changes the UID of the DSH process inside this
-      # container.
-      DSH_RUN_AS_ROOT: "${DSH_RUN_AS_ROOT:-true}"
       DSH_PERMISSION_MODE: "${DSH_PERMISSION_MODE:-danger-full-access}"
       DSH_HOST_ACCESS: "${DSH_HOST_ACCESS:-mounted-paths-only}"
       DSH_WRITABLE_PATHS: "${DSH_WRITABLE_PATHS:-/data/dsh,/data/home,/data/mcp,/data/agents,/workspace}"
