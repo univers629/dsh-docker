@@ -18,69 +18,54 @@ else
   DOCKER() { sudo docker "$@"; }
 fi
 
-if [ "$(uname -s)" = Linux ]; then
-  USE_SYSTEM_VOLUMES=true
-  SYSTEM_DIRS=(
-    data/system/usr/bin data/system/usr/sbin data/system/usr/lib
-    data/system/usr/share data/system/usr/include data/system/usr/libexec
-    data/system/usr/games data/system/usr/src data/system/etc
-    data/system/var/lib data/system/var/cache data/system/var/backups
-  )
-  mkdir -p "${SYSTEM_DIRS[@]}"
-  COMPOSE_ARGS=(-f docker-compose.yml -f docker-compose.system.yml)
-else
-  USE_SYSTEM_VOLUMES=false
-  COMPOSE_ARGS=(-f docker-compose.yml)
-fi
+COMPOSE_ARGS=(-f docker-compose.yml)
 
-PREPARE_SYSTEM_VOLUMES() {
-  [ "$USE_SYSTEM_VOLUMES" = true ] || return 0
-
-  local seed_container relative target failed
-  seed_container="$(DOCKER create dsh:local)"
-  failed=false
-  for relative in \
-    usr/bin usr/sbin usr/lib usr/share usr/include usr/libexec \
-    usr/games usr/src etc var/lib var/cache var/backups; do
-    target="data/system/$relative"
-    if [ -z "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-      echo "==> 初始化系统卷 /$relative ..."
-      if ! DOCKER cp -a "$seed_container:/$relative/." "$target/"; then
-        failed=true
-        break
-      fi
-    fi
-  done
-  DOCKER rm -f "$seed_container" >/dev/null 2>&1 || true
-  [ "$failed" = false ]
+container_exists() {
+  DOCKER container inspect dsh >/dev/null 2>&1
 }
 
-CLEANUP_BUILD_LEFTOVERS() {
-  echo "==> 清理悬空镜像..."
-  DOCKER image prune -f >/dev/null 2>&1 || true
+container_running() {
+  [ "$(DOCKER inspect --format '{{.State.Status}}' dsh 2>/dev/null || true)" = running ]
+}
+
+ensure_image() {
+  if ! DOCKER image inspect dsh:local >/dev/null 2>&1; then
+    echo "==> 首次创建容器，正在构建 Debian 13 镜像..."
+    DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
+  fi
+}
+
+ensure_container() {
+  if container_exists; then return 0; fi
+  ensure_image
+  DOCKER compose "${COMPOSE_ARGS[@]}" up -d --no-build dsh
 }
 
 case "$ACTION" in
   start|up)
     echo "==> 启动 DeepSeek Harness 容器..."
-    DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
-    PREPARE_SYSTEM_VOLUMES
-    DOCKER compose "${COMPOSE_ARGS[@]}" up -d --force-recreate
-    CLEANUP_BUILD_LEFTOVERS
+    ensure_container
+    if ! container_running; then DOCKER start dsh >/dev/null; fi
     echo "==> Web UI: http://127.0.0.1:3080"
     ;;
   update)
-    echo "==> [1/3] 从官方源码构建最新镜像..."
-    DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
-    PREPARE_SYSTEM_VOLUMES
-    echo "==> [2/3] 重启服务..."
-    DOCKER compose "${COMPOSE_ARGS[@]}" up -d --force-recreate
-    echo "==> [3/3] 自动清理悬空垃圾镜像..."
-    CLEANUP_BUILD_LEFTOVERS
-    echo "==> 更新构建完成！"
+    if ! container_exists; then
+      echo "[错误] 容器尚未创建，请先运行 ./dsh.sh start。" >&2
+      exit 1
+    fi
+    if ! container_running; then
+      echo "[错误] 容器当前未运行，请先运行 ./dsh.sh start。" >&2
+      exit 1
+    fi
+    echo "==> 在现有 Debian 13 容器内更新 DSH..."
+    DOCKER exec dsh /usr/local/bin/update-dsh
     ;;
-  stop|down)
+  stop)
     echo "==> 停止服务..."
+    DOCKER compose "${COMPOSE_ARGS[@]}" stop dsh
+    ;;
+  remove|down)
+    echo "==> 即将删除容器可写层；/data 和 /workspace 挂载数据不会删除。"
     DOCKER compose "${COMPOSE_ARGS[@]}" down
     ;;
   restart)
@@ -90,11 +75,14 @@ case "$ACTION" in
   logs)
     DOCKER compose "${COMPOSE_ARGS[@]}" logs -f dsh
     ;;
+  shell)
+    DOCKER exec -it dsh bash
+    ;;
   status|ps)
     DOCKER compose "${COMPOSE_ARGS[@]}" ps
     ;;
   *)
-    echo "用法: $0 [start|update|stop|restart|logs|status]"
+    echo "用法: $0 [start|update|stop|restart|logs|status|shell|remove]"
     exit 1
     ;;
 esac

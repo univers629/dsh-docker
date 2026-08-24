@@ -3,7 +3,6 @@
 DeepSeek Harness 的本地 Docker 构建与持久化运行方案。
 
 [![Linux](https://img.shields.io/badge/Linux-supported-FCC624?style=flat-square&logo=linux&logoColor=black)](https://www.kernel.org/)
-[![Windows](https://img.shields.io/badge/Windows-supported-0078D4?style=flat-square&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![Docker](https://img.shields.io/badge/Docker-required-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
@@ -13,19 +12,13 @@ DeepSeek Harness 的本地 Docker 构建与持久化运行方案。
 
 安装器会询问本次操作、容器内运行用户、访问保护方式、反向代理位置、域名和端口绑定，并自动写入 `.env`。选择内置 Basic Auth 时，密码只以 bcrypt 哈希保存到 `data/auth/htpasswd`。
 
-Linux / macOS：
+Linux：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash
 ```
 
-Windows PowerShell：
-
-```powershell
-irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
-```
-
-同一条命令可再次执行，进入菜单后选择更新、启动、停止、重启、日志、状态或重新配置。Linux 与 Windows 默认使用容器内 `root`，可显式选择 `node`；容器内 root 不会授予宿主机 root、Docker socket 或特权容器权限。
+本项目当前只维护 Linux Docker 部署。容器默认使用容器内 `root`，可显式选择 `node`；容器内 root 不会授予宿主机 root、Docker socket 或特权容器权限。
 
 无人值守安装示例：
 
@@ -37,14 +30,13 @@ curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.
 
 ## 日常管理
 
-可以重复运行上面的安装命令使用菜单，也可以直接执行：
+首次安装后，日常只需要管理同一个容器：
 
 ```text
-Linux/macOS: ./dsh.sh [start|update|stop|restart|logs|status]
-Windows:     .\dsh.bat [start|update|stop|restart|logs|status]
+Linux: ./dsh.sh [start|update|stop|restart|logs|status|shell|remove]
 ```
 
-更新会同步本项目并重新构建官方 DSH 源码。`data/` 和 `workspace/` 不会因镜像重建而删除。
+`start` 只在容器尚不存在时构建 Debian 13 镜像；之后只启动原容器。`stop`、`restart` 和容器内 Agent 执行的 `apt install` 都保留在同一个容器可写层。`remove`/`down` 会删除容器可写层，只有 `/data` 和 `/workspace` 绑定挂载会保留。不要把 `update` 当成项目或镜像更新，它只是从容器内源码构建并替换 DSH。
 
 ## 公网访问与认证
 
@@ -94,18 +86,16 @@ flowchart LR
     DSH --> MCP["/data/mcp<br/>MCP 服务与数据"]
     DSH --> Agents["/data/agents<br/>子智能体共享状态"]
     DSH --> Workspace["/workspace<br/>项目工作区"]
-    DSH --> System["Linux: Debian 系统路径<br/>/usr/* /etc /var/lib /var/cache"]
     Sessions -.-> H1["./data/dsh"]
     Home -.-> H2["./data/home"]
     MCP -.-> H3["./data/mcp"]
     Agents -.-> H4["./data/agents"]
     Workspace -.-> H5["./workspace"]
-    System -.-> H6["./data/system/*"]
 ```
 
 持久化目录：
 
-前五项适用于所有平台；Linux 安装器额外启用由 `data/system` 目录支持的 Docker 系统软件卷，Windows 使用镜像内的系统层。Linux 脚本会在首次挂载前从新镜像初始化空目录，但不会覆盖已有目录；之后容器内通过 `apt` 安装的软件和下载缓存会跨镜像重建保留。
+这些目录通过绑定挂载持久化。Debian 系统本身（包括 `/usr`、`/etc`、`/var`）留在容器可写层中，不使用覆盖系统目录的 overlay；因此同一个容器停止、启动或重启后，Agent 安装的 apt 软件和系统配置仍在。
 
 | 容器路径 | 宿主机路径 | 内容 |
 | --- | --- | --- |
@@ -114,10 +104,9 @@ flowchart LR
 | `/data/mcp` | `data/mcp` | 自定义 MCP 源码、虚拟环境和数据 |
 | `/data/agents` | `data/agents` | 子智能体共享状态 |
 | `/workspace` | `workspace` | Agent 工作区 |
-| `/usr/bin`、`/usr/sbin`<br>`/usr/lib`、`/usr/share`<br>`/usr/include`、`/usr/libexec`<br>`/usr/games`、`/usr/src` | `data/system/usr/*` | Debian 软件包安装内容；`/bin`、`/sbin`、`/lib` 在 Debian usr-merge 下跟随对应 `/usr/*` 路径 |
-| `/etc`、`/var/lib`、`/var/cache`、`/var/backups` | `data/system/etc`、`data/system/var/*` | Debian 配置、软件数据库、apt 缓存和包维护备份 |
+| `/usr`、`/etc`、`/var` | 容器可写层（不单独挂载） | Debian 系统、Agent 用 `apt` 安装的软件、配置和 apt 缓存；`/bin`、`/sbin`、`/lib` 在 Debian usr-merge 下跟随 `/usr` |
 
-`/usr/local` 和 Docker init 保留在镜像层，不被系统卷覆盖，因此 DSH runtime 与 skill 模板会随镜像更新。删除 `data/system` 会删除容器内通过 apt 安装的软件与包缓存；删除 `data/dsh` 会删除 DSH 配置和会话。
+删除容器（`docker rm` 或 `docker compose down`）会删除这部分系统可写层；重新 `start` 会得到初始 Debian 13 系统。`/data`、`/workspace` 和 Docker 镜像本身不因此自动删除。
 
 ## 项目特殊处理
 
@@ -126,7 +115,7 @@ flowchart LR
 
 ### 内置控制插件
 
-镜像自带 `dsh-docker-control`，首次启动空 profile 时自动恢复。设置页提供重启 DSH 和 WebUI 配置文件编辑器，编辑器固定读写 `/data/dsh/settings.yaml`，保存前校验 YAML 并保护并发修改。
+镜像自带 `dsh-docker-control`，首次启动空 profile 时自动恢复。设置页显示 DSH 版本并提供“更新 DSH”按钮；更新在容器内拉取源码、应用当前补丁、编译并原子替换，失败时保留旧版本，不需要 SSH。设置页还提供重启 DSH 和 WebUI 配置文件编辑器，编辑器固定读写 `/data/dsh/settings.yaml`，保存前校验 YAML 并保护并发修改。
 
 ### WebUI 与反代稳定性
 
@@ -136,11 +125,11 @@ flowchart LR
 
 ### 权限边界
 
-Linux 与 Windows 安装器均默认使用容器内 `root`；Linux 可传入 `--user`、Windows 可传入 `-User` 改为 `node`。入口脚本会修正挂载目录属主并保护凭据和 SSH 私钥权限。容器内 `root` 不启用 privileged、不挂载 Docker socket，也不获得宿主机管理员权限。
+Linux 安装器默认使用容器内 `root`；可传入 `--user` 改为 `node`。入口脚本会修正挂载目录属主并保护凭据和 SSH 私钥权限。容器内 `root` 不启用 privileged、不挂载 Docker socket，也不获得宿主机管理员权限。
 
 ### 插件与工具链
 
-插件安装、会话管理和 MCP 部署所需的 `/data` 写权限已纳入沙箱。Linux 上通过 `apt` 安装的软件写入标准 Debian 路径并持久化到 Docker 系统 volumes；Python/Node 工具链分别放在 `/data/home/.local` 和 `/data/home/.npm-global`。容器启动时会根据 `DSH_SYSTEM_*`、`DSH_RUN_AS_ROOT` 和权限变量渲染实际的 `container-environment` skill。
+插件安装、会话管理和 MCP 部署所需的 `/data` 写权限已纳入沙箱。通过 `apt` 安装的软件写入标准 Debian 路径并持久化在该容器的可写层；Python/Node 工具链分别放在 `/data/home/.local` 和 `/data/home/.npm-global`。容器启动时会根据 `DSH_SYSTEM_*`、`DSH_RUN_AS_ROOT` 和权限变量渲染实际的 `container-environment` skill。
 
 </details>
 

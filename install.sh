@@ -25,7 +25,7 @@ usage() {
   cat <<'EOF'
 用法：install.sh [操作] [选项]
 
-操作：install（默认）、configure、update、start、stop、restart、logs、status
+操作：install（默认）、configure、update（容器内更新 DSH）、start、stop、restart、logs、status
 选项：
   --root / --user                 DSH 在容器内使用 root / node 运行
   --access local|trusted-proxy|basic
@@ -219,14 +219,8 @@ fetch_project() {
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
       chown -R "$SUDO_USER:$SUDO_USER" "$TARGET_DIR" 2>/dev/null || true
     fi
-  elif [ -d "$TARGET_DIR/.git" ]; then
-    echo "==> 正在同步工程文件..."
-    if ! git -C "$TARGET_DIR" diff --quiet || ! git -C "$TARGET_DIR" diff --cached --quiet; then
-      echo "[错误] $TARGET_DIR 中存在未提交的源码修改，已停止以避免覆盖。" >&2
-      exit 1
-    fi
-    git -C "$TARGET_DIR" fetch origin main
-    git -C "$TARGET_DIR" merge --ff-only FETCH_HEAD
+  elif [ -f "$TARGET_DIR/docker-compose.yml" ]; then
+    echo "==> 使用现有工程文件；不会自动同步或更新项目源码。"
   else
     echo "[错误] $TARGET_DIR 已存在但不是 Git 工程，请移动该目录后重试。" >&2
     exit 1
@@ -240,10 +234,22 @@ require_project() {
   fi
 }
 
+container_exists() {
+  [ -n "$(DOCKER inspect dsh 2>/dev/null || true)" ]
+}
+
 case "$ACTION" in
-  install|configure|update) fetch_project ;;
+  install|configure) fetch_project ;;
   *) require_project ;;
 esac
+
+if [ "$ACTION" = install ] || [ "$ACTION" = configure ]; then
+  if container_exists; then
+    echo "[错误] dsh 容器已经存在；为保护容器内 apt 软件和系统修改，安装器不会隐式重建它。" >&2
+    echo "       使用 ./dsh.sh start|restart 管理现有容器；如需全新系统，请明确执行 ./dsh.sh remove 后再安装。" >&2
+    exit 1
+  fi
+fi
 
 cd "$TARGET_DIR"
 chmod +x dsh.sh 2>/dev/null || true
@@ -273,42 +279,8 @@ get_compose_env() {
   printf '%s' "${value:-$fallback}"
 }
 
-if [ "$(uname -s)" = Linux ]; then
-  USE_SYSTEM_VOLUMES=true
-  SYSTEM_DIRS=(
-    data/system/usr/bin data/system/usr/sbin data/system/usr/lib
-    data/system/usr/share data/system/usr/include data/system/usr/libexec
-    data/system/usr/games data/system/usr/src data/system/etc
-    data/system/var/lib data/system/var/cache data/system/var/backups
-  )
-  mkdir -p "${SYSTEM_DIRS[@]}" data/auth
-  COMPOSE_ARGS=(-f docker-compose.yml -f docker-compose.system.yml)
-else
-  USE_SYSTEM_VOLUMES=false
-  COMPOSE_ARGS=(-f docker-compose.yml)
-fi
-
-prepare_system_volumes() {
-  [ "$USE_SYSTEM_VOLUMES" = true ] || return 0
-
-  local seed_container relative target failed
-  seed_container="$(DOCKER create dsh:local)"
-  failed=false
-  for relative in \
-    usr/bin usr/sbin usr/lib usr/share usr/include usr/libexec \
-    usr/games usr/src etc var/lib var/cache var/backups; do
-    target="data/system/$relative"
-    if [ -z "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-      echo "==> 初始化系统卷 /$relative ..."
-      if ! DOCKER cp -a "$seed_container:/$relative/." "$target/"; then
-        failed=true
-        break
-      fi
-    fi
-  done
-  DOCKER rm -f "$seed_container" >/dev/null 2>&1 || true
-  [ "$failed" = false ]
-}
+mkdir -p data/auth
+COMPOSE_ARGS=(-f docker-compose.yml)
 
 configure_dsh() {
   local run_as_root access_mode bind_host trusted_hosts network network_external
@@ -518,7 +490,6 @@ case "$ACTION" in
     configure_dsh
     echo "==> 正在构建 DSH 镜像..."
     DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
-    prepare_system_volumes
     write_basic_auth
     prepare_pending_env
     echo "==> 正在启动 DSH..."
@@ -530,7 +501,6 @@ case "$ACTION" in
     PENDING_ENV_FILE=""
     assert_dsh_run_mode "$PENDING_RUN_AS_ROOT"
     print_config_summary
-    DOCKER image prune -f >/dev/null 2>&1 || true
     ;;
   update) ./dsh.sh update ;;
   start) ./dsh.sh start ;;

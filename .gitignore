@@ -1,47 +1,26 @@
-# Persistence directories (track folder with .gitkeep, ignore data contents)
-data/*
-!data/agents
-data/agents/*
-!data/agents/.gitkeep
-!data/dsh
-data/dsh/*
-!data/dsh/.gitkeep
-!data/mcp
-data/mcp/*
-!data/mcp/.gitkeep
-!data/home
-data/home/*
-!data/home/.gitkeep
-!data/auth
-data/auth/*
-!data/auth/.gitkeep
-data/system/**
-!data/system/
-!data/system/usr/
-!data/system/usr/bin/
-!data/system/usr/sbin/
-!data/system/usr/lib/
-!data/system/usr/share/
-!data/system/usr/include/
-!data/system/usr/libexec/
-!data/system/usr/games/
-!data/system/usr/src/
-!data/system/etc/
-!data/system/var/
-!data/system/var/lib/
-!data/system/var/cache/
-!data/system/var/backups/
-workspace/*
+# Runtime state and user data. Keep only directory markers in Git.
+data/**
+!data/**/
+!data/**/.gitkeep
+workspace/**
+!workspace/
 !workspace/.gitkeep
 
-# Cloned source & local artifacts
+# Cloned source, dependency stores, and local build artifacts.
 deepseek-harness/
 scratch_repos/
 node_modules/
+.pnpm-store/
+.cache/
+dist/
+build/
+*.tsbuildinfo
 *.zip
 *.log
 
-# OS / Editor files
+# Local configuration and editor/OS files.
+.env.*
+!.env.example
 .env
 .DS_Store
 Thumbs.db

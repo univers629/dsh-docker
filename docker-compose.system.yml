@@ -1,3 +1,7 @@
+# Legacy compatibility overlay. The Linux runtime no longer includes this
+ # file: Debian system state intentionally remains in the long-lived
+ # container writable layer. Keep it only for older installations that still
+ # reference it explicitly; do not add it to normal compose commands.
 services:
   dsh:
     environment:
