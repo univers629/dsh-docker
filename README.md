@@ -1,8 +1,10 @@
 # dsh-docker
 
-DeepSeek Harness 的本地 Docker 构建与持久化运行方案。
+DeepSeek Harness 的本地 Docker 构建与持久化运行方案，提供可由 Agent 持续安装软件和开发的预制 Debian 13 环境。
 
 [![Linux](https://img.shields.io/badge/Linux-supported-FCC624?style=flat-square&logo=linux&logoColor=black)](https://www.kernel.org/)
+[![Windows](https://img.shields.io/badge/Windows-supported-0078D4?style=flat-square&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
+[![Debian 13](https://img.shields.io/badge/Debian-13-A81D33?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/releases/trixie/)
 [![Docker](https://img.shields.io/badge/Docker-required-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
@@ -10,7 +12,7 @@ DeepSeek Harness 的本地 Docker 构建与持久化运行方案。
 
 ## 安装与配置
 
-安装器会询问本次操作、容器内运行用户、访问保护方式、反向代理位置、域名和端口绑定，并自动写入 `.env`。选择内置 Basic Auth 时，密码只以 bcrypt 哈希保存到 `data/auth/htpasswd`。
+安装器会询问本次操作、访问保护方式、反向代理位置、域名和端口绑定，并自动写入 `.env`。选择内置 Basic Auth 时，密码只以 bcrypt 哈希保存到 `data/auth/htpasswd`。DSH 和 Agent 固定使用容器内 root，以便直接通过 apt 管理开发工具；这不会授予宿主机 root、Docker socket 或特权容器权限。
 
 Linux：
 
@@ -18,15 +20,21 @@ Linux：
 curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash
 ```
 
-本项目当前只维护 Linux Docker 部署。容器默认使用容器内 `root`，可显式选择 `node`；容器内 root 不会授予宿主机 root、Docker socket 或特权容器权限。
+Windows PowerShell（需要 Docker Desktop，并切换到 Linux containers）：
+
+```powershell
+irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
+```
+
+Linux 和 Windows 安装器都会获取项目、构建 Debian 13 镜像并启动同一套容器运行时。Windows 安装器会在需要时自动启动 Docker Desktop Linux Engine。
 
 无人值守安装示例：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- install --user --access local --non-interactive
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- install --access local --non-interactive
 ```
 
-在已下载的工程目录中执行 `bash install.sh --help` 可查看全部参数。
+在已下载的工程目录中执行 `bash install.sh --help` 可查看 Linux 参数；Windows 可直接运行 `powershell -ExecutionPolicy Bypass -File .\install.ps1`。
 
 ## 日常管理
 
@@ -34,6 +42,7 @@ curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.
 
 ```text
 Linux: ./dsh.sh [start|update|stop|restart|logs|status|shell|remove]
+Windows: .\dsh.bat [start|update|stop|restart|logs|status|shell|remove]
 ```
 
 `start` 只在容器尚不存在时构建 Debian 13 镜像；之后只启动原容器。`stop`、`restart` 和容器内 Agent 执行的 `apt install` 都保留在同一个容器可写层。`remove`/`down` 会删除容器可写层，只有 `/data` 和 `/workspace` 绑定挂载会保留。不要把 `update` 当成项目或镜像更新，它只是从容器内源码构建并替换 DSH。
@@ -125,11 +134,11 @@ flowchart LR
 
 ### 权限边界
 
-Linux 安装器默认使用容器内 `root`；可传入 `--user` 改为 `node`。入口脚本会修正挂载目录属主并保护凭据和 SSH 私钥权限。容器内 `root` 不启用 privileged、不挂载 Docker socket，也不获得宿主机管理员权限。
+DSH 和 Agent 固定使用容器内 `root`，入口脚本会保护凭据和 SSH 私钥权限。容器不启用 privileged、不挂载 Docker socket，容器内 root 也不获得宿主机管理员权限。
 
 ### 插件与工具链
 
-插件安装、会话管理和 MCP 部署所需的 `/data` 写权限已纳入沙箱。通过 `apt` 安装的软件写入标准 Debian 路径并持久化在该容器的可写层；Python/Node 工具链分别放在 `/data/home/.local` 和 `/data/home/.npm-global`。容器启动时会根据 `DSH_SYSTEM_*`、`DSH_RUN_AS_ROOT` 和权限变量渲染实际的 `container-environment` skill。
+插件安装、会话管理和 MCP 部署所需的 `/data` 写权限已纳入沙箱。通过 `apt` 安装的软件写入标准 Debian 路径并持久化在该容器的可写层；Python/Node 工具链分别放在 `/data/home/.local` 和 `/data/home/.npm-global`。容器启动时会根据实际系统、架构和权限变量渲染 `container-environment` skill。
 
 </details>
 

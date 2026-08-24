@@ -1,8 +1,10 @@
 # dsh-docker
 
-A local Docker build and persistent runtime for DeepSeek Harness.
+A local Docker build and persistent runtime for DeepSeek Harness, with a prebuilt Debian 13 environment where the Agent can keep installing software and developing.
 
 [![Linux](https://img.shields.io/badge/Linux-supported-FCC624?style=flat-square&logo=linux&logoColor=black)](https://www.kernel.org/)
+[![Windows](https://img.shields.io/badge/Windows-supported-0078D4?style=flat-square&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
+[![Debian 13](https://img.shields.io/badge/Debian-13-A81D33?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/releases/trixie/)
 [![Docker](https://img.shields.io/badge/Docker-required-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
@@ -10,7 +12,7 @@ A local Docker build and persistent runtime for DeepSeek Harness.
 
 ## Installation and configuration
 
-The installer asks what to do, which in-container user to run, how access is protected, where the reverse proxy runs, which hosts are trusted, and where the host port is bound. It writes `.env` automatically. Built-in Basic Auth stores only a bcrypt hash in `data/auth/htpasswd`.
+The installer asks what to do, how access is protected, where the reverse proxy runs, which hosts are trusted, and where the host port is bound. It writes `.env` automatically. Built-in Basic Auth stores only a bcrypt hash in `data/auth/htpasswd`. DSH and the Agent always run as container root so they can manage development tools with apt; this does not grant host root, a Docker socket, or privileged-container capabilities.
 
 Linux:
 
@@ -18,15 +20,21 @@ Linux:
 curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash
 ```
 
-This project currently maintains the Linux Docker deployment only. The container defaults to in-container `root`, with `node` available as an explicit choice. Container root does not grant host root, a Docker socket, or privileged-container capabilities.
+Windows PowerShell (requires Docker Desktop in Linux containers mode):
+
+```powershell
+irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
+```
+
+The Linux and Windows installers fetch the project, build the Debian 13 image, and start the same container runtime. The Windows installer starts the Docker Desktop Linux Engine when necessary.
 
 Unattended installation example:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- install --user --access local --non-interactive
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- install --access local --non-interactive
 ```
 
-Run `bash install.sh --help` inside the downloaded project directory for all options.
+Run `bash install.sh --help` inside the downloaded project directory for Linux options. On Windows, run `powershell -ExecutionPolicy Bypass -File .\install.ps1` directly.
 
 ## Daily management
 
@@ -34,6 +42,7 @@ After the first install, manage the same container directly:
 
 ```text
 Linux: ./dsh.sh [start|update|stop|restart|logs|status|shell|remove]
+Windows: .\dsh.bat [start|update|stop|restart|logs|status|shell|remove]
 ```
 
 `start` builds the Debian 13 image only when the container does not exist; later starts reuse the same container. `stop`, `restart`, and `apt install` performed by an in-container agent keep the container writable layer. `remove`/`down` deletes that layer, while `/data` and `/workspace` bind mounts remain. The `update` action is an in-container DSH source update, not a project or image rebuild.
@@ -125,11 +134,11 @@ For public domains, the container Nginx presents traffic to DSH as internal loop
 
 ### Permission boundary
 
-The Linux installer defaults to container `root`; pass `--user` to select `node`. The entrypoint corrects mounted-directory ownership and protects credential and SSH private-key permissions. Container root does not enable privileged mode, mount the Docker socket, or grant administrator access on the host.
+DSH and the Agent always run as container `root`, and the entrypoint protects credential and SSH private-key permissions. The container is not privileged, does not mount the Docker socket, and container root does not grant administrator access on the host.
 
 ### Plugins and toolchains
 
-The sandbox permits the `/data` writes required for plugins, session management, and MCP deployments. Apt packages use standard Debian paths persisted in the container writable layer. Python and Node user toolchains live under `/data/home/.local` and `/data/home/.npm-global`. At startup, the container renders the deployed `container-environment` skill from the `DSH_SYSTEM_*`, `DSH_RUN_AS_ROOT`, and permission variables.
+The sandbox permits the `/data` writes required for plugins, session management, and MCP deployments. Apt packages use standard Debian paths persisted in the container writable layer. Python and Node user toolchains live under `/data/home/.local` and `/data/home/.npm-global`. At startup, the container renders the deployed `container-environment` skill from the detected system, architecture, and permission variables.
 
 </details>
 

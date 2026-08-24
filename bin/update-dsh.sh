@@ -102,14 +102,13 @@ if ! mv "$SOURCE_DIR" "$APP_DIR"; then
   exit 1
 fi
 
-if ! gosu node nginx -t -c "$NGINX_CONFIG"; then
+if ! nginx -t -c "$NGINX_CONFIG"; then
   rm -rf "$APP_DIR"
   mv "$OLD_DIR" "$APP_DIR"
   write_status failed 'Nginx 配置检查失败，当前版本已恢复'
   exit 1
 fi
 
-chown -R node:node "$APP_DIR" 2>/dev/null || true
 write_status success 'DSH 更新完成，正在重启服务'
 
 if [ "${DSH_UPDATE_NO_RESTART:-false}" != true ] && [ -f /run/dsh.pid ]; then

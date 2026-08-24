@@ -69,8 +69,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
        curl \
        nginx \
        apache2-utils \
-       gosu \
-       passwd \
        util-linux \
        python3 \
        python3-pip \
@@ -78,14 +76,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
        make \
        gcc \
        g++ \
-    && groupadd --gid 1000 node \
-    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash node \
     && ln -s /usr/bin/python3 /usr/local/bin/python \
     && npm install -g pnpm@11.7.0 esbuild \
     && npm cache clean --force
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-COPY --chown=node:node --from=builder /app/dsh /app/dsh
+COPY --from=builder /app/dsh /app/dsh
 COPY bin/apply-dsh-patches.sh /usr/local/bin/apply-dsh-patches
 COPY bin/update-dsh.sh /usr/local/bin/update-dsh
 COPY bin/write-dsh-metadata.mjs /usr/local/lib/dsh/write-dsh-metadata.mjs
@@ -109,7 +105,6 @@ RUN cd /opt/dsh-docker-control \
     && mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
        /usr/bin /usr/sbin /usr/lib /usr/share /usr/include /usr/libexec \
        /usr/games /usr/src /var/lib /var/cache /var/backups \
-    && chown -R node:node /opt /data /workspace \
     && chmod +x /usr/local/bin/dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/entrypoint.sh /usr/local/bin/configure-nginx-auth /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs /usr/local/bin/apply-dsh-patches /usr/local/bin/update-dsh \
     && printf '%s\n' 'export PATH="/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:$PATH"' > /etc/profile.d/dsh-toolchain.sh
 

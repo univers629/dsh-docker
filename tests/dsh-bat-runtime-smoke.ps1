@@ -27,6 +27,9 @@ public static class DockerMock {
         if (args.Length > 1 && args[0] == "desktop" && args[1] == "start") {
             File.WriteAllText(state, "linux");
         }
+        if (args.Length > 1 && args[0] == "inspect" && args[1] == "--format") {
+            Console.WriteLine("exited");
+        }
         return 0;
     }
 }
@@ -50,6 +53,19 @@ public static class DockerMock {
     $calls = [IO.File]::ReadAllText($log)
     if ($calls -notmatch 'desktop start' -or $calls -notmatch 'compose ps') {
         throw "Unexpected Docker calls: $calls"
+    }
+
+    & cmd.exe /d /c (Join-Path $PSScriptRoot '..\dsh.bat') start
+    if ($LASTEXITCODE -ne 0) { throw "dsh.bat start exited with $LASTEXITCODE." }
+    & cmd.exe /d /c (Join-Path $PSScriptRoot '..\dsh.bat') stop
+    if ($LASTEXITCODE -ne 0) { throw "dsh.bat stop exited with $LASTEXITCODE." }
+
+    $calls = [IO.File]::ReadAllText($log)
+    if ($calls -notmatch 'container inspect dsh' -or $calls -notmatch 'start dsh' -or $calls -notmatch 'compose stop dsh') {
+        throw "Windows lifecycle did not reuse and stop the existing container: $calls"
+    }
+    if ($calls -match 'force-recreate|compose down|image prune') {
+        throw "Windows lifecycle unexpectedly recreated, removed, or pruned the container: $calls"
     }
     Write-Output 'dsh.bat Docker runtime smoke: ok'
 } finally {
