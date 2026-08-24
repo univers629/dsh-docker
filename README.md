@@ -59,7 +59,7 @@ Windows PowerShell：
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete
 ```
 
-删除会精确清理 `dsh` 容器、`dsh:*` 镜像、本项目挂载和网络、全局 Docker 构建缓存以及工程目录；需要输入 `DELETE` 确认。不会使用 `name=dsh` 子串筛选，也不会删除外部共享网络（例如 `dpanel-local`）。
+删除会精确清理 `dsh` 容器、`dsh:*` 镜像、本项目挂载和网络、全局 Docker 构建缓存以及工程目录；需要输入 `DELETE` 确认。不会使用 `name=dsh` 子串筛选，也不会删除外部共享网络（例如 `dpanel-local`）。无论在工程目录内还是在它的上一级目录执行，安装器都会先把自己复制到临时目录再删除，脚本文件和当前目录不会因为位于被删目录内而中断删除。
 
 ## 公网访问与认证
 
