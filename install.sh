@@ -231,6 +231,9 @@ container_exists() {
 
 confirm_delete() {
   local answer
+  if [ "${DSH_DELETE_CONFIRMED:-}" = 1 ]; then
+    return 0
+  fi
   if [ "$INTERACTIVE" != true ]; then
     echo "[错误] delete 是破坏性操作，需要交互确认；请不要使用 --non-interactive。" >&2
     exit 2
@@ -242,6 +245,41 @@ confirm_delete() {
     echo "已取消。"
     exit 0
   fi
+}
+
+resolve_self_path() {
+  local dir base
+  case "${0:-}" in
+    ''|bash|-bash|sh|-sh|dash|-dash) return 1 ;;
+  esac
+  [ -f "$0" ] || return 1
+  dir="$(dirname -- "$0")"
+  base="$(basename -- "$0")"
+  dir="$(cd "$dir" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+# 当脚本自身位于将被删除的目录内时，先把自己复制到临时目录再从副本继续，
+# 避免脚本文件和工作目录在执行过程中被删掉。
+detach_delete() {
+  local self target_abs tmp_copy status
+  [ "${DSH_DELETE_DETACHED:-}" = 1 ] && return 0
+  self="$(resolve_self_path)" || return 0
+  [ -d "$TARGET_DIR" ] || return 0
+  target_abs="$(cd "$TARGET_DIR" && pwd -P)" || return 0
+  case "$self" in
+    "$target_abs"/*) ;;
+    *) return 0 ;;
+  esac
+  cd "$(dirname -- "$target_abs")" 2>/dev/null || true
+  tmp_copy="$(mktemp "${TMPDIR:-/tmp}/dsh-delete-XXXXXX")" || return 0
+  cat -- "$self" > "$tmp_copy"
+  chmod +x "$tmp_copy"
+  echo "==> 删除脚本位于将被删除的目录内，已复制到 $tmp_copy 后从副本继续。"
+  status=0
+  DSH_DELETE_DETACHED=1 DSH_DELETE_CONFIRMED=1 bash "$tmp_copy" delete --dir "$target_abs" || status=$?
+  rm -f -- "$tmp_copy"
+  exit "$status"
 }
 
 delete_project() {
@@ -321,6 +359,13 @@ delete_project() {
 if [ "$ACTION" = delete ]; then
   if [ ! -f "$TARGET_DIR/docker-compose.yml" ] && [ -f docker-compose.yml ] && [ -f Dockerfile ] && [ -f install.sh ]; then
     TARGET_DIR="."
+  fi
+  if [ "${DSH_DELETE_DETACHED:-}" = 1 ]; then
+    trap 'rm -f -- "$0"' EXIT
+  else
+    confirm_delete
+    DSH_DELETE_CONFIRMED=1
+    detach_delete
   fi
   delete_project
   exit 0

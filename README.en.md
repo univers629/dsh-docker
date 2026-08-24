@@ -59,7 +59,7 @@ Windows PowerShell:
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete
 ```
 
-Deletion precisely removes the `dsh` container, `dsh:*` images, project mounts and networks, the global Docker build cache, and the project directory after a `DELETE` confirmation. It does not use a substring `name=dsh` filter and does not remove external shared networks such as `dpanel-local`.
+Deletion precisely removes the `dsh` container, `dsh:*` images, project mounts and networks, the global Docker build cache, and the project directory after a `DELETE` confirmation. It does not use a substring `name=dsh` filter and does not remove external shared networks such as `dpanel-local`. It works from inside the project directory or from its parent: the installer copies itself to a temporary file first, so the running script and the current directory never block the removal.
 
 ## Public access and authentication
 

@@ -129,10 +129,46 @@ function Test-DshContainer {
 }
 
 function Confirm-DshDelete {
+    if ($env:DSH_DELETE_CONFIRMED -eq '1') { return }
     if ($NonInteractive) { throw '删除是破坏性操作，需要交互确认；请不要使用 -NonInteractive。' }
     Write-Host "[警告] 将删除 dsh 容器、dsh:* 镜像、本项目挂载和网络、全局 Docker 构建缓存，以及 $Dir。" -ForegroundColor Yellow
     $answer = Read-Host '请输入 DELETE 继续，其他输入取消'
     if ($answer -ne 'DELETE') { Write-Host '已取消。'; exit 0 }
+}
+
+# 当脚本自身位于将被删除的目录内时，先复制到临时目录并从副本继续，
+# 同时把进程当前目录移出目标目录，避免脚本文件被删除或目录被占用。
+function Invoke-DshDetachedDelete {
+    param([string]$TargetDir)
+    if ($env:DSH_DELETE_DETACHED -eq '1') { return $null }
+    if (-not $PSCommandPath) { return $null }
+    if (-not (Test-Path -LiteralPath $PSCommandPath -PathType Leaf)) { return $null }
+    if (-not (Test-Path -LiteralPath $TargetDir -PathType Container)) { return $null }
+    $resolvedTarget = (Resolve-Path -LiteralPath $TargetDir).Path.TrimEnd('\')
+    $selfDir = (Split-Path -Parent $PSCommandPath).TrimEnd('\')
+    if (-not ($selfDir -eq $resolvedTarget -or $selfDir.StartsWith($resolvedTarget + '\', [StringComparison]::OrdinalIgnoreCase))) { return $null }
+    $parentDir = Split-Path -Parent $resolvedTarget
+    if ($parentDir -and (Test-Path -LiteralPath $parentDir -PathType Container)) {
+        Set-Location -LiteralPath $parentDir
+        [Environment]::CurrentDirectory = $parentDir
+    }
+    $tempScript = Join-Path ([IO.Path]::GetTempPath()) ('dsh-delete-{0}.ps1' -f [guid]::NewGuid().ToString('N'))
+    Copy-Item -LiteralPath $PSCommandPath -Destination $tempScript -Force
+    Write-Host "==> 删除脚本位于将被删除的目录内，已复制到 $tempScript 后从副本继续。" -ForegroundColor Yellow
+    $hostExe = (Get-Process -Id $PID).Path
+    if (-not $hostExe) { $hostExe = 'powershell.exe' }
+    $exitCode = 0
+    $env:DSH_DELETE_DETACHED = '1'
+    $env:DSH_DELETE_CONFIRMED = '1'
+    try {
+        & $hostExe -NoProfile -ExecutionPolicy Bypass -File $tempScript -DshAction delete -Dir $resolvedTarget | Out-Host
+        if ($null -ne $LASTEXITCODE) { $exitCode = $LASTEXITCODE }
+    } finally {
+        $env:DSH_DELETE_DETACHED = $null
+        $env:DSH_DELETE_CONFIRMED = $null
+        Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+    }
+    return $exitCode
 }
 
 function Remove-DshProject {
@@ -190,6 +226,8 @@ function Remove-DshProject {
             if ($currentPath -eq $normalizedDir -or $currentPath.StartsWith($normalizedDir + '\', [StringComparison]::OrdinalIgnoreCase)) {
                 Set-Location (Split-Path -Parent $resolvedDir)
             }
+            # Windows 会锁定进程当前目录，Set-Location 不改变进程 cwd，这里显式移出目标目录。
+            [Environment]::CurrentDirectory = (Get-Location).Path
             Remove-Item -LiteralPath $resolvedDir -Recurse -Force
         } else {
             Write-Host "==> $resolvedDir 不是可识别的 dsh-docker 工程，已保留。"
@@ -426,7 +464,16 @@ if ($DshAction -eq 'delete') {
         (Test-Path -LiteralPath 'install.ps1' -PathType Leaf)) {
         $Dir = (Get-Location).Path
     }
-    Remove-DshProject
+    Confirm-DshDelete
+    $env:DSH_DELETE_CONFIRMED = '1'
+    try {
+        $detachedExit = Invoke-DshDetachedDelete -TargetDir $Dir
+        if ($null -ne $detachedExit) { exit $detachedExit }
+        Remove-DshProject
+    } finally {
+        $env:DSH_DELETE_CONFIRMED = $null
+        $env:DSH_DELETE_DETACHED = $null
+    }
     exit 0
 }
 
