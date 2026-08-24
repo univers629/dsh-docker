@@ -1,4 +1,9 @@
+# Container scripts, patches and configs must stay LF even when Git for Windows
+# checks out with core.autocrlf=true: CRLF breaks the shebang of the scripts
+# copied into the image and makes git apply reject the DSH patches.
+* text=auto eol=lf
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=lf
 *.sh text eol=lf
+*.patch text eol=lf

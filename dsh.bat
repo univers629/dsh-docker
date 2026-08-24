@@ -5,6 +5,13 @@ cd /d "%~dp0"
 set "DOCKER_BUILDKIT=1"
 set "COMPOSE_DOCKER_CLI_BUILD=1"
 
+rem Compose 里环境变量优先于 .env；清掉它们，保证运行时使用 .env 中的配置。
+set "DSH_ACCESS_MODE="
+set "DSH_BIND_HOST="
+set "DSH_TRUSTED_HOSTS="
+set "DSH_DOCKER_NETWORK="
+set "DSH_DOCKER_NETWORK_EXTERNAL="
+
 set "ACTION=%~1"
 if "%ACTION%"=="" set "ACTION=default"
 

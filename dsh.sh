@@ -5,6 +5,10 @@ cd "$(dirname "$0")"
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
 
+# Compose 里 shell 环境变量的优先级高于 .env；清掉它们，保证运行时始终使用
+# 安装器写入 .env 的访问模式、绑定地址和网络配置。
+unset DSH_ACCESS_MODE DSH_BIND_HOST DSH_TRUSTED_HOSTS DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL
+
 ACTION="${1:-start}"
 
 if ! command -v docker &>/dev/null; then
