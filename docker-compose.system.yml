@@ -1,22 +1,32 @@
 services:
   dsh:
+    environment:
+      DSH_SYSTEM_PACKAGES_PERSISTENT: "true"
     volumes:
-      # Debian package paths stay standard inside the container. /usr/local
-      # remains in the image so DSH runtime files update with the image.
+      # These are Docker volumes backed by project-local host directories. The
+      # Linux scripts seed each empty directory from the freshly built image
+      # before the first mount. Debian 13 uses usr-merge, so /bin, /sbin, and
+      # /lib resolve to these canonical /usr paths.
       - dsh-system-usr-bin:/usr/bin
+      - dsh-system-usr-sbin:/usr/sbin
       - dsh-system-usr-lib:/usr/lib
       - dsh-system-usr-share:/usr/share
       - dsh-system-usr-include:/usr/include
       - dsh-system-usr-libexec:/usr/libexec
       - dsh-system-usr-games:/usr/games
+      - dsh-system-usr-src:/usr/src
       - dsh-system-etc:/etc
       - dsh-system-var-lib:/var/lib
       - dsh-system-var-cache:/var/cache
+      - dsh-system-var-backups:/var/backups
 
 volumes:
   dsh-system-usr-bin:
     driver: local
     driver_opts: { type: none, o: bind, device: ./data/system/usr/bin }
+  dsh-system-usr-sbin:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/usr/sbin }
   dsh-system-usr-lib:
     driver: local
     driver_opts: { type: none, o: bind, device: ./data/system/usr/lib }
@@ -32,6 +42,9 @@ volumes:
   dsh-system-usr-games:
     driver: local
     driver_opts: { type: none, o: bind, device: ./data/system/usr/games }
+  dsh-system-usr-src:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/usr/src }
   dsh-system-etc:
     driver: local
     driver_opts: { type: none, o: bind, device: ./data/system/etc }
@@ -41,3 +54,6 @@ volumes:
   dsh-system-var-cache:
     driver: local
     driver_opts: { type: none, o: bind, device: ./data/system/var/cache }
+  dsh-system-var-backups:
+    driver: local
+    driver_opts: { type: none, o: bind, device: ./data/system/var/backups }

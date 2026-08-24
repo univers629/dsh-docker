@@ -274,16 +274,41 @@ get_compose_env() {
 }
 
 if [ "$(uname -s)" = Linux ]; then
+  USE_SYSTEM_VOLUMES=true
   SYSTEM_DIRS=(
-    data/system/usr/bin data/system/usr/lib data/system/usr/share
-    data/system/usr/include data/system/usr/libexec
-    data/system/usr/games data/system/etc data/system/var/lib data/system/var/cache
+    data/system/usr/bin data/system/usr/sbin data/system/usr/lib
+    data/system/usr/share data/system/usr/include data/system/usr/libexec
+    data/system/usr/games data/system/usr/src data/system/etc
+    data/system/var/lib data/system/var/cache data/system/var/backups
   )
   mkdir -p "${SYSTEM_DIRS[@]}" data/auth
   COMPOSE_ARGS=(-f docker-compose.yml -f docker-compose.system.yml)
 else
+  USE_SYSTEM_VOLUMES=false
   COMPOSE_ARGS=(-f docker-compose.yml)
 fi
+
+prepare_system_volumes() {
+  [ "$USE_SYSTEM_VOLUMES" = true ] || return 0
+
+  local seed_container relative target failed
+  seed_container="$(DOCKER create dsh:local)"
+  failed=false
+  for relative in \
+    usr/bin usr/sbin usr/lib usr/share usr/include usr/libexec \
+    usr/games usr/src etc var/lib var/cache var/backups; do
+    target="data/system/$relative"
+    if [ -z "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+      echo "==> 初始化系统卷 /$relative ..."
+      if ! DOCKER cp -a "$seed_container:/$relative/." "$target/"; then
+        failed=true
+        break
+      fi
+    fi
+  done
+  DOCKER rm -f "$seed_container" >/dev/null 2>&1 || true
+  [ "$failed" = false ]
+}
 
 configure_dsh() {
   local run_as_root access_mode bind_host trusted_hosts network network_external
@@ -493,6 +518,7 @@ case "$ACTION" in
     configure_dsh
     echo "==> 正在构建 DSH 镜像..."
     DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
+    prepare_system_volumes
     write_basic_auth
     prepare_pending_env
     echo "==> 正在启动 DSH..."

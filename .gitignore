@@ -19,15 +19,18 @@ data/system/**
 !data/system/
 !data/system/usr/
 !data/system/usr/bin/
+!data/system/usr/sbin/
 !data/system/usr/lib/
 !data/system/usr/share/
 !data/system/usr/include/
 !data/system/usr/libexec/
 !data/system/usr/games/
+!data/system/usr/src/
 !data/system/etc/
 !data/system/var/
 !data/system/var/lib/
 !data/system/var/cache/
+!data/system/var/backups/
 workspace/*
 !workspace/.gitkeep
 
