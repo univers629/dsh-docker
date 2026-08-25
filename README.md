@@ -16,20 +16,22 @@ DeepSeek Harness 的本地 Docker 构建与持久化运行方案，提供可由 
 | --- | --- | --- | --- |
 | 拉取预构建镜像（默认） | 1 vCPU / 2 GB | ≥ 10 GB | 不在本机编译 DSH，安装耗时基本等于下载耗时 |
 | 长期给 Agent 折腾 | 2 vCPU / 4 GB | ≥ 20 GB | 容器内 apt 安装的工具链都留在同一个可写层 |
-| 在本机构建镜像 | ≥ 4 vCPU / 8 GB | ≥ 25 GB | `pnpm install` 加 TypeScript 编译是单线程重负载 |
+| 在本机构建镜像 | 1 vCPU / 2 GB | ≥ 15 GB | 只做 apt 装系统包加 npm 装 DSH 预构建包，不编译 TypeScript |
 
-内存低于 2 GB 的机器请使用预构建镜像，并配置 swap：在 1 vCPU / 1 GB 的 VPS 上本机构建会持续换页，`pnpm run build:official` 常超过 20 分钟，也可能被 OOM 终止。镜像解包后约 3.3 GB。
+本机构建不再编译 DSH 源码：镜像直接从 npm 安装上游发布的预构建包，再对产物打补丁，实测整体约 4 分钟，镜像解包后约 1.4 GB。1 vCPU / 1 GB 的 VPS 也能构建，仍建议配置 swap 并优先选预构建镜像，省下的主要是下载和 apt 时间。
 
 ### 镜像来源
 
 安装器的第一个问题是 Debian 13 镜像来源：
 
 1. **预构建（默认）**：拉取 `ghcr.io/univers629/dsh-docker:latest`，同一个多架构清单覆盖 `linux/amd64` 和 `linux/arm64`。
-2. **本机构建**：用当前工程的 `Dockerfile` 编译。
+2. **本机构建**：用当前工程的 `Dockerfile` 现场构建（装系统包并从 npm 安装 DSH，不编译源码）。
 
 拉取失败时安装器会自动退回本机构建，并把实际来源写进 `.env` 的 `DSH_IMAGE` 与 `DSH_IMAGE_SOURCE`。非交互安装用 `--image-source prebuilt|build`，自定义引用用 `--image REF`；Windows 对应 `-ImageSource` 和 `-Image`。
 
-镜像由 [.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) 在 GitHub 原生 amd64 与 arm64 runner 上分别构建后合并成多架构清单，手动触发时可以指定要编译的 DSH 上游分支。发布镜像是某一时刻的快照；之后用 WebUI 的“DSH 环境”页或 `./dsh.sh update` 在容器内更新 DSH 本体。
+镜像由 [.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) 在 GitHub 原生 amd64 与 arm64 runner 上分别构建后合并成多架构清单，在 Actions 页面手动触发（可指定要安装的 DSH npm 版本，默认 `latest`）或推送 `v*` 标签时发版。公开仓库使用标准 GitHub runner 不计费，所以发版频率没有额度限制。
+
+发布镜像是某一时刻的快照。WebUI 的“DSH 环境”页和 `./dsh.sh update` 在容器内直接从 npm 安装新版本预构建包并重新打补丁，只花下载和安装的时间（实测约 1 分钟），不再编译源码；容器可写层（也就是 Agent 用 apt 装的工具链）全程保留。
 
 首次发布后需要手动把 GitHub Packages 里的 `dsh-docker` 包可见性改成 public（仓库 → Packages → Package settings → Change visibility）。GHCR 新建的包默认私有，服务器上匿名拉取会得到 `denied`，安装器随后会退回本机构建。
 
@@ -51,6 +53,18 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | i
 
 Linux 和 Windows 安装器都会获取项目、准备 Debian 13 镜像（默认拉取预构建镜像）并启动同一套容器运行时。Windows 安装器会在需要时自动启动 Docker Desktop Linux Engine。
 
+两个平台的一行命令进入同一套交互菜单：
+
+| 选项 | 作用 |
+| --- | --- |
+| 1 全新安装 | 工程目录已存在时变为“重新配置并重建容器（保留挂载数据）”，会追问镜像来源、访问保护、反代位置、域名和端口绑定 |
+| 2 在容器内更新 DSH | 在运行中的容器里从 npm 装新版本并重打补丁，只重启 DSH 进程 |
+| 3 启动 / 4 停止 / 5 重启 | 只操作已存在的容器，不重建、不丢 apt 装的工具链 |
+| 6 查看日志 / 7 查看状态 | 转发到 `./dsh.sh logs` 和 `status` |
+| 8 删除 | 输入 `DELETE` 确认后完整清理容器、镜像、挂载、网络、构建缓存和工程目录 |
+
+只有第 1 项会问 Debian 13 镜像来源（预构建或本机构建）；第 2 至 8 项直接对现有容器执行。
+
 无人值守安装示例：
 
 ```bash
@@ -68,7 +82,7 @@ Linux: ./dsh.sh [start|update|stop|restart|logs|status|shell|remove]
 Windows: .\dsh.bat [start|update|stop|restart|logs|status|shell|remove]
 ```
 
-`start` 只在容器尚不存在时准备 Debian 13 镜像（按 `.env` 记录的来源拉取或构建）；之后只启动原容器。`stop`、`restart` 和容器内 Agent 执行的 `apt install` 都保留在同一个容器可写层。`remove`/`down` 会删除容器可写层，只有 `/data` 和 `/workspace` 绑定挂载会保留。不要把 `update` 当成项目或镜像更新，它只是从容器内源码构建并替换 DSH。
+`start` 只在容器尚不存在时准备 Debian 13 镜像（按 `.env` 记录的来源拉取或构建）；之后只启动原容器。`stop`、`restart` 和容器内 Agent 执行的 `apt install` 都保留在同一个容器可写层。`remove`/`down` 会删除容器可写层，只有 `/data` 和 `/workspace` 绑定挂载会保留。不要把 `update` 当成项目或镜像更新，它只是在容器内重装 DSH 的 npm 包并替换 `/app/dsh`。容器健康检查同时探 Nginx 入口和 DSH 自己的端口，所以 DSH 崩溃循环时 `docker ps` 会显示 `unhealthy`，而不是掩盖成 `healthy`。
 
 如需在服务器上彻底清空本项目后重新安装，请在工程目录中重新运行安装器并选择“删除”（菜单第 8 项），或执行：
 
@@ -163,7 +177,7 @@ flowchart LR
 
 ### 内置控制插件
 
-镜像自带 `dsh-docker-control`，首次启动空 profile 时自动恢复。它在设置窗口左侧导航新增“DSH 环境”页（与“通用设置 / 模型 / 插件 / Agent 预设”同级），显示当前与最新 DSH 版本，提供“检查更新”“立即更新”，以及“电脑 UI / 手机 UI”布局选择器。打开设置不会自动联网，只有按下“检查更新”才会查询上游分支；手机布局把设置面板改为全屏、左侧导航改为可横向滑动的顶部标签条，并把首页侧边栏改成抽屉：收起时完全让位给对话区，左上角的浮动按钮负责展开，展开后浮在对话之上而不是挤压它。首次访问按浏览器 UA 自动选择布局。更新在容器内拉取源码、应用当前补丁、编译并原子替换，失败时保留旧版本，不需要 SSH。更新和“重启 DSH”都只替换 Supervisor 管理的 DSH 子进程，不重启 Debian 容器或 Nginx。设置窗口顶部还提供 WebUI 配置文件编辑器，编辑器固定读写 `/data/dsh/settings.yaml`，保存前校验 YAML 并保护并发修改。
+镜像自带 `dsh-docker-control`，首次启动空 profile 时自动恢复。它在设置窗口左侧导航新增“DSH 环境”页（与“通用设置 / 模型 / 插件 / Agent 预设”同级），显示当前与最新 DSH 版本，提供“检查更新”“立即更新”，以及“电脑 UI / 手机 UI”布局选择器。打开设置不会自动联网，只有按下“检查更新”才会查询 npm registry 上的最新版本；手机布局把设置面板改为全屏、左侧导航改为可横向滑动的顶部标签条，并把首页侧边栏改成抽屉：收起时完全让位给对话区，左上角的浮动按钮负责展开，展开后浮在对话之上而不是挤压它。首次访问按浏览器 UA 自动选择布局。更新在容器内从 npm 安装目标版本、对产物重新应用当前补丁并原子替换，失败时保留旧版本，不需要 SSH。更新和“重启 DSH”都只替换 Supervisor 管理的 DSH 子进程，不重启 Debian 容器或 Nginx。设置窗口顶部还提供 WebUI 配置文件编辑器，编辑器固定读写 `/data/dsh/settings.yaml`，保存前校验 YAML 并保护并发修改。
 
 容器内 Agent 应使用 `manage-dsh-plugin` 安装、更新或删除插件。它会在 `/data/dsh/profiles` 下创建同卷临时 profile，允许 pnpm 执行插件所需的构建脚本，通过配置、入口解析和实际导入验证后再原子替换正式 profile。正常结束会立即删除临时 profile 和本次 pnpm Git 构建临时目录；断电或强制终止留下的事务和旧备份会在下一次 DSH 启动或插件操作时自动恢复、清理。pnpm 的内容寻址 store 是 `/data/home` 下有意保留的下载缓存，可在需要释放空间时执行 `pnpm store prune`。
 

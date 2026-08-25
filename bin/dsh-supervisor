@@ -38,7 +38,7 @@ prepare_dsh() {
     return
   fi
   [ ! -x /usr/local/bin/cleanup-dsh-plugin-transactions ] || /usr/local/bin/cleanup-dsh-plugin-transactions
-  [ ! -f /usr/local/bin/link-modules.mjs ] || node /usr/local/bin/link-modules.mjs
+  [ ! -f /usr/local/bin/prepare-profile-modules.mjs ] || node /usr/local/bin/prepare-profile-modules.mjs
   [ ! -f /usr/local/bin/install-docker-control.mjs ] || node /usr/local/bin/install-docker-control.mjs
   [ ! -f /usr/local/bin/patch-profile-plugins.mjs ] || node /usr/local/bin/patch-profile-plugins.mjs
 }

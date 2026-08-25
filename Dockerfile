@@ -4,47 +4,6 @@ ARG NODE_IMAGE=node:24-trixie-slim
 
 FROM ${NODE_IMAGE} AS node-runtime
 
-FROM ${DEBIAN_IMAGE} AS builder
-
-COPY --from=node-runtime /usr/local/ /usr/local/
-
-ARG UPSTREAM_REPO=https://github.com/deepseek-ai/deepseek-harness.git
-ARG UPSTREAM_REF=master
-
-ENV CI=true
-WORKDIR /app/dsh
-
-# 开启 APT 持久化缓存：不删除 .deb 安装包，挂载本地持久缓存
-RUN rm -f /etc/apt/apt.conf.d/docker-clean \
-    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates python3 make g++ \
-    && npm install -g pnpm@11.7.0 esbuild
-
-RUN git clone --depth 1 -b ${UPSTREAM_REF} ${UPSTREAM_REPO} .
-
-# 挂载 pnpm 本地持久化 store 缓存
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile
-
-COPY patches/ /tmp/dsh-patches/
-COPY bin/apply-dsh-patches.sh /tmp/apply-dsh-patches
-COPY bin/write-dsh-metadata.mjs /tmp/write-dsh-metadata.mjs
-RUN chmod +x /tmp/apply-dsh-patches \
-    && /tmp/apply-dsh-patches /app/dsh /tmp/dsh-patches
-
-ENV NODE_OPTIONS="--max-old-space-size=2048"
-RUN --mount=type=cache,target=/app/dsh/node_modules/.cache \
-    pnpm run build:official
-
-COPY bin/build-fix.mjs /tmp/build-fix.mjs
-RUN DSH_BUILD_APP_DIR=/app/dsh NODE_PATH=/usr/local/lib/node_modules node /tmp/build-fix.mjs \
-    && node /tmp/write-dsh-metadata.mjs /app/dsh /tmp/dsh-patches /app/dsh/DSH-BUILD-METADATA.json \
-    && rm -rf /tmp/build-fix.mjs /tmp/write-dsh-metadata.mjs /tmp/apply-dsh-patches \
-      /tmp/dsh-patches .git docs .agents examples test* **/*.tsbuildinfo node_modules/.cache
-
 FROM ${DEBIAN_IMAGE} AS runtime
 
 # image.source 让 GHCR 自动把包关联到本仓库，包页面才会显示 README 并继承
@@ -52,9 +11,6 @@ FROM ${DEBIAN_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="dsh-docker" \
       org.opencontainers.image.source="https://github.com/univers629/dsh-docker" \
       org.opencontainers.image.licenses="MIT"
-
-ARG UPSTREAM_REPO=https://github.com/deepseek-ai/deepseek-harness.git
-ARG UPSTREAM_REF=master
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 
@@ -80,16 +36,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
        gcc \
        g++ \
     && ln -s /usr/bin/python3 /usr/local/bin/python \
-    && npm install -g pnpm@11.7.0 esbuild \
+    && npm install -g pnpm@11.7.0 \
     && npm cache clean --force
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-COPY --from=builder /app/dsh /app/dsh
-COPY bin/apply-dsh-patches.sh /usr/local/bin/apply-dsh-patches
+
+COPY bin/install-dsh-runtime.sh /usr/local/bin/install-dsh-runtime
 COPY bin/update-dsh.sh /usr/local/bin/update-dsh
+COPY bin/apply-dsh-artifact-patches.mjs /usr/local/lib/dsh/apply-dsh-artifact-patches.mjs
 COPY bin/write-dsh-metadata.mjs /usr/local/lib/dsh/write-dsh-metadata.mjs
 COPY bin/write-dsh-update-status.mjs /usr/local/lib/dsh/write-dsh-update-status.mjs
-COPY bin/build-fix.mjs /usr/local/lib/dsh/build-fix.mjs
 COPY patches/ /etc/dsh-patches/
 COPY bin/dsh /usr/local/bin/dsh
 COPY bin/dsh-supervisor /usr/local/bin/dsh-supervisor
@@ -97,7 +53,7 @@ COPY bin/restart-dsh /usr/local/bin/restart-dsh
 COPY bin/manage-dsh-plugin /usr/local/bin/manage-dsh-plugin
 COPY bin/cleanup-dsh-plugin-transactions /usr/local/bin/cleanup-dsh-plugin-transactions
 COPY bin/validate-dsh-profile.mjs /usr/local/lib/dsh/validate-dsh-profile.mjs
-COPY bin/link-modules.mjs /usr/local/bin/link-modules.mjs
+COPY bin/prepare-profile-modules.mjs /usr/local/bin/prepare-profile-modules.mjs
 COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY bin/configure-nginx-auth /usr/local/bin/configure-nginx-auth
 COPY bin/patch-profile-plugins.mjs /usr/local/bin/patch-profile-plugins.mjs
@@ -106,21 +62,31 @@ COPY dsh-home/ /usr/local/share/dsh-home/
 COPY dsh-home/docker-control/ /opt/dsh-docker-control/
 COPY nginx/dsh-nginx.conf /usr/local/share/dsh/nginx.conf
 
-RUN cd /opt/dsh-docker-control \
+RUN chmod +x /usr/local/bin/dsh /usr/local/bin/dsh-supervisor /usr/local/bin/restart-dsh \
+      /usr/local/bin/manage-dsh-plugin /usr/local/bin/cleanup-dsh-plugin-transactions \
+      /usr/local/bin/entrypoint.sh /usr/local/bin/configure-nginx-auth \
+      /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs \
+      /usr/local/bin/install-dsh-runtime /usr/local/bin/update-dsh \
+    && cd /opt/dsh-docker-control \
     && npm install --omit=dev --no-package-lock \
     && npm cache clean --force \
     && mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
        /usr/bin /usr/sbin /usr/lib /usr/share /usr/include /usr/libexec \
        /usr/games /usr/src /var/lib /var/cache /var/backups \
-    && chmod +x /usr/local/bin/dsh /usr/local/bin/dsh-supervisor /usr/local/bin/restart-dsh /usr/local/bin/manage-dsh-plugin /usr/local/bin/cleanup-dsh-plugin-transactions /usr/local/bin/entrypoint.sh /usr/local/bin/configure-nginx-auth /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs /usr/local/bin/apply-dsh-patches /usr/local/bin/update-dsh \
     && printf '%s\n' 'export PATH="/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:$PATH"' > /etc/profile.d/dsh-toolchain.sh
+
+# DSH 本体是上游发布在 npm 上的预构建包，装完直接对产物打补丁，不克隆源码也不编译。
+# 默认装 latest：上游改动导致补丁锚点失效时这一步会直接失败，而不是静默产出一个
+# 没打上补丁的镜像。
+ARG DSH_VERSION=latest
+ENV DSH_PATCH_DIR=/etc/dsh-patches \
+    DSH_NPM_PACKAGE=@deepseek-ai/dsh \
+    DSH_APP_DIR=/app/dsh
+RUN /usr/local/bin/install-dsh-runtime /app/dsh "${DSH_VERSION}" \
+    && npm cache clean --force
 
 ENV DSH_HOME=/data/dsh \
     DSH_AGENTS_HOME=/data/agents \
-    DSH_UPSTREAM_REPO=${UPSTREAM_REPO} \
-    DSH_UPSTREAM_REF=${UPSTREAM_REF} \
-    DSH_PATCH_DIR=/etc/dsh-patches \
-    DSH_APP_DIR=/app/dsh \
     DSH_UPDATE_STATE=/data/dsh/update \
     DSH_NGINX_CONFIG=/usr/local/share/dsh/nginx.conf \
     HOME=/data/home \
@@ -135,8 +101,11 @@ WORKDIR /workspace
 
 EXPOSE 3080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+# Nginx 的 /healthz 直接返回 204，只能证明入口活着：DSH 崩溃循环时容器依然是
+# healthy。所以这里同时探 Nginx 入口和 DSH 自己的回环监听端口，DSH 起不来就必须
+# 变成 unhealthy。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "const dshPort = process.env.DSH_WEB_PORT || '3081';const check = (url) => fetch(url).then((response) => {if (!response.ok) throw new Error(url + ' ' + response.status)});Promise.all([check('http://127.0.0.1:3080/healthz'), check('http://127.0.0.1:' + dshPort + '/')]).then(() => process.exit(0)).catch(() => process.exit(1))"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["web"]

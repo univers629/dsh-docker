@@ -84,8 +84,8 @@ try {
   assert.equal(typeof infoBody.system.nodeVersion, 'string')
 
   // The remote check is a privileged, loopback-only GET, and it reports the
-  // failure instead of pretending the image is current when the network or the
-  // remote is unavailable (here: a remote that cannot resolve).
+  // failure instead of pretending the runtime is current when the network or
+  // the registry is unavailable (here: a registry host that cannot resolve).
   const latestRoute = routes.find(route => route.path.endsWith('/update/latest'))
   const latestMethodResponse = response()
   await latestRoute.handler({ method: 'POST', socket: { remoteAddress: '127.0.0.1' }, headers: {} }, latestMethodResponse)
@@ -100,7 +100,7 @@ try {
   }, latestForbiddenResponse)
   assert.equal(latestForbiddenResponse.status, 403)
 
-  process.env.DSH_UPSTREAM_REPO = 'https://dsh-docker-control.invalid/missing.git'
+  process.env.DSH_NPM_REGISTRY = 'https://dsh-docker-control.invalid'
   const latestResponse = response()
   await latestRoute.handler({
     method: 'GET',
@@ -110,7 +110,7 @@ try {
   }, latestResponse)
   assert.equal(latestResponse.status, 502)
   assert.equal(JSON.parse(latestResponse.body).ok, false)
-  delete process.env.DSH_UPSTREAM_REPO
+  delete process.env.DSH_NPM_REGISTRY
 
   const updateStatusRoute = routes.find(route => route.path.endsWith('/update/status'))
   const updateStatusResponse = response()

@@ -1,15 +1,17 @@
 #!/bin/sh
+# 容器内更新 DSH：安装上游发布在 npm 上的预构建包，重新打产物补丁，
+# 原子替换运行时目录，再让 Supervisor 只重启 DSH 进程（容器保持存活）。
+#
+# 这里不克隆源码、不编译，所以 1c1g 机器也能在几分钟内更新完。
 set -eu
 
-SOURCE_REPO=${DSH_UPSTREAM_REPO:-https://github.com/deepseek-ai/deepseek-harness.git}
-SOURCE_REF=${DSH_UPSTREAM_REF:-master}
-PATCH_DIR=${DSH_PATCH_DIR:-/etc/dsh-patches}
+VERSION=${1:-${DSH_UPDATE_VERSION:-latest}}
+PACKAGE=${DSH_NPM_PACKAGE:-@deepseek-ai/dsh}
 APP_DIR=${DSH_APP_DIR:-/app/dsh}
 STATE_DIR=${DSH_UPDATE_STATE:-/data/dsh/update}
 STATE_FILE="$STATE_DIR/status.json"
-BUILD_FIX=${DSH_BUILD_FIX:-/usr/local/lib/dsh/build-fix.mjs}
-METADATA_WRITER=${DSH_METADATA_WRITER:-/usr/local/lib/dsh/write-dsh-metadata.mjs}
 STATUS_WRITER=${DSH_STATUS_WRITER:-/usr/local/lib/dsh/write-dsh-update-status.mjs}
+INSTALLER=${DSH_RUNTIME_INSTALLER:-/usr/local/bin/install-dsh-runtime}
 NGINX_CONFIG=${DSH_NGINX_CONFIG:-/usr/local/share/dsh/nginx.conf}
 RESTART_EXECUTABLE=${DSH_RESTART_EXECUTABLE:-/usr/local/bin/restart-dsh}
 
@@ -37,8 +39,7 @@ acquire_lock() {
     exit 75
   fi
 
-  # A killed container can leave the lock directory in the persistent state
-  # mount. It is safe to reclaim it only when its recorded owner is gone.
+  # 容器被强杀会把锁目录留在持久挂载里。只有记录的持有者已经消失时才回收。
   rm -rf "$LOCK_DIR"
   mkdir "$LOCK_DIR"
   printf '%s\n' "$$" > "$LOCK_DIR/pid"
@@ -53,43 +54,13 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 WORK_DIR="$(mktemp -d /tmp/dsh-update.XXXXXX)"
-SOURCE_DIR="$WORK_DIR/source"
-write_status running '正在拉取 DSH 源码'
+STAGE_DIR="$WORK_DIR/runtime"
 
-if ! git clone --depth 1 --branch "$SOURCE_REF" "$SOURCE_REPO" "$SOURCE_DIR"; then
-  write_status failed '拉取 DSH 源码失败'
+write_status running "正在安装 $PACKAGE@$VERSION 并重新打补丁"
+if ! "$INSTALLER" "$STAGE_DIR" "$VERSION"; then
+  write_status failed 'DSH 安装或补丁失败，当前版本保持不变'
   exit 1
 fi
-
-write_status running '正在应用 DSH 补丁'
-if ! /usr/local/bin/apply-dsh-patches "$SOURCE_DIR" "$PATCH_DIR"; then
-  write_status failed 'DSH 补丁无法应用，当前版本保持不变'
-  exit 1
-fi
-
-cd "$SOURCE_DIR"
-write_status running '正在安装构建依赖'
-if ! pnpm install --frozen-lockfile; then
-  write_status failed 'DSH 依赖安装失败，当前版本保持不变'
-  exit 1
-fi
-
-write_status running '正在编译 DSH'
-if ! NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}" pnpm run build:official; then
-  write_status failed 'DSH 编译失败，当前版本保持不变'
-  exit 1
-fi
-if ! DSH_BUILD_APP_DIR="$SOURCE_DIR" NODE_PATH="$SOURCE_DIR/node_modules:/usr/local/lib/node_modules" node "$BUILD_FIX"; then
-  write_status failed 'DSH 构建整理失败，当前版本保持不变'
-  exit 1
-fi
-
-if ! node "$METADATA_WRITER" "$SOURCE_DIR" "$PATCH_DIR" "$SOURCE_DIR/DSH-BUILD-METADATA.json"; then
-  write_status failed 'DSH 版本元数据生成失败，当前版本保持不变'
-  exit 1
-fi
-rm -rf "$SOURCE_DIR/.git" "$SOURCE_DIR/docs" "$SOURCE_DIR/.agents" "$SOURCE_DIR/examples" "$SOURCE_DIR/node_modules/.cache"
-find "$SOURCE_DIR" -name '*.tsbuildinfo' -delete 2>/dev/null || true
 
 write_status running '正在原子替换 DSH 并检查 Nginx 配置'
 OLD_DIR="$WORK_DIR/previous"
@@ -97,7 +68,7 @@ if ! mv "$APP_DIR" "$OLD_DIR"; then
   write_status failed '无法准备替换 DSH 目录，当前版本保持不变'
   exit 1
 fi
-if ! mv "$SOURCE_DIR" "$APP_DIR"; then
+if ! mv "$STAGE_DIR" "$APP_DIR"; then
   mv "$OLD_DIR" "$APP_DIR" 2>/dev/null || true
   write_status failed '无法安装新 DSH，当前版本已恢复'
   exit 1
@@ -110,7 +81,8 @@ if ! nginx -t -c "$NGINX_CONFIG"; then
   exit 1
 fi
 
-write_status success 'DSH 更新完成，正在重启服务'
+NEW_VERSION="$(node -e 'const {readFileSync}=require("node:fs");try{process.stdout.write(JSON.parse(readFileSync(process.argv[1],"utf8")).version??"unknown")}catch{process.stdout.write("unknown")}' "$APP_DIR/DSH-BUILD-METADATA.json" 2>/dev/null || printf 'unknown')"
+write_status success "DSH 已更新到 $NEW_VERSION，正在重启 DSH 进程"
 
 if [ "${DSH_UPDATE_NO_RESTART:-false}" != true ]; then
   if ! "$RESTART_EXECUTABLE" check; then

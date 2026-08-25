@@ -58,9 +58,14 @@ for (const readme of [readmeZh, readmeEn]) {
   )
 }
 assert.match(compose, /\.\/data\/auth:\/opt\/dsh-auth:ro/)
-assert.match(compose, /127\.0\.0\.1:3080\/healthz/)
+// The healthcheck must fail when DSH dies, so it probes DSH's own loopback
+// listener next to the unconditional Nginx 204.
+for (const [label, source] of [['compose', compose], ['Dockerfile', dockerfile]]) {
+  assert.match(source, /127\.0\.0\.1:3080\/healthz/, `${label} must keep probing the Nginx entry`)
+  assert.match(source, /DSH_WEB_PORT \|\| '3081'/, `${label} must probe the DSH web port`)
+  assert.match(source, /'http:\/\/127\.0\.0\.1:' \+ dshPort \+ '\/'/, `${label} must probe DSH over HTTP`)
+}
 assert.match(dockerfile, /apache2-utils/)
-assert.match(dockerfile, /127\.0\.0\.1:3080\/healthz/)
 
 assert.match(entrypoint, /\/usr\/local\/bin\/configure-nginx-auth/)
 assert.match(authConfig, /DSH_ACCESS_MODE:-local/)

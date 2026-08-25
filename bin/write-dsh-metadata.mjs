@@ -1,56 +1,41 @@
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { execFileSync } from 'node:child_process'
 
-const [sourceDir, patchDir, outputPath] = process.argv.slice(2)
-if (!sourceDir || !patchDir || !outputPath) {
-  console.error('usage: write-dsh-metadata.mjs <source-dir> <patch-dir> <output>')
+const [appDir, patchDir, outputPath] = process.argv.slice(2)
+if (!appDir || !patchDir || !outputPath) {
+  console.error('usage: write-dsh-metadata.mjs <app-dir> <patch-dir> <output>')
   process.exit(2)
 }
 
-function packageVersion() {
-  const candidates = [
-    join(sourceDir, 'package.json'),
-    join(sourceDir, 'apps', 'cli', 'package.json'),
-    join(sourceDir, 'packages', 'cli', 'package.json'),
-  ]
-  for (const file of candidates) {
-    if (!existsSync(file)) continue
-    try {
-      const packageJson = JSON.parse(readFileSync(file, 'utf8'))
-      if (typeof packageJson.version === 'string' && packageJson.version.length > 0) {
-        return packageJson.version
-      }
-    } catch {}
+const packageName = process.env.DSH_NPM_PACKAGE ?? '@deepseek-ai/dsh'
+const packageRoot = join(appDir, 'lib', 'node_modules', packageName)
+
+function installedVersion() {
+  const manifest = join(packageRoot, 'package.json')
+  if (!existsSync(manifest)) return 'unknown'
+  try {
+    const parsed = JSON.parse(readFileSync(manifest, 'utf8'))
+    return typeof parsed.version === 'string' && parsed.version.length > 0 ? parsed.version : 'unknown'
+  } catch {
+    return 'unknown'
   }
-  return 'unknown'
 }
 
-function patchHash() {
-  const hash = createHash('sha256')
-  const files = readdirSync(patchDir, { withFileTypes: true })
-    .filter(entry => entry.isFile() && entry.name.endsWith('.patch'))
-    .map(entry => entry.name)
-    .sort()
-  for (const file of files) {
-    hash.update(file)
-    hash.update('\0')
-    hash.update(readFileSync(join(patchDir, file)))
-    hash.update('\0')
-  }
-  return hash.digest('hex')
+// 补丁集指纹只取定义文件本身：产物补丁的全部内容都在这一个文件里，
+// 所以它的哈希就是“这套运行时被改成了什么样”的完整答案。
+function patchsetHash() {
+  const definitions = join(patchDir, 'artifact-patches.mjs')
+  if (!existsSync(definitions)) return 'unknown'
+  return createHash('sha256').update(readFileSync(definitions)).digest('hex')
 }
-
-let commit = 'unknown'
-try {
-  commit = execFileSync('git', ['-C', sourceDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
-} catch {}
 
 const metadata = {
-  version: packageVersion(),
-  upstreamCommit: commit,
-  patchsetHash: patchHash(),
-  builtAt: new Date().toISOString(),
+  package: packageName,
+  version: installedVersion(),
+  source: 'npm',
+  entry: join('lib', 'node_modules', packageName, 'lib', 'bin.js'),
+  patchsetHash: patchsetHash(),
+  installedAt: new Date().toISOString(),
 }
 writeFileSync(outputPath, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o644 })

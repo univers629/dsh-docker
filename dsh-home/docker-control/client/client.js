@@ -233,7 +233,7 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       versionTitle: 'DSH 版本',
       currentVersion: '当前版本',
       latestVersion: '最新版本',
-      upstreamRef: '上游分支',
+      packageLabel: 'npm 包',
       notChecked: '未检查',
       loading: '正在读取…',
       checkUpdate: '检查更新',
@@ -241,7 +241,7 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       upToDate: '已是最新版本',
       updateAvailableText: '有新版本可用',
       checkFailed: '检查更新失败',
-      updateHint: '打开本页不会自动联网检查；更新会在容器内重新拉取源码并编译，完成后 DSH 自行重启，容器不会重建。',
+      updateHint: '打开本页不会自动联网检查；更新会在容器内从 npm 安装上游预构建包并重新打上本项目的补丁，完成后只重启 DSH 进程，容器和你 apt 装的工具链都保留。',
       layoutTitle: '界面布局',
       layoutDesktop: '电脑 UI',
       layoutMobile: '手机 UI',
@@ -249,10 +249,10 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       openSidebar: '展开侧边栏',
       systemTitle: '容器环境',
       updateDsh: '立即更新',
-      confirmUpdate: '确认更新 DSH？构建完成后服务会重启。',
-      updateQueued: '正在拉取源码…',
-      updateInstalling: '正在安装构建依赖…',
-      updateBuilding: '正在编译 DSH…',
+      confirmUpdate: '确认更新 DSH？安装完成后 DSH 进程会重启。',
+      updateQueued: '正在准备更新…',
+      updateInstalling: '正在从 npm 安装预构建包并打补丁…',
+      updateSwapping: '正在替换运行时并校验 Nginx 配置…',
       updateRestarting: '正在重启 DSH…',
       updateSuccess: 'DSH 已更新并重启',
       updateFailed: 'DSH 更新失败',
@@ -283,7 +283,7 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       versionTitle: 'DSH version',
       currentVersion: 'Installed',
       latestVersion: 'Latest',
-      upstreamRef: 'Upstream ref',
+      packageLabel: 'npm package',
       notChecked: 'Not checked',
       loading: 'Reading…',
       checkUpdate: 'Check for updates',
@@ -291,7 +291,7 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       upToDate: 'Up to date',
       updateAvailableText: 'A newer version is available',
       checkFailed: 'Update check failed',
-      updateHint: 'Opening this page never checks online. An update re-clones and rebuilds DSH inside the container and restarts DSH only — the container itself is never rebuilt.',
+      updateHint: 'Opening this page never checks online. An update installs the upstream prebuilt packages from npm inside the container, re-applies this project\'s patches, and restarts only the DSH process — the container and the toolchains you installed with apt are kept.',
       layoutTitle: 'Interface layout',
       layoutDesktop: 'Desktop UI',
       layoutMobile: 'Phone UI',
@@ -299,10 +299,10 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       openSidebar: 'Open the sidebar',
       systemTitle: 'Container environment',
       updateDsh: 'Update now',
-      confirmUpdate: 'Update DSH? The service will restart after the build completes.',
-      updateQueued: 'Fetching DSH source…',
-      updateInstalling: 'Installing build dependencies…',
-      updateBuilding: 'Building DSH…',
+      confirmUpdate: 'Update DSH? The DSH process restarts once the install completes.',
+      updateQueued: 'Preparing the update…',
+      updateInstalling: 'Installing the prebuilt packages from npm and applying patches…',
+      updateSwapping: 'Swapping the runtime and validating the Nginx configuration…',
       updateRestarting: 'Restarting DSH…',
       updateSuccess: 'DSH updated and restarted',
       updateFailed: 'DSH update failed',
@@ -367,10 +367,14 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       return String(cause && cause.message ? cause.message : cause)
     }
 
-    function formatVersion(version, commit) {
-      const label = typeof version === 'string' && version.length > 0 ? version : 'unknown'
-      if (typeof commit !== 'string' || !/^[0-9a-f]{7,40}$/.test(commit)) return label
-      return `${label} (${commit.slice(0, 12)})`
+    function formatVersion(version) {
+      return typeof version === 'string' && version.length > 0 ? version : 'unknown'
+    }
+
+    /** 运行时是哪个 npm 包、跟哪个 dist-tag。检查前 tag 未知，只显示包名。 */
+    function formatPackage(name, tag) {
+      const label = typeof name === 'string' && name.length > 0 ? name : '@deepseek-ai/dsh'
+      return typeof tag === 'string' && tag.length > 0 ? `${label} (${tag})` : label
     }
 
     const cardStyle = {
@@ -659,8 +663,10 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
                 waitForBoot(previousBoot)
                 return
               }
-              if (body.message === '正在安装构建依赖') setPhase('installing')
-              else if (body.message === '正在编译 DSH') setPhase('building')
+              // update-dsh 的状态文案就是进度来源：安装阶段最长，替换阶段最短。
+              const message = typeof body.message === 'string' ? body.message : ''
+              if (message.startsWith('正在安装')) setPhase('installing')
+              else if (message.startsWith('正在原子替换')) setPhase('swapping')
               else setPhase('running')
               window.setTimeout(poll, 1000)
             })
@@ -699,12 +705,12 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
 
       const currentVersion = infoPhase === 'loading'
         ? translate(t, 'loading')
-        : formatVersion(info?.dsh?.version, info?.dsh?.upstreamCommit)
+        : formatVersion(info?.dsh?.version)
       const latestVersion = checking
         ? translate(t, 'checking')
         : latest === null
           ? translate(t, 'notChecked')
-          : formatVersion(latest.latest?.version, latest.latest?.commit)
+          : formatVersion(latest.latest?.version)
       const verdict = latest === null || checking
         ? null
         : latest.updateAvailable === true
@@ -716,8 +722,8 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
         ? translate(t, 'updateQueued')
         : phase === 'installing'
           ? translate(t, 'updateInstalling')
-          : phase === 'building'
-            ? translate(t, 'updateBuilding')
+          : phase === 'swapping'
+            ? translate(t, 'updateSwapping')
             : phase === 'restarting'
               ? translate(t, 'updateRestarting')
               : null
@@ -731,8 +737,8 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
             h('dd', { key: 'cv', style: fieldValueStyle }, currentVersion),
             h('dt', { key: 'lk', style: fieldLabelStyle }, translate(t, 'latestVersion')),
             h('dd', { key: 'lv', style: fieldValueStyle }, latestVersion),
-            h('dt', { key: 'rk', style: fieldLabelStyle }, translate(t, 'upstreamRef')),
-            h('dd', { key: 'rv', style: fieldValueStyle }, latest?.ref || info?.dsh?.upstreamRef || translate(t, 'notChecked')),
+            h('dt', { key: 'rk', style: fieldLabelStyle }, translate(t, 'packageLabel')),
+            h('dd', { key: 'rv', style: fieldValueStyle }, formatPackage(info?.dsh?.package, latest?.tag)),
           ),
           verdict === null ? null : h('p', { role: 'status', style: { margin: 0, fontSize: '13px', color: latest?.updateAvailable === true ? 'var(--dsw-alias-label-primary, #111827)' : 'var(--dsw-alias-label-secondary, #6b7280)' } }, verdict),
           h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px' } },

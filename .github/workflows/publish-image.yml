@@ -1,14 +1,14 @@
 name: publish-image
 
-# 在 GitHub 的原生 amd64 和 arm64 runner 上分别构建，再合并成一个多架构清单，
-# 这样 1 核小 VPS 不必自己编译 DSH，安装时直接拉取即可。
+# 在 GitHub 的原生 amd64 和 arm64 runner 上分别构建，再合并成一个多架构清单。
+# DSH 本体是 npm 上的预构建包，所以构建的主要成本是 apt 和 npm 下载，不再编译。
 on:
   workflow_dispatch:
     inputs:
-      upstream_ref:
-        description: 要构建的 DSH 上游分支或标签
+      dsh_version:
+        description: 要安装的 DSH npm 版本（默认 latest）
         required: false
-        default: master
+        default: latest
   push:
     tags:
       - 'v*'
@@ -34,14 +34,14 @@ jobs:
             platform: linux/arm64
             slug: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
 
-      # DSH 的 pnpm workspace 加两个镜像阶段很占空间，先腾出预装的 SDK。
+      # 镜像解包后仍有 1 GB 级别，先腾出预装的 SDK 免得 runner 磁盘不够。
       - name: Free disk space
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
@@ -64,7 +64,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           build-args: |
-            UPSTREAM_REF=${{ github.event.inputs.upstream_ref || 'master' }}
+            DSH_VERSION=${{ github.event.inputs.dsh_version || 'latest' }}
           provenance: false
           sbom: false
           cache-from: type=gha,scope=${{ matrix.slug }}

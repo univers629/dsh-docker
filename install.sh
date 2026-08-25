@@ -524,7 +524,7 @@ configure_dsh() {
     echo
     echo "Debian 13 镜像来源："
     echo "1) 拉取公开预构建镜像（推荐：不在本机编译 DSH，安装耗时约等于下载耗时）"
-    echo "2) 在本机构建镜像（用当前工程源码编译，1 核 1G 机器可能超过 20 分钟）"
+    echo "2) 在本机构建镜像（用当前工程 Dockerfile 现场构建，不编译 DSH 源码，约几分钟）"
     prompt "请选择" "$default_route"
     case "$PROMPT_RESULT" in
       1) image_source=prebuilt ;;
