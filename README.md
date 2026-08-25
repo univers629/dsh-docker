@@ -96,7 +96,9 @@ server {
 }
 ```
 
-使用 Docker 面板反代时，在安装器中选择 Docker 容器/面板并填写面板网络名（通常是 `dpanel-local`），上游使用 `http://dsh:3080`。宿主机反代或 SSH 隧道使用 `http://127.0.0.1:3080`。
+使用 Docker 面板反代时，在安装器中选择 Docker 容器/面板并填写反代容器所在的网络名（dPanel 通常是 `dpanel-local`），上游使用 `http://dsh:3080`。宿主机反代或 SSH 隧道使用 `http://127.0.0.1:3080`。
+
+外部网络必须先存在，Compose 不会代建。如果反代面板还没部署，直接填一个新名字（例如 `dsh-proxy`），安装器会征求同意后创建它；之后部署反代时执行 `docker network connect dsh-proxy <反代容器名>` 接入同一网络即可。`dsh-private` 是 DSH 自己管理的内部网络名，不能填成外部网络。
 
 ## 架构与持久化
 

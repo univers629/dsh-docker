@@ -120,6 +120,31 @@ function Ask-YesNo {
     }
 }
 
+function Get-ProxyNetworkCandidates {
+    $names = @(& docker network ls --format '{{.Name}}' 2>$null)
+    return @($names | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notin @('bridge','host','none','dsh-private','dsh-docker_default') })
+}
+
+# Compose 从不代建 external 网络，它必须先存在。全新机器上反向代理面板往往还没部署，
+# 所以交互模式下允许安装器现在就建好，之后再把反代容器接进同一网络。
+function Assert-ExternalNetwork {
+    param([string]$Name, [bool]$Interactive)
+    # 已存在的网络一律照旧使用，避免改动老部署已经写进 .env 的配置。
+    docker network inspect $Name *> $null
+    if ($LASTEXITCODE -eq 0) { return }
+    if ($Name -eq 'dsh-private') {
+        throw "dsh-private 是 DSH 自己管理的内部网络名，不能当作外部网络。`n请填写反向代理容器所在的网络名，或换一个新名字（例如 dsh-proxy）。"
+    }
+    if ($Interactive -and (Ask-YesNo "外部 Docker 网络 $Name 还不存在，现在创建它" $true)) {
+        & docker network create --label dsh.created-by=dsh-docker-installer $Name | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "创建 Docker 网络 $Name 失败。" }
+        Write-Host "==> 已创建 Docker 网络 $Name。" -ForegroundColor Green
+        Write-Host "    部署反向代理后执行：docker network connect $Name <反代容器名>"
+        return
+    }
+    throw "外部 Docker 网络 $Name 不存在。`n创建：docker network create $Name`n接入反代：docker network connect $Name <反代容器名>"
+}
+
 function Get-DockerEngineOs {
     try {
         $engineOs = (& docker info --format '{{.OSType}}' 2>$null | Select-Object -Last 1)
@@ -217,6 +242,13 @@ function Remove-DshProject {
     foreach ($id in $volumeIds) { if ($id) { & docker volume rm -f $id *> $null } }
     $networkIds = @(& docker network ls -q --filter "label=com.docker.compose.project=$projectName" 2>$null)
     foreach ($id in $networkIds) { if ($id) { & docker network rm $id *> $null } }
+    $installerNetworks = @(& docker network ls -q --filter 'label=dsh.created-by=dsh-docker-installer' 2>$null)
+    foreach ($id in $installerNetworks) {
+        if (-not $id) { continue }
+        # 只删安装器自己建的代理网络，且必须没有任何容器还接在上面。
+        $attached = (& docker network inspect --format '{{ len .Containers }}' $id 2>$null | Select-Object -Last 1)
+        if ($attached -and $attached.Trim() -eq '0') { & docker network rm $id *> $null }
+    }
     $defaultNetworkProject = (& docker network inspect --format '{{ index .Labels "com.docker.compose.project" }}' dsh-private 2>$null | Select-Object -Last 1)
     if ($defaultNetworkProject -and $defaultNetworkProject.Trim() -eq $projectName) { & docker network rm dsh-private *> $null }
     & docker builder prune -af | Out-Host
@@ -497,6 +529,15 @@ $bind = if ($BindHost) { $BindHost } else { Get-ComposeEnvValue $envFile 'DSH_BI
 $trusted = if ($TrustedHosts) { $TrustedHosts } else { Get-ComposeEnvValue $envFile 'DSH_TRUSTED_HOSTS' '' }
 $networkName = if ($Network) { $Network } else { Get-ComposeEnvValue $envFile 'DSH_DOCKER_NETWORK' 'dsh-private' }
 $networkExternalValue = if ($NetworkExternal) { 'true' } elseif ($NetworkInternal) { 'false' } else { Get-ComposeEnvValue $envFile 'DSH_DOCKER_NETWORK_EXTERNAL' 'false' }
+# 兼容旧配置：以前的向导会把 DSH 自管的 dsh-private 默认填成"外部网络"。
+# 如果这个网络确实是 Compose 自己建的，就改回内部管理，避免安装器直接报错。
+if ($networkName -eq 'dsh-private' -and $networkExternalValue -eq 'true' -and -not $NetworkExternal) {
+    $legacyProject = (& docker network inspect --format '{{ index .Labels "com.docker.compose.project" }}' dsh-private 2>$null | Select-Object -Last 1)
+    if ($legacyProject -and $legacyProject.Trim() -and $legacyProject.Trim() -ne '<no value>') {
+        Write-Host '==> 旧配置把 dsh-private 记成了外部网络；已改回由 DSH 自己管理（网络名不变）。'
+        $networkExternalValue = 'false'
+    }
+}
 $basicUser = $env:DSH_BASIC_AUTH_USER
 $basicPassword = $env:DSH_BASIC_AUTH_PASSWORD
 $writeBasicAuth = $false
@@ -513,8 +554,23 @@ if ($DshAction -in @('install','configure')) {
         $proxyRoute = Ask '反向代理在哪里：1=宿主机 2=Docker 容器/面板' $defaultRoute
         if ($proxyRoute -eq '2') {
             docker network inspect dpanel-local *> $null
-            if ($LASTEXITCODE -eq 0 -and -not $Network -and $networkName -eq 'dsh-private') { $networkName = 'dpanel-local' }
-            if (-not $Network) { $networkName = Ask '反向代理使用的 Docker 网络' $networkName }
+            $dpanelExists = $LASTEXITCODE -eq 0
+            if (-not $Network) {
+                $defaultNetwork = if ($networkName -eq 'dsh-private') { '' } else { $networkName }
+                if (-not $defaultNetwork -and $dpanelExists) { $defaultNetwork = 'dpanel-local' }
+                Write-Host '    DSH 会加入这个网络，反向代理用 http://dsh:3080 访问它。'
+                if (-not $defaultNetwork) {
+                    $candidates = Get-ProxyNetworkCandidates
+                    if ($candidates.Count -gt 0) {
+                        Write-Host "    宿主机现有的网络：$($candidates -join ' ')"
+                        $defaultNetwork = $candidates[0]
+                    } else {
+                        Write-Host '    宿主机还没有可用网络：面板未部署时直接回车用 dsh-proxy，安装器会先征求同意再创建它。'
+                        $defaultNetwork = 'dsh-proxy'
+                    }
+                }
+                $networkName = Ask '反向代理所在的 Docker 网络' $defaultNetwork
+            }
             $networkExternalValue = 'true'
         } else {
             $networkName = 'dsh-private'; $networkExternalValue = 'false'; $bind = '127.0.0.1'
@@ -522,7 +578,7 @@ if ($DshAction -in @('install','configure')) {
         $bind = Ask '宿主机端口绑定地址（推荐 127.0.0.1）' $bind
     }
     if ($bind -in @('0.0.0.0','::','[::]','*')) { throw '为避免绕过认证，不能使用通配绑定地址。' }
-    if ($networkExternalValue -eq 'true') { docker network inspect $networkName *> $null; if ($LASTEXITCODE -ne 0) { throw "外部 Docker 网络 $networkName 不存在。" } }
+    if ($networkExternalValue -eq 'true') { Assert-ExternalNetwork -Name $networkName -Interactive:([bool]$interactive) }
     New-Item -ItemType Directory -Path (Join-Path (Get-Location) 'data\auth') -Force | Out-Null
     $authFile = Join-Path (Get-Location) 'data\auth\htpasswd'
     $replaceAuth = -not (Test-Path $authFile)

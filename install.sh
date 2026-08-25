@@ -328,6 +328,14 @@ delete_project() {
   while IFS= read -r id; do
     [ -n "$id" ] && DOCKER network rm "$id" >/dev/null 2>&1 || true
   done <<< "$network_ids"
+  network_ids="$(DOCKER network ls -q --filter 'label=dsh.created-by=dsh-docker-installer' 2>/dev/null || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    # 只删安装器自己建的代理网络，且必须没有任何容器还接在上面。
+    if [ "$(DOCKER network inspect --format '{{ len .Containers }}' "$id" 2>/dev/null || echo 1)" = 0 ]; then
+      DOCKER network rm "$id" >/dev/null 2>&1 || true
+    fi
+  done <<< "$network_ids"
   network_project="$(DOCKER network inspect --format '{{ index .Labels "com.docker.compose.project" }}' dsh-private 2>/dev/null || true)"
   if [ "$network_project" = "$project_name" ]; then
     DOCKER network rm dsh-private >/dev/null 2>&1 || true
@@ -426,9 +434,54 @@ get_compose_env() {
 mkdir -p data/auth
 COMPOSE_ARGS=(-f docker-compose.yml)
 
+# 列出可以作为反向代理网络的候选，排除 Docker 内置网络和 DSH 自己管理的网络。
+list_proxy_network_candidates() {
+  local name
+  DOCKER network ls --format '{{.Name}}' 2>/dev/null | while IFS= read -r name; do
+    case "$name" in
+      bridge|host|none|dsh-private|dsh-docker_default) continue ;;
+    esac
+    printf '%s\n' "$name"
+  done
+}
+
+# Compose 从不代建 external 网络，它必须先存在。全新机器上反向代理面板往往还没部署，
+# 所以交互模式下允许安装器现在就建好，之后再把反代容器接进同一网络。
+ensure_external_network() {
+  local name="$1"
+  # 已存在的网络一律照旧使用，避免改动老部署已经写进 .env 的配置。
+  if DOCKER network inspect "$name" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ "$name" = dsh-private ]; then
+    echo "[错误] dsh-private 是 DSH 自己管理的内部网络名，不能当作外部网络。" >&2
+    echo "       请填写反向代理容器所在的网络名，或换一个新名字（例如 dsh-proxy）。" >&2
+    return 1
+  fi
+  if [ "$INTERACTIVE" = true ]; then
+    echo
+    echo "[提示] 外部 Docker 网络 $name 还不存在。"
+    prompt_yes_no "现在创建它（之后把反向代理容器接入同一网络）" y
+    if [ "$PROMPT_RESULT" = true ]; then
+      if DOCKER network create --label dsh.created-by=dsh-docker-installer "$name" >/dev/null; then
+        echo "==> 已创建 Docker 网络 $name。"
+        echo "    部署反向代理后执行：docker network connect $name <反代容器名>"
+        return 0
+      fi
+      echo "[错误] 创建 Docker 网络 $name 失败。" >&2
+      return 1
+    fi
+  fi
+  echo "[错误] 外部 Docker 网络 $name 不存在。" >&2
+  echo "       创建：docker network create $name" >&2
+  echo "       接入反代：docker network connect $name <反代容器名>" >&2
+  return 1
+}
+
 configure_dsh() {
   local access_mode bind_host trusted_hosts network network_external
   local route default_route default_network keep_auth confirm_password
+  local candidates
 
   access_mode="${ACCESS_MODE_OVERRIDE:-$(get_compose_env DSH_ACCESS_MODE local)}"
   if [ "$INTERACTIVE" = true ] && [ -z "$ACCESS_MODE_OVERRIDE" ]; then
@@ -452,6 +505,18 @@ configure_dsh() {
   network="${NETWORK_OVERRIDE:-$(get_compose_env DSH_DOCKER_NETWORK dsh-private)}"
   network_external="${NETWORK_EXTERNAL_OVERRIDE:-$(get_compose_env DSH_DOCKER_NETWORK_EXTERNAL false)}"
 
+  # 兼容旧配置：以前的向导会把 DSH 自管的 dsh-private 默认填成"外部网络"。
+  # 如果这个网络确实是 Compose 自己建的，就改回内部管理，避免安装器直接报错。
+  if [ "$network" = dsh-private ] && [ "$network_external" = true ] && [ -z "$NETWORK_EXTERNAL_OVERRIDE" ]; then
+    case "$(DOCKER network inspect --format '{{ index .Labels "com.docker.compose.project" }}' dsh-private 2>/dev/null || true)" in
+      ''|'<no value>') ;;
+      *)
+        echo "==> 旧配置把 dsh-private 记成了外部网络；已改回由 DSH 自己管理（网络名不变）。"
+        network_external=false
+        ;;
+    esac
+  fi
+
   if [ "$access_mode" = local ]; then
     bind_host="${BIND_HOST_OVERRIDE:-127.0.0.1}"
     trusted_hosts="${TRUSTED_HOSTS_OVERRIDE:-}"
@@ -472,9 +537,23 @@ configure_dsh() {
         network_external="${NETWORK_EXTERNAL_OVERRIDE:-false}"
         ;;
       2)
-        default_network="$network"
-        if DOCKER network inspect dpanel-local >/dev/null 2>&1; then default_network=dpanel-local; fi
-        prompt "反向代理使用的 Docker 网络" "$default_network"
+        default_network=""
+        case "$network" in dsh-private|'') ;; *) default_network="$network" ;; esac
+        if [ -z "$default_network" ] && DOCKER network inspect dpanel-local >/dev/null 2>&1; then
+          default_network=dpanel-local
+        fi
+        echo "    DSH 会加入这个网络，反向代理用 http://dsh:3080 访问它。"
+        if [ -z "$default_network" ]; then
+          candidates="$(list_proxy_network_candidates)"
+          if [ -n "$candidates" ]; then
+            echo "    宿主机现有的网络：$(echo $candidates)"
+            default_network="$(printf '%s\n' "$candidates" | sed -n 1p)"
+          else
+            echo "    宿主机还没有可用网络：面板未部署时直接回车用 dsh-proxy，安装器会先征求同意再创建它。"
+            default_network=dsh-proxy
+          fi
+        fi
+        prompt "反向代理所在的 Docker 网络" "$default_network"
         network="$PROMPT_RESULT"
         network_external=true
         bind_host="${BIND_HOST_OVERRIDE:-127.0.0.1}"
@@ -494,8 +573,7 @@ configure_dsh() {
       ;;
   esac
 
-  if [ "$network_external" = true ] && ! DOCKER network inspect "$network" >/dev/null 2>&1; then
-    echo "[错误] 外部 Docker 网络 $network 不存在。请先在反向代理面板中创建它。" >&2
+  if [ "$network_external" = true ] && ! ensure_external_network "$network"; then
     exit 1
   fi
 
