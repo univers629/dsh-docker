@@ -10,34 +10,13 @@ A local Docker build and persistent runtime for DeepSeek Harness, with a prebuil
 
 [简体中文](README.md) · [English](README.en.md)
 
-## Recommended host sizing
-
-| Usage | CPU / RAM | Disk | Notes |
-| --- | --- | --- | --- |
-| Pull the prebuilt image (default) | 1 vCPU / 2 GB | >= 10 GB | DSH is never compiled locally, so install time is mostly download time |
-| Long-term agent playground | 2 vCPU / 4 GB | >= 20 GB | Toolchains the agent installs with apt stay in the same writable layer |
-| Build the image locally | 1 vCPU / 2 GB | >= 15 GB | Only apt system packages plus an npm install of the prebuilt DSH package; no TypeScript build |
-
-A local build no longer compiles DSH: the image installs the upstream prebuilt packages from npm and patches the published artifacts, which measured about 4 minutes end to end and produces an unpacked image of about 1.4 GB. A 1 vCPU / 1 GB VPS can build it; still configure swap and prefer the prebuilt image, which mainly saves download and apt time.
-
-### Image source
-
-The installer's first question is where the Debian 13 image comes from:
-
-1. **Prebuilt (default)**: pull `ghcr.io/univers629/dsh-docker:latest`, a single multi-arch manifest covering `linux/amd64` and `linux/arm64`.
-2. **Local build**: build from the `Dockerfile` in this checkout (apt packages plus an npm install of DSH; nothing is compiled from source).
-
-When the pull fails the installer falls back to a local build and records the real source in `.env` as `DSH_IMAGE` and `DSH_IMAGE_SOURCE`. Unattended runs use `--image-source prebuilt|build` and `--image REF`; the Windows equivalents are `-ImageSource` and `-Image`.
-
-[.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) builds each architecture on a native GitHub amd64 or arm64 runner and merges them into one multi-arch manifest. Publishing runs from a manual dispatch on the Actions page, which can pick the DSH npm version to install (`latest` by default), or from pushing a `v*` tag. Standard GitHub runners are not billed for public repositories, so there is no quota limit on how often you publish.
-
-A published image is a point-in-time snapshot. The WebUI "DSH environment" page and `./dsh.sh update` install the new prebuilt package from npm inside the container and reapply the patch set, so they only cost download and install time (about one minute in practice) instead of a source build, and the container writable layer, including the toolchains the agent installed with apt, is kept throughout.
-
-After the first publish, switch the `dsh-docker` package in GitHub Packages to public once (repository -> Packages -> Package settings -> Change visibility). New GHCR packages are private by default, so an anonymous pull on a server returns `denied` and the installer falls back to a local build.
+> Update DSH inside the container (the "DSH environment" settings page, or `./dsh.sh update`). Recreating the container or chasing image updates is unnecessary and discards the toolchains the agent installed with apt.
 
 ## Installation and configuration
 
-The installer asks what to do, how access is protected, where the reverse proxy runs, which hosts are trusted, and where the host port is bound. It writes `.env` automatically. Built-in Basic Auth stores only a bcrypt hash in `data/auth/htpasswd`. DSH and the Agent always run as container root so they can manage development tools with apt; this does not grant host root, a Docker socket, or privileged-container capabilities.
+1 vCPU / 2 GB of RAM and 10 GB of disk are enough to start; plan on 2 vCPU / 4 GB and 20 GB if the agent will keep installing toolchains inside the container. The default source is the multi-arch prebuilt image `ghcr.io/univers629/dsh-docker:latest` (covering `linux/amd64` and `linux/arm64`); when the pull fails the installer falls back to building from the `Dockerfile` in this checkout and records the real source in `.env` as `DSH_IMAGE` and `DSH_IMAGE_SOURCE`. Unattended runs use `--image-source prebuilt|build` and `--image REF`; the Windows equivalents are `-ImageSource` and `-Image`.
+
+The installer asks what to do, where the image comes from, how access is protected, where the reverse proxy runs, which hosts are trusted, and where the host port is bound. It writes `.env` automatically. Built-in Basic Auth stores only a bcrypt hash in `data/auth/htpasswd`. DSH and the Agent always run as container root so they can manage development tools with apt; this does not grant host root, a Docker socket, or privileged-container capabilities.
 
 Linux:
 
@@ -72,6 +51,16 @@ curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.
 ```
 
 Run `bash install.sh --help` inside the downloaded project directory for Linux options. On Windows, run `powershell -ExecutionPolicy Bypass -File .\install.ps1` directly.
+
+### Publishing the image
+
+[.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) builds each architecture on a native GitHub amd64 or arm64 runner and merges them into one multi-arch manifest. It publishes in three ways:
+
+- **Following upstream automatically**: a daily check at 03:17 UTC reads the `latest` dist-tag of `@deepseek-ai/dsh` on npm and builds only when that version has no image tag yet, so several upstream releases on the same day still produce at most one image.
+- **Manual dispatch**: run the workflow from the Actions page with an npm version or dist-tag (`latest` by default). Use it to republish immediately after changing project files or patches.
+- **Tag push**: push a `v*` tag.
+
+Every publish tags `latest`, `dsh-<DSH version>`, and `<date>-<commit>`, so the package page shows which DSH is inside the image. When an upstream change invalidates an artifact patch anchor the build fails instead of publishing an unpatched image. Standard runners are not billed for public repositories, and storage plus egress for public GHCR packages are not billed either. New GHCR packages are private by default: after the first publish, switch the package to public once (repository -> Packages -> Package settings -> Change visibility), otherwise an anonymous pull on a server returns `denied`.
 
 ## Daily management
 

@@ -6,12 +6,16 @@ on:
   workflow_dispatch:
     inputs:
       dsh_version:
-        description: 要安装的 DSH npm 版本（默认 latest）
+        description: 要安装的 DSH npm 版本或 dist-tag（默认 latest）
         required: false
         default: latest
   push:
     tags:
       - 'v*'
+  # 上游发布很密（RC 阶段平均每周数个版本），所以每天只检查一次 npm 上的 latest：
+  # 同一个 DSH 版本已经有对应镜像标签时直接跳过，不重复构建。
+  schedule:
+    - cron: '17 3 * * *'
 
 concurrency:
   group: publish-image
@@ -22,7 +26,54 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # 先把 dist-tag 解析成确定的版本号：镜像因此固定安装一个确切版本，标签里也能
+  # 直接看出 DSH 版本，定时检查还能靠它判断是否已经发过。
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      build: ${{ steps.pick.outputs.build }}
+    steps:
+      - name: Resolve the DSH version and decide whether to build
+        id: pick
+        env:
+          REQUESTED: ${{ github.event.inputs.dsh_version || 'latest' }}
+          # 手动触发和打标签发版总是重新构建（补丁或工程文件可能变了）；
+          # 只有定时检查才按版本去重。
+          FORCED: ${{ github.event_name != 'schedule' }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          version="$(npm view "@deepseek-ai/dsh@${REQUESTED}" version)"
+          case "$version" in '') echo 'npm 没有返回版本号。' >&2; exit 1 ;; esac
+          echo "resolved DSH version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$FORCED" = true ]; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          token="$(curl -fsSL -u "$GHCR_USER:$GHCR_TOKEN" \
+            "https://ghcr.io/token?scope=repository:${IMAGE_NAME}:pull&service=ghcr.io" | jq -r .token)"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "authorization: Bearer $token" \
+            -H 'accept: application/vnd.oci.image.index.v1+json' \
+            "https://ghcr.io/v2/${IMAGE_NAME}/manifests/dsh-${version}")"
+          if [ "$status" = 200 ]; then
+            echo "dsh-$version 已经发布过，跳过构建。"
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+          else
+            echo "dsh-$version 还没有对应镜像（清单查询返回 $status），开始构建。"
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -64,7 +115,9 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           build-args: |
-            DSH_VERSION=${{ github.event.inputs.dsh_version || 'latest' }}
+            DSH_VERSION=${{ needs.resolve.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
           provenance: false
           sbom: false
           cache-from: type=gha,scope=${{ matrix.slug }}
@@ -84,7 +137,7 @@ jobs:
           retention-days: 1
 
   merge:
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -108,8 +161,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # dsh-<版本> 让包页面直接显示镜像里装的是哪个 DSH 版本，定时检查也用它去重。
           tags: |
             type=raw,value=latest
+            type=raw,value=dsh-${{ needs.resolve.outputs.version }}
             type=raw,value={{date 'YYYYMMDD'}}-{{sha}}
             type=ref,event=tag
 
