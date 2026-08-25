@@ -92,29 +92,29 @@ const runInstall = async (target, args) => {
   })
 }
 
-const composeCall = (log, needle) => log
+const lastCall = (log, prefix, needle) => log
   .split('\n')
-  .filter((line) => line.startsWith('compose ') && line.includes(needle))
+  .filter((line) => line.startsWith(prefix) && line.includes(needle))
   .at(-1)
 
 try {
   const prebuilt = await runInstall('prebuilt-install', ['--access', 'local'])
   assert.equal(prebuilt.status, 0, `${prebuilt.stdout}\n${prebuilt.stderr}`)
   const log = await readFile(dockerLog, 'utf8')
-  const pull = composeCall(log, ' pull dsh')
-  assert.ok(pull, 'installer never reached docker compose pull')
-  assert.match(pull, /DSH_IMAGE=ghcr\.io\/univers629\/dsh-docker:latest$/)
-  assert.doesNotMatch(pull, /DSH_IMAGE=(<unset>|dsh:local)$/)
+  // 拉取把引用写在命令行上，所以它完全不依赖环境传递。
+  const pull = lastCall(log, 'pull ', 'ghcr.io')
+  assert.ok(pull, 'installer never pulled the prebuilt reference')
+  assert.match(pull, /^pull ghcr\.io\/univers629\/dsh-docker:latest \| /)
 
   const built = await runInstall('build-install', ['--access', 'local', '--image-source', 'build'])
   assert.equal(built.status, 0, `${built.stdout}\n${built.stderr}`)
   const buildLog = await readFile(dockerLog, 'utf8')
-  const build = composeCall(buildLog, ' build dsh')
+  const build = lastCall(buildLog, 'compose ', ' build dsh')
   assert.ok(build, 'installer never reached docker compose build')
   assert.match(build, /DSH_IMAGE=dsh:local$/)
 
   // 启动仍然靠 --env-file，sudo 保留工作目录，所以这条不需要透传变量。
-  const up = composeCall(buildLog, ' up -d ')
+  const up = lastCall(buildLog, 'compose ', ' up -d ')
   assert.ok(up, 'installer never reached docker compose up')
   assert.match(up, /--env-file \.env\.pending\./)
 } finally {

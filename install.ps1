@@ -633,7 +633,8 @@ switch ($DshAction) {
         $env:DSH_IMAGE = $imageRef
         if ($imageSource -eq 'prebuilt') {
             Write-Host "==> 正在拉取预构建 Debian 13 镜像：$imageRef" -ForegroundColor Yellow
-            docker compose pull dsh
+            # 拉取不经过 Compose：引用直接交给守护进程，插值出问题时也不会拉错镜像。
+            docker pull $imageRef
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "[警告] 无法拉取 $imageRef，改为在本机构建镜像。" -ForegroundColor Yellow
                 $imageSource = 'build'

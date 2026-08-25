@@ -29,9 +29,9 @@ assert.ok(
 assert.match(installSh, /set_compose_env DSH_IMAGE "\$PENDING_IMAGE"/)
 assert.match(installSh, /up -d --no-build --force-recreate/)
 assert.match(installPs1, /\[ValidateSet\('',\s*'prebuilt',\s*'build'\)\]/)
-assert.match(installPs1, /docker compose pull dsh/)
+assert.match(installPs1, /docker pull \$imageRef/)
 assert.ok(
-  installPs1.indexOf('docker compose pull dsh') < installPs1.indexOf('docker compose build dsh'),
+  installPs1.indexOf('docker pull $imageRef') < installPs1.indexOf('docker compose build dsh'),
   'install.ps1 must try the pull before falling back to a local build',
 )
 assert.match(installPs1, /Set-ComposeEnvValue \$pendingEnvFile 'DSH_IMAGE' \$imageRef/)
@@ -39,9 +39,9 @@ assert.match(installPs1, /'up','-d','--no-build','--force-recreate'/)
 
 // 启动脚本在容器不存在时也要按 .env 记录的来源准备镜像。
 assert.match(dshSh, /image_source="\$\(env_value DSH_IMAGE_SOURCE ''\)"/)
-assert.match(dshSh, /compose "\$\{COMPOSE_ARGS\[@\]\}" pull dsh/)
+assert.match(dshSh, /DOCKER pull "\$image_ref"/)
 assert.match(dshBat, /call :read_env DSH_IMAGE/)
-assert.match(dshBat, /docker compose pull dsh/)
+assert.match(dshBat, /docker pull "%IMAGE_REF%"/)
 
 // 删除必须能清掉预构建引用，它不叫 dsh:*。
 assert.match(installSh, /awk -F= '\$1 == "DSH_IMAGE"/)

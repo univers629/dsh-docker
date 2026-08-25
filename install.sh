@@ -689,9 +689,10 @@ build_dsh_image() {
     docker compose "${COMPOSE_ARGS[@]}" build dsh
 }
 
+# 拉取不经过 Compose：引用直接写在命令行上交给守护进程，插值或环境传递出问题时
+# 也不会把拉取指向 docker.io/library/dsh:local。启动那步用 .env 里的同一个引用。
 pull_dsh_image() {
-  DOCKER_ENV DSH_IMAGE="$PENDING_IMAGE" \
-    docker compose "${COMPOSE_ARGS[@]}" pull dsh
+  DOCKER pull "$PENDING_IMAGE"
 }
 
 # 预构建优先，但公网拉取可能因为网络或尚未发布而失败；这时退回本机构建，
