@@ -96,7 +96,9 @@ server {
 }
 ```
 
-For a Docker-based panel, select Docker container/panel in the installer, enter the panel network name (usually `dpanel-local`), and use `http://dsh:3080` as the upstream. Host proxies and SSH tunnels use `http://127.0.0.1:3080`.
+For a Docker-based panel, select Docker container/panel in the installer, enter the network the proxy container is attached to (`dpanel-local` for dPanel), and use `http://dsh:3080` as the upstream. Host proxies and SSH tunnels use `http://127.0.0.1:3080`.
+
+External networks must already exist because Compose never creates them. If the proxy panel is not deployed yet, enter a new name such as `dsh-proxy` and the installer offers to create it; attach the proxy later with `docker network connect dsh-proxy <proxy-container>`. `dsh-private` is the network DSH manages itself and cannot be used as an external network.
 
 ## Architecture and persistence
 
