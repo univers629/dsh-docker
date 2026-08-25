@@ -140,7 +140,7 @@ flowchart LR
 
 ### 内置控制插件
 
-镜像自带 `dsh-docker-control`，首次启动空 profile 时自动恢复。设置页显示 DSH 版本并提供“更新 DSH”按钮；更新在容器内拉取源码、应用当前补丁、编译并原子替换，失败时保留旧版本，不需要 SSH。更新和“重启 DSH”都只替换 Supervisor 管理的 DSH 子进程，不重启 Debian 容器或 Nginx。设置页还提供 WebUI 配置文件编辑器，编辑器固定读写 `/data/dsh/settings.yaml`，保存前校验 YAML 并保护并发修改。
+镜像自带 `dsh-docker-control`，首次启动空 profile 时自动恢复。它在设置窗口左侧导航新增“DSH 环境”页（与“通用设置 / 模型 / 插件 / Agent 预设”同级），显示当前与最新 DSH 版本，提供“检查更新”“立即更新”，以及“电脑 UI / 手机 UI”布局选择器。打开设置不会自动联网，只有按下“检查更新”才会查询上游分支；手机布局把设置面板改为全屏、左侧导航改为可横向滑动的顶部标签条，并把首页侧边栏改成抽屉：收起时完全让位给对话区，左上角的浮动按钮负责展开，展开后浮在对话之上而不是挤压它。首次访问按浏览器 UA 自动选择布局。更新在容器内拉取源码、应用当前补丁、编译并原子替换，失败时保留旧版本，不需要 SSH。更新和“重启 DSH”都只替换 Supervisor 管理的 DSH 子进程，不重启 Debian 容器或 Nginx。设置窗口顶部还提供 WebUI 配置文件编辑器，编辑器固定读写 `/data/dsh/settings.yaml`，保存前校验 YAML 并保护并发修改。
 
 容器内 Agent 应使用 `manage-dsh-plugin` 安装、更新或删除插件。它会在 `/data/dsh/profiles` 下创建同卷临时 profile，允许 pnpm 执行插件所需的构建脚本，通过配置、入口解析和实际导入验证后再原子替换正式 profile。正常结束会立即删除临时 profile 和本次 pnpm Git 构建临时目录；断电或强制终止留下的事务和旧备份会在下一次 DSH 启动或插件操作时自动恢复、清理。pnpm 的内容寻址 store 是 `/data/home` 下有意保留的下载缓存，可在需要释放空间时执行 `pnpm store prune`。
 

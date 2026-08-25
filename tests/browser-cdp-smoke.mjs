@@ -222,11 +222,112 @@ if (opened) {
     buttons: [...document.querySelectorAll('[role="dialog"] button')].map(button => button.innerText.trim()).filter(Boolean),
     restart: [...document.querySelectorAll('[role="dialog"] button')].some(button => /重启 DSH|Restart DSH/i.test(button.innerText)),
     config: [...document.querySelectorAll('[role="dialog"] button')].some(button => /打开配置文件|Open configuration file/i.test(button.innerText)),
+    environmentNav: [...document.querySelectorAll('[role="dialog"] nav button')].some(button => /DSH 环境|DSH environment/i.test(button.innerText)),
+    // Baseline for the config-editor check below: onboarding steps bring their
+    // own mask, so the absolute count is not a fixed number on every container.
+    viewportBackdropFilters: [...document.querySelectorAll('*')].filter(node => {
+      const style = getComputedStyle(node)
+      if (!style.backdropFilter || style.backdropFilter === 'none') return false
+      const rect = node.getBoundingClientRect()
+      return rect.width >= innerWidth * 0.9 && rect.height >= innerHeight * 0.9
+    }).length,
   })`))
   console.log(JSON.stringify({ phase: 'settings', settings, exceptions, consoleErrors }, null, 2))
   assert.equal(settings.dialog, true, 'settings dialog did not open')
   assert.equal(settings.restart, true, 'restart button did not render in settings action row')
   assert.equal(settings.config, true, 'WebUI configuration editor button did not render in settings action row')
+  assert.equal(settings.environmentNav, true, 'DSH environment page did not register in the settings nav')
+
+  const environment = JSON.parse(await evaluate(`(() => {
+    const nav = [...document.querySelectorAll('[role="dialog"] nav button')].find(item => /DSH 环境|DSH environment/i.test(item.innerText))
+    if (!nav) return JSON.stringify({ opened: false })
+    nav.click()
+    return JSON.stringify({ opened: true })
+  })()`))
+  if (environment.opened) {
+    await sleep(1200)
+    const page = JSON.parse(await evaluate(`JSON.stringify({
+      check: [...document.querySelectorAll('[role="dialog"] button')].some(button => /检查更新|Check for updates/i.test(button.innerText)),
+      updateNow: [...document.querySelectorAll('[role="dialog"] button')].some(button => /立即更新|Update now/i.test(button.innerText)),
+      modes: [...document.querySelectorAll('[role="dialog"] [data-dsh-ui-mode-option]')].map(item => ({ mode: item.getAttribute('data-dsh-ui-mode-option'), checked: item.getAttribute('aria-checked') })),
+      uiMode: document.documentElement.getAttribute('data-dsh-ui-mode'),
+    })`))
+    console.log(JSON.stringify({ phase: 'dsh-environment', page, exceptions, consoleErrors }, null, 2))
+    assert.equal(page.check, true, 'check-for-updates button did not render on the DSH environment page')
+    assert.equal(page.updateNow, true, 'update-now button did not render on the DSH environment page')
+    assert.equal(page.modes.length, 2, 'the layout selector did not render both options')
+    assert.equal(page.uiMode === 'desktop' || page.uiMode === 'mobile', true, 'the layout mode attribute is missing from <html>')
+
+    // Phone layout, measured at a phone viewport: the sidebar stops being a
+    // column (both the rail and the drawer), the settings panel goes full
+    // screen with a scrollable top tab strip, and the floating opener replaces
+    // the toggle that lived in the hidden rail. The settings dialog stays open
+    // throughout — the later configuration-editor phase depends on it.
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+    await evaluate(`(() => {
+      const option = document.querySelector('[data-dsh-ui-mode-option="mobile"]')
+      if (option) option.click()
+      return true
+    })()`)
+    await sleep(900)
+    const measureFrame = `(() => {
+      const frame = document.querySelector('div:has(> [data-shell-overlay])')
+      const toggle = document.querySelector('[data-dsh-mobile-sidebar-toggle]')
+      const dialog = document.querySelector('[role="dialog"][aria-modal="true"]')
+      const strip = dialog === null ? null : dialog.querySelector(':scope > nav')?.lastElementChild ?? null
+      const group = dialog === null ? null : dialog.querySelector('[role="radiogroup"]')
+      const width = node => (node === null || node === undefined ? null : Math.round(node.getBoundingClientRect().width))
+      return JSON.stringify({
+        uiMode: document.documentElement.getAttribute('data-dsh-ui-mode'),
+        collapsed: frame === null ? null : frame.hasAttribute('data-sidebar-collapsed'),
+        sidebar: frame === null ? null : width(frame.children[0]),
+        center: frame === null ? null : width(frame.children[1]),
+        details: frame === null ? null : width(frame.children[2]),
+        toggleDisplay: toggle === null ? null : getComputedStyle(toggle).display,
+        dialog: width(dialog),
+        stripDirection: strip === null ? null : getComputedStyle(strip).flexDirection,
+        stripScrollable: strip === null ? null : strip.scrollWidth > strip.clientWidth,
+        stripBarHidden: strip === null ? null : getComputedStyle(strip).scrollbarWidth === 'none',
+        group: width(group),
+        viewport: innerWidth,
+      })
+    })()`
+    const phoneClosed = JSON.parse(await evaluate(measureFrame))
+    console.log(JSON.stringify({ phase: 'phone-drawer-closed', phoneClosed }, null, 2))
+    assert.equal(phoneClosed.uiMode, 'mobile', 'the layout selector did not switch to the phone layout')
+    assert.equal(phoneClosed.collapsed, true, 'the shell did not auto-collapse the sidebar at a phone viewport')
+    assert.equal(phoneClosed.sidebar, 0, 'the collapsed sidebar still occupies a column on the phone layout')
+    assert.equal(phoneClosed.center, phoneClosed.viewport, 'the conversation column does not span the phone viewport')
+    assert.equal(phoneClosed.details, 0, 'the details column took a track on the phone layout')
+    assert.notEqual(phoneClosed.toggleDisplay, 'none', 'the floating sidebar opener is not visible with the drawer closed')
+    assert.equal(phoneClosed.dialog, phoneClosed.viewport, 'the settings panel is not full width on the phone layout')
+    assert.equal(phoneClosed.stripDirection, 'row', 'the settings nav did not become a top tab strip')
+    assert.equal(phoneClosed.stripScrollable, true, 'the top tab strip does not overflow, so this viewport cannot prove it scrolls')
+    assert.equal(phoneClosed.stripBarHidden, false, 'the top tab strip hides its scrollbar, leaving the swipe undiscoverable')
+    assert.ok(phoneClosed.group !== null && phoneClosed.group < phoneClosed.viewport, 'the layout selector stretched to the full page width')
+
+    await evaluate(`(() => { document.querySelector('[data-dsh-mobile-sidebar-toggle]').click(); return true })()`)
+    await sleep(900)
+    const phoneOpen = JSON.parse(await evaluate(measureFrame))
+    console.log(JSON.stringify({ phase: 'phone-drawer-open', phoneOpen }, null, 2))
+    assert.equal(phoneOpen.collapsed, false, 'the floating opener did not expand the sidebar')
+    assert.ok(phoneOpen.sidebar > 0, 'the drawer did not render at a usable width')
+    assert.equal(phoneOpen.center, phoneOpen.viewport, 'the open drawer squeezed the conversation instead of floating over it')
+    assert.equal(phoneOpen.details, 0, 'the open drawer handed the details panel a column')
+    assert.equal(phoneOpen.toggleDisplay, 'none', 'the floating opener stayed visible behind the open drawer')
+
+    await evaluate(`(() => {
+      const desktop = document.querySelector('[data-dsh-ui-mode-option="desktop"]')
+      if (desktop) desktop.click()
+      return true
+    })()`)
+    await cdp.send('Emulation.clearDeviceMetricsOverride')
+    await sleep(900)
+    const restoredLayout = JSON.parse(await evaluate(measureFrame))
+    assert.equal(restoredLayout.uiMode, 'desktop', 'the layout selector did not switch back to the desktop layout')
+    assert.equal(restoredLayout.toggleDisplay, 'none', 'the floating opener leaked into the desktop layout')
+    assert.ok(restoredLayout.sidebar > 0, 'the desktop sidebar did not come back as a column')
+  }
 
   const configClicked = await evaluate(`(() => {
     const button = [...document.querySelectorAll('[role="dialog"] button')].find(item => /打开配置文件|Open configuration file/i.test(item.innerText))
@@ -272,7 +373,7 @@ if (opened) {
   assert.equal(configEditor.save, true, 'configuration editor save action did not render')
   assert.equal(configEditor.editorLayer, true, 'configuration editor layer did not render')
   assert.equal(configEditor.backdropFilters, 0, 'configuration editor introduced a nested backdrop filter')
-  assert.equal(configEditor.viewportBackdropFilters, 1, 'configuration editor must preserve exactly the settings backdrop')
+  assert.equal(configEditor.viewportBackdropFilters, settings.viewportBackdropFilters, 'configuration editor must not add a full-viewport backdrop layer')
 
   const scrollProbe = JSON.parse(await evaluate(`(() => {
     const layer = document.querySelector('[data-dsh-config-editor-layer]')

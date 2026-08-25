@@ -40,6 +40,7 @@ try {
   assert.deepEqual(routes.map(route => route.path), [
     '/dsh-docker-control/info',
     '/dsh-docker-control/update/status',
+    '/dsh-docker-control/update/latest',
     '/dsh-docker-control/update',
     '/dsh-docker-control/config',
     '/dsh-docker-control/status',
@@ -81,6 +82,35 @@ try {
   assert.equal(infoBody.ok, true)
   assert.equal(infoBody.dsh.version, 'unknown')
   assert.equal(typeof infoBody.system.nodeVersion, 'string')
+
+  // The remote check is a privileged, loopback-only GET, and it reports the
+  // failure instead of pretending the image is current when the network or the
+  // remote is unavailable (here: a remote that cannot resolve).
+  const latestRoute = routes.find(route => route.path.endsWith('/update/latest'))
+  const latestMethodResponse = response()
+  await latestRoute.handler({ method: 'POST', socket: { remoteAddress: '127.0.0.1' }, headers: {} }, latestMethodResponse)
+  assert.equal(latestMethodResponse.status, 405)
+
+  const latestForbiddenResponse = response()
+  await latestRoute.handler({
+    method: 'GET',
+    url: '/dsh-docker-control/update/latest',
+    socket: { remoteAddress: '10.0.0.5' },
+    headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
+  }, latestForbiddenResponse)
+  assert.equal(latestForbiddenResponse.status, 403)
+
+  process.env.DSH_UPSTREAM_REPO = 'https://dsh-docker-control.invalid/missing.git'
+  const latestResponse = response()
+  await latestRoute.handler({
+    method: 'GET',
+    url: '/dsh-docker-control/update/latest?force=1',
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
+  }, latestResponse)
+  assert.equal(latestResponse.status, 502)
+  assert.equal(JSON.parse(latestResponse.body).ok, false)
+  delete process.env.DSH_UPSTREAM_REPO
 
   const updateStatusRoute = routes.find(route => route.path.endsWith('/update/status'))
   const updateStatusResponse = response()

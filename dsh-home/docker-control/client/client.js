@@ -11,9 +11,204 @@ window.__ModuleLoader__.load({
 
     const NS = 'dsh-docker-control'
     const h = React.createElement
-    const inject = ['slots', 'locale']
+    const inject = ['slots', 'locale', 'layout']
     let dshInfoCache = null
     let dshInfoRequest = null
+    let dshLatestCache = null
+    // Set by apply(): the shell's own sidebar toggle lives in ctx.layout, and
+    // the floating opener is rendered by a module-scope component.
+    let toggleSidebar = null
+
+    const UI_MODE_STORAGE_KEY = 'dsh-docker-control.ui-mode'
+    const UI_MODE_STYLE_ID = 'dsh-docker-control-ui-mode'
+    const UI_MODE_CSS = `/* Phone layout: the shipped shell is desktop-first (a fixed 800px settings
+   panel with a 188px nav rail, and a sidebar that squeezes the center column).
+   These overrides use structural selectors only, because the app's own class
+   names are CSS-module hashes: the settings panel is the only dialog with a
+   direct <nav> child, and the three-column frame is the only element with a
+   direct [data-shell-overlay] child. */
+
+/* --- Settings panel: full screen, nav rail becomes a top tab strip --- */
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) {
+  flex-direction: column;
+  width: 100vw;
+  max-width: 100vw;
+  height: 100dvh;
+  max-height: 100dvh;
+  border-radius: 0;
+}
+
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) > nav {
+  width: 100%;
+  flex: none;
+  gap: 10px;
+  padding: 14px 8px 0;
+}
+
+/* The nav heading stays in the tree: the dialog's accessible name points at
+   it through aria-labelledby. */
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) > nav > :first-child {
+  padding: 0 8px;
+}
+
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) > nav > :last-child {
+  flex-direction: row;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
+  scroll-padding-inline: 8px;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  /* The strip always overflows a phone width, so the bar stays visible: it is
+     the only hint that the pages past the fold are reachable by swiping.
+     A declared ::-webkit-scrollbar height also opts Blink/WebKit out of
+     touch overlay bars, which are invisible until the finger moves. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--dsw-alias-scrollbar-bg-l2, rgba(0, 0, 0, .2)) transparent;
+}
+
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) > nav > :last-child::-webkit-scrollbar {
+  height: 4px;
+}
+
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) > nav > :last-child::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) > nav > :last-child::-webkit-scrollbar-thumb {
+  border-radius: 2px;
+  background: var(--dsw-alias-scrollbar-bg-l2, rgba(0, 0, 0, .2));
+}
+
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) > nav > :last-child > button {
+  flex: none;
+  height: 36px;
+  padding: 7px 14px;
+}
+
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) > div {
+  min-height: 0;
+}
+
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) > div > :first-child {
+  padding: 12px 12px 4px;
+  height: auto;
+}
+
+html[data-dsh-ui-mode="mobile"] div[role="dialog"][aria-modal="true"]:has(> nav) > div > :last-child {
+  padding: 0 12px 20px;
+}
+
+/* --- App frame: the sidebar is a drawer, never a layout column --- */
+html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay]) {
+  grid-template-columns: 0 minmax(0, 1fr) 0 !important;
+}
+
+/* Pin the three columns to their tracks. Lifting the sidebar out of flow (the
+   drawer rule below) otherwise lets grid auto-placement slide the remaining
+   items one track left, which hands the conversation's track to the details
+   panel — the frame's child order is sidebar, conversation, details, then the
+   absolutely positioned overlay layer and drag handles. */
+html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay]) > :nth-child(1) {
+  grid-area: 1 / 1;
+}
+
+html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay]) > :nth-child(2) {
+  grid-area: 1 / 2;
+}
+
+html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay]) > :nth-child(3) {
+  grid-area: 1 / 3;
+}
+
+/* Open: the panel floats over the conversation instead of squeezing it. Its
+   own inline width (the shell freezes the expanded layout) decides the
+   drawer width. */
+html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) > :first-child {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: auto;
+  z-index: 15;
+  overflow: visible;
+  box-shadow: var(--dsw-shadow-lv3, 0 16px 48px rgba(0, 0, 0, .22));
+}
+
+/* Closed: the shell's 56px control rail would spend a seventh of a phone
+   screen on icons, so the zero-width track clips it away and the floating
+   opener below takes over. The column keeps its box (its subtree hosts the
+   position: fixed settings dialog, which must survive the collapse) — only
+   the 1px column seam has to go. */
+html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-collapsed] > :first-child {
+  border-right: none;
+}
+
+/* Column resize handles are pointer-only affordances. */
+html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay]) > [data-side] {
+  display: none;
+}
+
+/* --- The floating drawer opener. It is mounted on every layout (the frame's
+   own overlay seat) and paints only while the phone layout has the drawer
+   closed, because the shell's toggle is inside the rail that just went away.
+   The display property is owned here, never inline, so these rules stay in
+   charge. --- */
+[data-dsh-mobile-sidebar-toggle] {
+  display: none;
+}
+
+html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-collapsed] [data-dsh-mobile-sidebar-toggle] {
+  display: inline-flex;
+}
+`
+
+    function hasDom() {
+      return typeof document !== 'undefined' && document !== null && document.documentElement != null
+    }
+
+    // No stored choice yet: the browser that opened the page decides. Phone
+    // user agents pick the phone layout; a narrow window does too, which is
+    // what catches iPadOS (it reports a desktop user agent).
+    function detectUiMode() {
+      const agent = typeof navigator === 'undefined' || navigator === null ? '' : String(navigator.userAgent || '')
+      if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|Silk/i.test(agent)) return 'mobile'
+      const width = typeof window !== 'undefined' && window !== null ? window.innerWidth : undefined
+      return typeof width === 'number' && width > 0 && width < 900 ? 'mobile' : 'desktop'
+    }
+
+    function storedUiMode() {
+      try {
+        const value = window.localStorage.getItem(UI_MODE_STORAGE_KEY)
+        return value === 'mobile' || value === 'desktop' ? value : null
+      } catch {
+        return null
+      }
+    }
+
+    function resolveUiMode() {
+      return storedUiMode() ?? detectUiMode()
+    }
+
+    function applyUiMode(mode) {
+      if (!hasDom()) return mode
+      document.documentElement.setAttribute('data-dsh-ui-mode', mode)
+      if (document.getElementById(UI_MODE_STYLE_ID) === null) {
+        const style = document.createElement('style')
+        style.id = UI_MODE_STYLE_ID
+        style.textContent = UI_MODE_CSS
+        document.head.appendChild(style)
+      }
+      return mode
+    }
+
+    // The layout is a property of the device in front of the user, not of the
+    // account, so it stays in this browser's storage.
+    function storeUiMode(mode) {
+      try { window.localStorage.setItem(UI_MODE_STORAGE_KEY, mode) } catch {}
+      return applyUiMode(mode)
+    }
 
     const zh = {
       restart: '重启 DSH',
@@ -34,10 +229,27 @@ window.__ModuleLoader__.load({
       configLoadFailed: '读取配置文件失败',
       configSaveFailed: '保存配置文件失败',
       configConflict: '配置文件已在其他地方修改，请重新打开后再保存。',
-      dshVersion: 'DSH 版本',
-      updateDsh: '更新 DSH',
+      navTitle: 'DSH 环境',
+      versionTitle: 'DSH 版本',
+      currentVersion: '当前版本',
+      latestVersion: '最新版本',
+      upstreamRef: '上游分支',
+      notChecked: '未检查',
+      loading: '正在读取…',
+      checkUpdate: '检查更新',
+      checking: '正在检查…',
+      upToDate: '已是最新版本',
+      updateAvailableText: '有新版本可用',
+      checkFailed: '检查更新失败',
+      updateHint: '打开本页不会自动联网检查；更新会在容器内重新拉取源码并编译，完成后 DSH 自行重启，容器不会重建。',
+      layoutTitle: '界面布局',
+      layoutDesktop: '电脑 UI',
+      layoutMobile: '手机 UI',
+      layoutHint: '首次访问按浏览器 UA 自动选择；这里的选择只对当前浏览器生效。',
+      openSidebar: '展开侧边栏',
+      systemTitle: '容器环境',
+      updateDsh: '立即更新',
       confirmUpdate: '确认更新 DSH？构建完成后服务会重启。',
-      updateLoading: '正在读取 DSH 版本…',
       updateQueued: '正在拉取源码…',
       updateInstalling: '正在安装构建依赖…',
       updateBuilding: '正在编译 DSH…',
@@ -67,10 +279,27 @@ window.__ModuleLoader__.load({
       configLoadFailed: 'Could not read configuration file',
       configSaveFailed: 'Could not save configuration file',
       configConflict: 'The configuration changed elsewhere. Reopen it before saving.',
-      dshVersion: 'DSH version',
-      updateDsh: 'Update DSH',
+      navTitle: 'DSH environment',
+      versionTitle: 'DSH version',
+      currentVersion: 'Installed',
+      latestVersion: 'Latest',
+      upstreamRef: 'Upstream ref',
+      notChecked: 'Not checked',
+      loading: 'Reading…',
+      checkUpdate: 'Check for updates',
+      checking: 'Checking…',
+      upToDate: 'Up to date',
+      updateAvailableText: 'A newer version is available',
+      checkFailed: 'Update check failed',
+      updateHint: 'Opening this page never checks online. An update re-clones and rebuilds DSH inside the container and restarts DSH only — the container itself is never rebuilt.',
+      layoutTitle: 'Interface layout',
+      layoutDesktop: 'Desktop UI',
+      layoutMobile: 'Phone UI',
+      layoutHint: 'The first visit picks a layout from the browser user agent; this choice applies to this browser only.',
+      openSidebar: 'Open the sidebar',
+      systemTitle: 'Container environment',
+      updateDsh: 'Update now',
       confirmUpdate: 'Update DSH? The service will restart after the build completes.',
-      updateLoading: 'Reading DSH version…',
       updateQueued: 'Fetching DSH source…',
       updateInstalling: 'Installing build dependencies…',
       updateBuilding: 'Building DSH…',
@@ -121,6 +350,99 @@ window.__ModuleLoader__.load({
         if (dshInfoRequest === request) dshInfoRequest = null
       }).catch(() => {})
       return request
+    }
+
+    function requestDshLatest() {
+      // Always force: the button IS the user's explicit request for fresh data.
+      return fetch('/dsh-docker-control/update/latest?force=1', { cache: 'no-store' })
+        .then(async response => {
+          const body = await readJson(response)
+          if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
+          dshLatestCache = body
+          return body
+        })
+    }
+
+    function describeError(cause) {
+      return String(cause && cause.message ? cause.message : cause)
+    }
+
+    function formatVersion(version, commit) {
+      const label = typeof version === 'string' && version.length > 0 ? version : 'unknown'
+      if (typeof commit !== 'string' || !/^[0-9a-f]{7,40}$/.test(commit)) return label
+      return `${label} (${commit.slice(0, 12)})`
+    }
+
+    const cardStyle = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '12px',
+      margin: 0,
+      padding: 0,
+      border: 'none',
+    }
+
+    const cardTitleStyle = {
+      margin: 0,
+      fontSize: '14px',
+      lineHeight: '22px',
+      fontWeight: 500,
+      color: 'var(--dsw-alias-label-primary, #111827)',
+    }
+
+    const fieldLabelStyle = {
+      margin: 0,
+      fontSize: '13px',
+      lineHeight: '20px',
+      color: 'var(--dsw-alias-label-secondary, #6b7280)',
+    }
+
+    const fieldValueStyle = {
+      margin: 0,
+      fontSize: '13px',
+      lineHeight: '20px',
+      color: 'var(--dsw-alias-label-primary, #111827)',
+      wordBreak: 'break-word',
+    }
+
+    const hintStyle = {
+      margin: 0,
+      fontSize: '12px',
+      lineHeight: '18px',
+      color: 'var(--dsw-alias-label-secondary, #6b7280)',
+    }
+
+    function renderButton(variant, disabled, onClick, label) {
+      return typeof Button === 'function'
+        ? h(Button, { key: label, variant, size: 'sm', disabled, onClick }, label)
+        : h('button', { key: label, type: 'button', disabled, onClick }, label)
+    }
+
+    // The two-cell selector: the chosen cell is the lit surface inside the box.
+    function renderModeOption(mode, active, select, label) {
+      const selected = active === mode
+      return h('button', {
+        key: mode,
+        type: 'button',
+        role: 'radio',
+        'aria-checked': selected ? 'true' : 'false',
+        'data-dsh-ui-mode-option': mode,
+        onClick: () => { select(mode) },
+        style: {
+          minWidth: '96px',
+          padding: '7px 16px',
+          border: 'none',
+          borderRadius: '10px',
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+          fontSize: '13px',
+          lineHeight: '20px',
+          fontWeight: selected ? 500 : 400,
+          color: selected ? 'var(--dsw-alias-label-primary, #111827)' : 'var(--dsw-alias-label-secondary, #6b7280)',
+          background: selected ? 'var(--dsw-alias-bg-layer-2, #fff)' : 'transparent',
+          boxShadow: selected ? 'var(--dsw-shadow-lv1, 0 1px 3px rgba(0, 0, 0, .12))' : 'none',
+        },
+      }, label)
     }
 
     class RestartActionBoundary extends React.Component {
@@ -244,26 +566,50 @@ window.__ModuleLoader__.load({
       return h(RestartActionBoundary, null, h(RestartAction, props))
     }
 
-    function DshUpdateAction({ t }) {
+    function DshEnvironmentSection({ t }) {
       const [info, setInfo] = React.useState(dshInfoCache)
-      const [phase, setPhase] = React.useState(dshInfoCache === null ? 'loading' : 'idle')
+      const [infoPhase, setInfoPhase] = React.useState(dshInfoCache === null ? 'loading' : 'idle')
+      const [infoError, setInfoError] = React.useState(null)
+      const [latest, setLatest] = React.useState(dshLatestCache)
+      const [checking, setChecking] = React.useState(false)
+      const [checkError, setCheckError] = React.useState(null)
+      const [phase, setPhase] = React.useState('idle')
       const [error, setError] = React.useState(null)
+      const [uiMode, setUiMode] = React.useState(resolveUiMode())
 
+      // The local build metadata is a file read inside the container, so the
+      // current version loads with the page. The remote check is NOT run here:
+      // it reaches github, and settings must never do that unasked.
       const loadInfo = React.useCallback((force = false) => {
-        if (dshInfoCache === null) setPhase('loading')
+        if (dshInfoCache === null) setInfoPhase('loading')
         return requestDshInfo(force)
           .then(body => {
             setInfo(body)
-            setPhase('idle')
-            setError(null)
+            setInfoPhase('idle')
+            setInfoError(null)
           })
           .catch(cause => {
-            setPhase('idle')
-            setError(`${translate(t, 'dshInfoFailed')}: ${String(cause && cause.message ? cause.message : cause)}`)
+            setInfoPhase('idle')
+            setInfoError(`${translate(t, 'dshInfoFailed')}: ${describeError(cause)}`)
           })
       }, [t])
 
       React.useEffect(() => { loadInfo() }, [loadInfo])
+
+      const check = React.useCallback(() => {
+        if (checking) return
+        setChecking(true)
+        setCheckError(null)
+        requestDshLatest()
+          .then(body => {
+            setLatest(body)
+            setChecking(false)
+          })
+          .catch(cause => {
+            setChecking(false)
+            setCheckError(`${translate(t, 'checkFailed')}: ${describeError(cause)}`)
+          })
+      }, [checking, t])
 
       const waitForBoot = React.useCallback(previousBoot => {
         const deadline = Date.now() + 90000
@@ -345,33 +691,146 @@ window.__ModuleLoader__.load({
           }))
           .catch(cause => {
             setPhase('idle')
-            setError(`${translate(t, 'updateFailed')}: ${String(cause && cause.message ? cause.message : cause)}`)
+            setError(`${translate(t, 'updateFailed')}: ${describeError(cause)}`)
           })
       }, [phase, pollUpdate, t])
 
-      const version = info?.dsh?.version || '...'
-      const statusText = phase === 'starting' || phase === 'running'
-          ? translate(t, 'updateQueued')
-          : phase === 'installing'
-            ? translate(t, 'updateInstalling')
-            : phase === 'building'
-              ? translate(t, 'updateBuilding')
-              : phase === 'restarting'
-                ? translate(t, 'updateRestarting')
-                : error
-      const icon = typeof IconRefreshOutline14 === 'function' ? h(IconRefreshOutline14, { size: 14 }) : undefined
-      const button = typeof Button === 'function'
-        ? h(Button, { variant: 'outline', size: 'sm', icon, disabled: phase !== 'idle', onClick: update }, translate(t, 'updateDsh'))
-        : h('button', { type: 'button', disabled: phase !== 'idle', onClick: update }, translate(t, 'updateDsh'))
-      return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-        h('span', { role: 'status', style: { display: 'inline-block', minWidth: '10rem', whiteSpace: 'nowrap' } }, `${translate(t, 'dshVersion')}: ${version}`),
-        button,
-        statusText ? h('span', { role: error ? 'alert' : 'status', style: { color: error ? '#b42318' : 'var(--dsw-alias-label-secondary, #6b7280)' } }, statusText) : null,
+      const selectUiMode = React.useCallback(mode => { setUiMode(storeUiMode(mode)) }, [])
+
+      const currentVersion = infoPhase === 'loading'
+        ? translate(t, 'loading')
+        : formatVersion(info?.dsh?.version, info?.dsh?.upstreamCommit)
+      const latestVersion = checking
+        ? translate(t, 'checking')
+        : latest === null
+          ? translate(t, 'notChecked')
+          : formatVersion(latest.latest?.version, latest.latest?.commit)
+      const verdict = latest === null || checking
+        ? null
+        : latest.updateAvailable === true
+          ? translate(t, 'updateAvailableText')
+          : latest.updateAvailable === false
+            ? translate(t, 'upToDate')
+            : null
+      const progress = phase === 'starting' || phase === 'running'
+        ? translate(t, 'updateQueued')
+        : phase === 'installing'
+          ? translate(t, 'updateInstalling')
+          : phase === 'building'
+            ? translate(t, 'updateBuilding')
+            : phase === 'restarting'
+              ? translate(t, 'updateRestarting')
+              : null
+      const notice = error ?? checkError ?? infoError ?? null
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '20px' } },
+        h('section', { style: cardStyle },
+          h('h3', { style: cardTitleStyle }, translate(t, 'versionTitle')),
+          h('dl', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, max-content) minmax(0, 1fr)', columnGap: '16px', rowGap: '8px', margin: 0 } },
+            h('dt', { key: 'ck', style: fieldLabelStyle }, translate(t, 'currentVersion')),
+            h('dd', { key: 'cv', style: fieldValueStyle }, currentVersion),
+            h('dt', { key: 'lk', style: fieldLabelStyle }, translate(t, 'latestVersion')),
+            h('dd', { key: 'lv', style: fieldValueStyle }, latestVersion),
+            h('dt', { key: 'rk', style: fieldLabelStyle }, translate(t, 'upstreamRef')),
+            h('dd', { key: 'rv', style: fieldValueStyle }, latest?.ref || info?.dsh?.upstreamRef || translate(t, 'notChecked')),
+          ),
+          verdict === null ? null : h('p', { role: 'status', style: { margin: 0, fontSize: '13px', color: latest?.updateAvailable === true ? 'var(--dsw-alias-label-primary, #111827)' : 'var(--dsw-alias-label-secondary, #6b7280)' } }, verdict),
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px' } },
+            renderButton('outline', checking, check, checking ? translate(t, 'checking') : translate(t, 'checkUpdate')),
+            renderButton('primary', phase !== 'idle', update, translate(t, 'updateDsh')),
+          ),
+          progress === null ? null : h('p', { role: 'status', style: hintStyle }, progress),
+          notice === null ? null : h('p', { role: 'alert', style: { margin: 0, fontSize: '13px', color: '#b42318' } }, notice),
+          h('p', { style: hintStyle }, translate(t, 'updateHint')),
+        ),
+        h('section', { style: cardStyle },
+          h('h3', { style: cardTitleStyle }, translate(t, 'layoutTitle')),
+          h('div', { role: 'radiogroup', 'aria-label': translate(t, 'layoutTitle'), style: {
+            display: 'inline-flex',
+            // The section is a stretch column: without this the two-cell box
+            // would be pulled to the full page width.
+            alignSelf: 'flex-start',
+            gap: '4px',
+            padding: '4px',
+            borderRadius: '12px',
+            border: '1px solid var(--dsw-alias-border-l2, #d9dde3)',
+            background: 'var(--dsw-alias-bg-layer-1, #f5f6f8)',
+          } },
+            renderModeOption('desktop', uiMode, selectUiMode, translate(t, 'layoutDesktop')),
+            renderModeOption('mobile', uiMode, selectUiMode, translate(t, 'layoutMobile')),
+          ),
+          h('p', { style: hintStyle }, translate(t, 'layoutHint')),
+        ),
+        h('section', { style: cardStyle },
+          h('h3', { style: cardTitleStyle }, translate(t, 'systemTitle')),
+          h('dl', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, max-content) minmax(0, 1fr)', columnGap: '16px', rowGap: '8px', margin: 0 } },
+            h('dt', { key: 'dk', style: fieldLabelStyle }, 'Debian'),
+            h('dd', { key: 'dv', style: fieldValueStyle }, info?.system?.debianVersion || '-'),
+            h('dt', { key: 'nk', style: fieldLabelStyle }, 'Node.js'),
+            h('dd', { key: 'nv', style: fieldValueStyle }, info?.system?.nodeVersion || '-'),
+            h('dt', { key: 'pk', style: fieldLabelStyle }, 'Python'),
+            h('dd', { key: 'pv', style: fieldValueStyle }, info?.system?.pythonVersion || '-'),
+          ),
+        ),
       )
     }
 
-    function SafeDshUpdateAction(props) {
-      return h(RestartActionBoundary, null, h(DshUpdateAction, props))
+    function SafeDshEnvironmentSection(props) {
+      return h(RestartActionBoundary, null, h(DshEnvironmentSection, props))
+    }
+
+    // Phone layout only (the stylesheet owns that gate): the drawer replaced
+    // the shell's control rail, which is where the expand button used to live.
+    function MobileSidebarToggle({ t }) {
+      const label = translate(t, 'openSidebar')
+      const open = React.useCallback(() => {
+        try {
+          if (typeof toggleSidebar === 'function') toggleSidebar()
+        } catch (error) {
+          console.error('[dsh-docker-control] sidebar toggle failed:', error)
+        }
+      }, [])
+      return h('button', {
+        type: 'button',
+        'data-dsh-mobile-sidebar-toggle': '',
+        'aria-label': label,
+        title: label,
+        onClick: open,
+        style: {
+          position: 'fixed',
+          top: 'calc(8px + env(safe-area-inset-top, 0px))',
+          left: 'calc(8px + env(safe-area-inset-left, 0px))',
+          zIndex: 14,
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: '36px',
+          height: '36px',
+          padding: 0,
+          borderRadius: '10px',
+          border: '1px solid var(--dsw-alias-border-l2, #d9dde3)',
+          background: 'var(--dsw-alias-button-floating-fill, rgba(255, 255, 255, .92))',
+          color: 'var(--dsw-alias-label-primary, #111827)',
+          boxShadow: 'var(--dsw-shadow-lv2, 0 4px 16px rgba(0, 0, 0, .16))',
+          cursor: 'pointer',
+        },
+      }, h('svg', {
+        width: 18,
+        height: 18,
+        viewBox: '0 0 24 24',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 2,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': 'true',
+      },
+        h('rect', { key: 'r', x: 3, y: 3, width: 18, height: 18, rx: 2 }),
+        h('path', { key: 'l', d: 'M9 3v18' }),
+      ))
+    }
+
+    function SafeMobileSidebarToggle(props) {
+      return h(RestartActionBoundary, null, h(MobileSidebarToggle, props))
     }
 
     function ConfigEditor({ t }) {
@@ -551,7 +1010,13 @@ window.__ModuleLoader__.load({
       }
 
       try {
-        requestDshInfo().catch(() => {})
+        // The saved (or user-agent derived) layout must be live before the
+        // shell paints, so it is applied at load time rather than by the
+        // settings page that only *changes* it.
+        applyUiMode(resolveUiMode())
+        // The floating opener is a module-scope component, so the panel action
+        // reaches it through this seam rather than a per-render closure.
+        toggleSidebar = () => { ctx.layout.toggleSidebar() }
         ctx.effect(() => {
           const offZh = ctx.locale.register(NS, 'zh', zh)
           const offEn = ctx.locale.register(NS, 'en', en)
@@ -571,17 +1036,30 @@ window.__ModuleLoader__.load({
 
         ctx.slots.inject('settings.action', () => ctx.slots.register({
           name: 'settings.action',
-          id: 'dsh-docker-control-update',
-          order: 5,
-          locale: NS,
-        }, SafeDshUpdateAction))
-
-        ctx.slots.inject('settings.action', () => ctx.slots.register({
-          name: 'settings.action',
           id: 'dsh-docker-control-restart',
           order: 10,
           locale: NS,
         }, SafeRestartAction))
+
+        // A settings page of its own, beside General / Models / Plugins /
+        // Agent presets — the version and update controls used to sit in the
+        // panel header, where they refetched on every settings open.
+        ctx.slots.inject('settings.section', () => ctx.slots.register({
+          name: 'settings.section',
+          id: 'dsh-environment',
+          order: 60,
+          label: () => fallbackText('navTitle'),
+          locale: NS,
+        }, SafeDshEnvironmentSection))
+
+        // Always mounted, painted only by the phone layout: the drawer hides
+        // the shell's rail, and with it the shell's own expand button.
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: 'dsh-docker-control-sidebar-toggle',
+          order: 0,
+          locale: NS,
+        }, SafeMobileSidebarToggle))
       } catch (error) {
         fail('load', error)
       }
