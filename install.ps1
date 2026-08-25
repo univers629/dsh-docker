@@ -78,8 +78,10 @@ function Invoke-ComposeWithEnvFile {
 }
 
 function Assert-DshRoot {
+    # /run/dsh.pid 由 dsh-supervisor 写入：第一行是 PID，第二行是进程启动时刻，
+    # 所以只能取第一行，整读会拼出无效的 /proc 路径。
     for ($attempt = 0; $attempt -lt 120; $attempt++) {
-        $uid = (& docker exec dsh sh -c 'pid="$(cat /run/dsh.pid 2>/dev/null)" || exit 1; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>$null | Select-Object -Last 1)
+        $uid = (& docker exec dsh sh -c 'pid="$(sed -n 1p /run/dsh.pid 2>/dev/null)"; case "$pid" in ""|*[!0-9]*) exit 1 ;; esac; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>$null | Select-Object -Last 1)
         if ($LASTEXITCODE -eq 0 -and $uid -match '^\d+$') {
             if ($uid.Trim() -ne '0') {
                 throw "DSH 进程 UID 核验失败：期望 0，实际为 $($uid.Trim())。"

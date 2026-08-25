@@ -580,8 +580,10 @@ compose_up_with_pending_env() {
 
 assert_dsh_root() {
   local uid attempt
+  # /run/dsh.pid 由 dsh-supervisor 写入：第一行是 PID，第二行是进程启动时刻，
+  # 所以只能取第一行，整读会拼出无效的 /proc 路径。
   for ((attempt = 0; attempt < 120; attempt++)); do
-    uid="$(DOCKER exec dsh sh -c 'pid="$(cat /run/dsh.pid 2>/dev/null)" || exit 1; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>/dev/null || true)"
+    uid="$(DOCKER exec dsh sh -c 'pid="$(sed -n 1p /run/dsh.pid 2>/dev/null)"; case "$pid" in ""|*[!0-9]*) exit 1 ;; esac; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>/dev/null || true)"
     if [ -n "$uid" ]; then
       if [ "$uid" != 0 ]; then
         echo "[错误] DSH 进程 UID 核验失败：期望 0，实际为 $uid。" >&2
