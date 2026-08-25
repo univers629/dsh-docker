@@ -10,34 +10,13 @@ DeepSeek Harness 的本地 Docker 构建与持久化运行方案，提供可由 
 
 [简体中文](README.md) · [English](README.en.md)
 
-## 运行配置建议
-
-| 用法 | CPU / 内存 | 磁盘 | 说明 |
-| --- | --- | --- | --- |
-| 拉取预构建镜像（默认） | 1 vCPU / 2 GB | ≥ 10 GB | 不在本机编译 DSH，安装耗时基本等于下载耗时 |
-| 长期给 Agent 折腾 | 2 vCPU / 4 GB | ≥ 20 GB | 容器内 apt 安装的工具链都留在同一个可写层 |
-| 在本机构建镜像 | 1 vCPU / 2 GB | ≥ 15 GB | 只做 apt 装系统包加 npm 装 DSH 预构建包，不编译 TypeScript |
-
-本机构建不再编译 DSH 源码：镜像直接从 npm 安装上游发布的预构建包，再对产物打补丁，实测整体约 4 分钟，镜像解包后约 1.4 GB。1 vCPU / 1 GB 的 VPS 也能构建，仍建议配置 swap 并优先选预构建镜像，省下的主要是下载和 apt 时间。
-
-### 镜像来源
-
-安装器的第一个问题是 Debian 13 镜像来源：
-
-1. **预构建（默认）**：拉取 `ghcr.io/univers629/dsh-docker:latest`，同一个多架构清单覆盖 `linux/amd64` 和 `linux/arm64`。
-2. **本机构建**：用当前工程的 `Dockerfile` 现场构建（装系统包并从 npm 安装 DSH，不编译源码）。
-
-拉取失败时安装器会自动退回本机构建，并把实际来源写进 `.env` 的 `DSH_IMAGE` 与 `DSH_IMAGE_SOURCE`。非交互安装用 `--image-source prebuilt|build`，自定义引用用 `--image REF`；Windows 对应 `-ImageSource` 和 `-Image`。
-
-镜像由 [.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) 在 GitHub 原生 amd64 与 arm64 runner 上分别构建后合并成多架构清单，在 Actions 页面手动触发（可指定要安装的 DSH npm 版本，默认 `latest`）或推送 `v*` 标签时发版。公开仓库使用标准 GitHub runner 不计费，所以发版频率没有额度限制。
-
-发布镜像是某一时刻的快照。WebUI 的“DSH 环境”页和 `./dsh.sh update` 在容器内直接从 npm 安装新版本预构建包并重新打补丁，只花下载和安装的时间（实测约 1 分钟），不再编译源码；容器可写层（也就是 Agent 用 apt 装的工具链）全程保留。
-
-首次发布后需要手动把 GitHub Packages 里的 `dsh-docker` 包可见性改成 public（仓库 → Packages → Package settings → Change visibility）。GHCR 新建的包默认私有，服务器上匿名拉取会得到 `denied`，安装器随后会退回本机构建。
+> DSH 本体在容器内更新即可（WebUI 设置里的“DSH 环境”页，或 `./dsh.sh update`），不需要重建容器、也不用追镜像更新——重建容器会丢掉 Agent 在里面用 apt 装的工具链。
 
 ## 安装与配置
 
-安装器会询问本次操作、访问保护方式、反向代理位置、域名和端口绑定，并自动写入 `.env`。选择内置 Basic Auth 时，密码只以 bcrypt 哈希保存到 `data/auth/htpasswd`。DSH 和 Agent 固定使用容器内 root，以便直接通过 apt 管理开发工具；这不会授予宿主机 root、Docker socket 或特权容器权限。
+起步配置 1 vCPU / 2 GB 内存和 10 GB 磁盘即可；打算长期让 Agent 在容器里装工具链，建议 2 vCPU / 4 GB 和 20 GB 磁盘。默认拉取多架构预构建镜像 `ghcr.io/univers629/dsh-docker:latest`（覆盖 `linux/amd64` 和 `linux/arm64`），拉不到时自动退回用当前工程的 `Dockerfile` 现场构建，并把实际来源写进 `.env` 的 `DSH_IMAGE` 和 `DSH_IMAGE_SOURCE`；非交互安装用 `--image-source prebuilt|build` 和 `--image REF`，Windows 对应 `-ImageSource` 和 `-Image`。
+
+安装器会询问本次操作、镜像来源、访问保护方式、反向代理位置、域名和端口绑定，并自动写入 `.env`。选择内置 Basic Auth 时，密码只以 bcrypt 哈希保存到 `data/auth/htpasswd`。DSH 和 Agent 固定使用容器内 root，以便直接通过 apt 管理开发工具；这不会授予宿主机 root、Docker socket 或特权容器权限。
 
 Linux：
 
@@ -72,6 +51,16 @@ curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.
 ```
 
 在已下载的工程目录中执行 `bash install.sh --help` 可查看 Linux 参数；Windows 可直接运行 `powershell -ExecutionPolicy Bypass -File .\install.ps1`。
+
+### 镜像发布
+
+预构建镜像由 [.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) 在 GitHub 原生 amd64 与 arm64 runner 上分别构建后合并成多架构清单，三种触发方式：
+
+- **自动跟随上游**：每天 03:17 UTC 查一次 npm 上 `@deepseek-ai/dsh` 的 `latest`，只有该版本还没有对应镜像标签时才构建，因此上游一天连发多个版本也最多发一版镜像。
+- **手动触发**：Actions 页面运行 workflow，可指定 npm 版本或 dist-tag（默认 `latest`）。工程文件或补丁改动后想立刻重新发版就用这个。
+- **打标签发版**：推送 `v*` 标签。
+
+每次发布都会打上 `latest`、`dsh-<DSH 版本>` 和 `<日期>-<提交>` 标签，所以包页面能直接看出镜像里装的是哪个 DSH。上游改动让某条产物补丁的锚点失效时构建会直接失败，不会推出一个没打补丁的镜像。公开仓库使用标准 runner 不计费，GHCR 上公开包的存储和拉取流量也不计费。新建的 GHCR 包默认私有，首次发布后需要在仓库 → Packages → Package settings → Change visibility 改成 public，否则服务器上匿名拉取会得到 `denied`。
 
 ## 日常管理
 
