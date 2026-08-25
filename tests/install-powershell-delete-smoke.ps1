@@ -35,12 +35,15 @@ try {
     foreach ($file in @('docker-compose.yml','docker-compose.system.yml','Dockerfile','install.ps1')) {
         [IO.File]::WriteAllText((Join-Path $project $file), $file)
     }
+    # 预构建安装的镜像引用只记在 .env 里，删除必须按它精确清理。
+    [IO.File]::WriteAllText((Join-Path $project '.env'), "DSH_ACCESS_MODE=local`nDSH_IMAGE=ghcr.io/univers629/dsh-docker:latest`n")
     Remove-DshProject
     if (Test-Path -LiteralPath $project) { throw 'Windows delete did not remove the project directory.' }
     $calls = [IO.File]::ReadAllText($dockerLog)
     foreach ($pattern in @(
         'compose -p dsh-docker .*down --volumes --remove-orphans',
         'container ls -aq --filter label=com\.docker\.compose\.project=dsh-docker',
+        'image rm -f ghcr\.io/univers629/dsh-docker:latest',
         'image ls .*reference=dsh:\*',
         'image ls -q --filter label=org\.opencontainers\.image\.title=dsh-docker',
         'volume ls -q --filter label=com\.docker\.compose\.project=dsh-docker',

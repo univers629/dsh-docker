@@ -8,6 +8,7 @@ export COMPOSE_DOCKER_CLI_BUILD=1
 # Compose 里 shell 环境变量的优先级高于 .env；清掉它们，保证运行时始终使用
 # 安装器写入 .env 的访问模式、绑定地址和网络配置。
 unset DSH_ACCESS_MODE DSH_BIND_HOST DSH_TRUSTED_HOSTS DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL
+unset DSH_IMAGE DSH_IMAGE_SOURCE
 
 ACTION="${1:-start}"
 
@@ -32,11 +33,29 @@ container_running() {
   [ "$(DOCKER inspect --format '{{.State.Status}}' dsh 2>/dev/null || true)" = running ]
 }
 
-ensure_image() {
-  if ! DOCKER image inspect dsh:local >/dev/null 2>&1; then
-    echo "==> 首次创建容器，正在构建 Debian 13 镜像..."
-    DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
+# 安装器把镜像引用写进 .env；预构建安装用的是发布引用，不是 dsh:local。
+env_value() {
+  local key="$1" fallback="$2" value=""
+  if [ -f .env ]; then
+    value="$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' .env 2>/dev/null || true)"
   fi
+  printf '%s' "${value:-$fallback}"
+}
+
+ensure_image() {
+  local image_ref image_source
+  image_ref="$(env_value DSH_IMAGE dsh:local)"
+  image_source="$(env_value DSH_IMAGE_SOURCE '')"
+  if DOCKER image inspect "$image_ref" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ "$image_source" = prebuilt ]; then
+    echo "==> 首次创建容器，正在拉取预构建 Debian 13 镜像：$image_ref"
+    DOCKER compose "${COMPOSE_ARGS[@]}" pull dsh
+    return 0
+  fi
+  echo "==> 首次创建容器，正在构建 Debian 13 镜像..."
+  DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
 }
 
 ensure_container() {

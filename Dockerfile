@@ -47,7 +47,10 @@ RUN DSH_BUILD_APP_DIR=/app/dsh NODE_PATH=/usr/local/lib/node_modules node /tmp/b
 
 FROM ${DEBIAN_IMAGE} AS runtime
 
+# image.source 让 GHCR 自动把包关联到本仓库，包页面才会显示 README 并继承
+# 仓库的可见性入口。
 LABEL org.opencontainers.image.title="dsh-docker" \
+      org.opencontainers.image.source="https://github.com/univers629/dsh-docker" \
       org.opencontainers.image.licenses="MIT"
 
 ARG UPSTREAM_REPO=https://github.com/deepseek-ai/deepseek-harness.git

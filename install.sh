@@ -7,6 +7,8 @@ BIND_HOST_OVERRIDE=""
 TRUSTED_HOSTS_OVERRIDE=""
 NETWORK_OVERRIDE=""
 NETWORK_EXTERNAL_OVERRIDE=""
+IMAGE_SOURCE_OVERRIDE=""
+IMAGE_OVERRIDE=""
 INTERACTIVE=auto
 TARGET_DIR="${DSH_INSTALL_DIR:-dsh-docker}"
 PROMPT_RESULT=""
@@ -17,7 +19,12 @@ PENDING_BIND_HOST=""
 PENDING_TRUSTED_HOSTS=""
 PENDING_NETWORK=""
 PENDING_NETWORK_EXTERNAL=""
+PENDING_IMAGE=""
+PENDING_IMAGE_SOURCE=""
 PENDING_ENV_FILE=""
+
+DEFAULT_PREBUILT_IMAGE="${DSH_PREBUILT_IMAGE:-ghcr.io/univers629/dsh-docker:latest}"
+DEFAULT_LOCAL_IMAGE="dsh:local"
 
 usage() {
   cat <<'EOF'
@@ -30,6 +37,8 @@ usage() {
   --trusted-hosts HOSTS           逗号分隔的公网 host[:port]
   --network NAME                  与 Docker 反向代理共享的外部网络
   --network-external / --network-internal
+  --image-source prebuilt|build   prebuilt 拉取已发布镜像，build 在本机编译
+  --image REF                     自定义镜像引用（默认按来源推导）
   --non-interactive               不显示问答，使用参数或安全默认值
   --dir PATH                      工程目录（默认 ./dsh-docker）
 EOF
@@ -70,6 +79,18 @@ while [ "$#" -gt 0 ]; do
       NETWORK_OVERRIDE="$1"
       ;;
     --network=*) NETWORK_OVERRIDE="${1#*=}" ;;
+    --image-source)
+      [ "$#" -ge 2 ] || { echo "[错误] --image-source 缺少值。" >&2; exit 2; }
+      shift
+      IMAGE_SOURCE_OVERRIDE="$1"
+      ;;
+    --image-source=*) IMAGE_SOURCE_OVERRIDE="${1#*=}" ;;
+    --image)
+      [ "$#" -ge 2 ] || { echo "[错误] --image 缺少值。" >&2; exit 2; }
+      shift
+      IMAGE_OVERRIDE="$1"
+      ;;
+    --image=*) IMAGE_OVERRIDE="${1#*=}" ;;
     --network-external) NETWORK_EXTERNAL_OVERRIDE=true ;;
     --network-internal) NETWORK_EXTERNAL_OVERRIDE=false ;;
     --non-interactive|-y|--yes) INTERACTIVE=false ;;
@@ -99,6 +120,10 @@ esac
 case "$ACCESS_MODE_OVERRIDE" in
   ''|local|trusted-proxy|basic) ;;
   *) echo "[错误] --access 只支持 local、trusted-proxy 或 basic。" >&2; exit 2 ;;
+esac
+case "$IMAGE_SOURCE_OVERRIDE" in
+  ''|prebuilt|build) ;;
+  *) echo "[错误] --image-source 只支持 prebuilt 或 build。" >&2; exit 2 ;;
 esac
 
 if [ "$INTERACTIVE" = auto ]; then
@@ -238,7 +263,7 @@ confirm_delete() {
     echo "[错误] delete 是破坏性操作，需要交互确认；请不要使用 --non-interactive。" >&2
     exit 2
   fi
-  echo "[警告] 将删除 dsh 容器、dsh:* 镜像、本项目 Compose 挂载和网络、全局 Docker 构建缓存，以及 $TARGET_DIR。"
+  echo "[警告] 将删除 dsh 容器、DSH 镜像（dsh:* 与 .env 记录的预构建引用）、本项目 Compose 挂载和网络、全局 Docker 构建缓存，以及 $TARGET_DIR。"
   printf '请输入 DELETE 继续，其他输入取消: ' > /dev/tty
   IFS= read -r answer < /dev/tty || exit 1
   if [ "$answer" != DELETE ]; then
@@ -284,6 +309,7 @@ detach_delete() {
 
 delete_project() {
   local project_name=dsh-docker image_refs ref ids id target_abs network_ids network_project container_ids
+  local configured_image
   confirm_delete
 
   if container_exists; then
@@ -308,6 +334,14 @@ delete_project() {
     [ -n "$id" ] && DOCKER container rm -f "$id" >/dev/null 2>&1 || true
   done <<< "$container_ids"
   DOCKER container rm -f dsh >/dev/null 2>&1 || true
+  # 预构建安装用的引用不叫 dsh:*，而且多架构清单未必带上项目标签，所以要按
+  # .env 里记录的引用精确删除一次。delete 可能在工程目录的上一级执行，因此
+  # 这里不能依赖当前目录的 .env。
+  configured_image="$(awk -F= '$1 == "DSH_IMAGE" { sub(/^[^=]*=/, ""); print; exit }' "$TARGET_DIR/.env" 2>/dev/null || true)"
+  case "$configured_image" in
+    ''|dsh:local) ;;
+    *) DOCKER image rm -f "$configured_image" >/dev/null 2>&1 || true ;;
+  esac
   image_refs="$(DOCKER image ls --format '{{.Repository}}:{{.Tag}}' --filter 'reference=dsh:*' 2>/dev/null | sort -u || true)"
   while IFS= read -r ref; do
     [ -n "$ref" ] && DOCKER image rm -f "$ref" >/dev/null 2>&1 || true
@@ -481,7 +515,32 @@ ensure_external_network() {
 configure_dsh() {
   local access_mode bind_host trusted_hosts network network_external
   local route default_route default_network keep_auth confirm_password
-  local candidates
+  local candidates image_source image_ref
+
+  image_source="${IMAGE_SOURCE_OVERRIDE:-$(get_compose_env DSH_IMAGE_SOURCE prebuilt)}"
+  case "$image_source" in prebuilt|build) ;; *) image_source=prebuilt ;; esac
+  if [ "$INTERACTIVE" = true ] && [ -z "$IMAGE_SOURCE_OVERRIDE" ]; then
+    case "$image_source" in build) default_route=2 ;; *) default_route=1 ;; esac
+    echo
+    echo "Debian 13 镜像来源："
+    echo "1) 拉取公开预构建镜像（推荐：不在本机编译 DSH，安装耗时约等于下载耗时）"
+    echo "2) 在本机构建镜像（用当前工程源码编译，1 核 1G 机器可能超过 20 分钟）"
+    prompt "请选择" "$default_route"
+    case "$PROMPT_RESULT" in
+      1) image_source=prebuilt ;;
+      2) image_source=build ;;
+      *) echo "[错误] 无效镜像来源选项。" >&2; exit 2 ;;
+    esac
+  fi
+  if [ -n "$IMAGE_OVERRIDE" ]; then
+    image_ref="$IMAGE_OVERRIDE"
+  elif [ "$image_source" = build ]; then
+    image_ref="$DEFAULT_LOCAL_IMAGE"
+  else
+    image_ref="$(get_compose_env DSH_IMAGE "$DEFAULT_PREBUILT_IMAGE")"
+    # 旧安装的 .env 里记着本机构建的标签；切换到预构建时必须换成发布引用。
+    case "$image_ref" in "$DEFAULT_LOCAL_IMAGE") image_ref="$DEFAULT_PREBUILT_IMAGE" ;; esac
+  fi
 
   access_mode="${ACCESS_MODE_OVERRIDE:-$(get_compose_env DSH_ACCESS_MODE local)}"
   if [ "$INTERACTIVE" = true ] && [ -z "$ACCESS_MODE_OVERRIDE" ]; then
@@ -617,6 +676,38 @@ configure_dsh() {
   PENDING_TRUSTED_HOSTS="$trusted_hosts"
   PENDING_NETWORK="$network"
   PENDING_NETWORK_EXTERNAL="$network_external"
+  PENDING_IMAGE="$image_ref"
+  PENDING_IMAGE_SOURCE="$image_source"
+}
+
+build_dsh_image() {
+  (
+    export DSH_IMAGE="$PENDING_IMAGE"
+    DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
+  )
+}
+
+pull_dsh_image() {
+  (
+    export DSH_IMAGE="$PENDING_IMAGE"
+    DOCKER compose "${COMPOSE_ARGS[@]}" pull dsh
+  )
+}
+
+# 预构建优先，但公网拉取可能因为网络或尚未发布而失败；这时退回本机构建，
+# 而不是让整次安装中断。回退发生在写入 .env 之前，所以配置不会记错来源。
+obtain_dsh_image() {
+  if [ "$PENDING_IMAGE_SOURCE" = prebuilt ]; then
+    echo "==> 正在拉取预构建 Debian 13 镜像：$PENDING_IMAGE"
+    if pull_dsh_image; then
+      return 0
+    fi
+    echo "[警告] 无法拉取 $PENDING_IMAGE，改为在本机构建镜像。" >&2
+    PENDING_IMAGE_SOURCE=build
+    PENDING_IMAGE="$DEFAULT_LOCAL_IMAGE"
+  fi
+  echo "==> 正在构建 DSH 镜像..."
+  build_dsh_image
 }
 
 write_basic_auth() {
@@ -626,7 +717,7 @@ write_basic_auth() {
   mkdir -p data/auth
   temporary="$(mktemp data/auth/htpasswd.tmp.XXXXXX)"
   if ! printf '%s\n' "$PENDING_BASIC_PASSWORD" \
-    | DOCKER run --rm -i --entrypoint htpasswd dsh:local -niB "$PENDING_BASIC_USER" > "$temporary"; then
+    | DOCKER run --rm -i --entrypoint htpasswd "$PENDING_IMAGE" -niB "$PENDING_BASIC_USER" > "$temporary"; then
     rm -f "$temporary"
     echo "[错误] 无法生成 Basic Auth 密码哈希。" >&2
     exit 1
@@ -646,13 +737,15 @@ prepare_pending_env() {
   set_compose_env DSH_DOCKER_NETWORK "$PENDING_NETWORK" "$PENDING_ENV_FILE"
   set_compose_env DSH_DOCKER_NETWORK_EXTERNAL "$PENDING_NETWORK_EXTERNAL" "$PENDING_ENV_FILE"
   set_compose_env DSH_TRUSTED_HOSTS "$PENDING_TRUSTED_HOSTS" "$PENDING_ENV_FILE"
+  set_compose_env DSH_IMAGE "$PENDING_IMAGE" "$PENDING_ENV_FILE"
+  set_compose_env DSH_IMAGE_SOURCE "$PENDING_IMAGE_SOURCE" "$PENDING_ENV_FILE"
 }
 
 compose_up_with_pending_env() {
   (
     unset DSH_ACCESS_MODE DSH_BIND_HOST DSH_TRUSTED_HOSTS
-    unset DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL
-    DOCKER compose --env-file "$PENDING_ENV_FILE" "${COMPOSE_ARGS[@]}" up -d --force-recreate
+    unset DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL DSH_IMAGE DSH_IMAGE_SOURCE
+    DOCKER compose --env-file "$PENDING_ENV_FILE" "${COMPOSE_ARGS[@]}" up -d --no-build --force-recreate
   )
 }
 
@@ -681,6 +774,7 @@ print_config_summary() {
   echo "==> 配置已保存到 $(pwd)/.env"
   echo "    访问模式: $PENDING_ACCESS_MODE"
   echo "    端口绑定: $PENDING_BIND_HOST:3080"
+  echo "    镜像来源: $PENDING_IMAGE_SOURCE（$PENDING_IMAGE）"
   [ -z "$PENDING_TRUSTED_HOSTS" ] || echo "    Trusted hosts: $PENDING_TRUSTED_HOSTS"
 }
 
@@ -692,8 +786,7 @@ trap cleanup_pending_env EXIT
 case "$ACTION" in
   install|configure)
     configure_dsh
-    echo "==> 正在构建 DSH 镜像..."
-    DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
+    obtain_dsh_image
     write_basic_auth
     prepare_pending_env
     echo "==> 正在启动 DSH..."

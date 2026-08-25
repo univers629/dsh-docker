@@ -1,0 +1,129 @@
+name: publish-image
+
+# 在 GitHub 的原生 amd64 和 arm64 runner 上分别构建，再合并成一个多架构清单，
+# 这样 1 核小 VPS 不必自己编译 DSH，安装时直接拉取即可。
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 要构建的 DSH 上游分支或标签
+        required: false
+        default: master
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            slug: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            slug: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # DSH 的 pnpm workspace 加两个镜像阶段很占空间，先腾出预装的 SDK。
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # push-by-digest 只推送单架构镜像，不占用 :latest 标签；合并作业负责打标签。
+      # provenance 必须关闭，否则 imagetools 会把证明清单也当成一个平台。
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            UPSTREAM_REF=${{ github.event.inputs.upstream_ref || 'master' }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.slug }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          printf '%s' '${{ steps.build.outputs.digest }}' > "/tmp/digests/${{ matrix.slug }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value={{date 'YYYYMMDD'}}-{{sha}}
+            type=ref,event=tag
+
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          set -eu
+          tags="$(jq -cr '.tags | map("--tag " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
+          sources=""
+          for file in *; do
+            sources="$sources ${REGISTRY}/${IMAGE_NAME}@$(cat "$file")"
+          done
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tags $sources
+
+      - name: Inspect published manifest
+        run: docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:latest"
