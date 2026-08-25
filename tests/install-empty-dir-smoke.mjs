@@ -49,13 +49,13 @@ if [ "\${1:-}" = compose ]; then
     *" build dsh "*)
       if [ "\${MOCK_FAIL_BUILD:-}" = 1 ]; then exit 42; fi
       ;;
-    *" pull dsh "*)
-      if [ "\${MOCK_FAIL_PULL:-}" = 1 ]; then exit 18; fi
-      ;;
     *" up -d "*)
       : > "$MOCK_DOCKER_STATE"
       ;;
   esac
+fi
+if [ "\${1:-}" = pull ]; then
+  if [ "\${MOCK_FAIL_PULL:-}" = 1 ]; then exit 18; fi
 fi
 if [ "\${1:-}" = run ]; then
   printf '%s\\n' 'dsh:$2y$05$installerSmokeHash'
@@ -153,7 +153,7 @@ try {
 
   const calls = await readFile(dockerLog, 'utf8')
   assert.match(calls, /container inspect dsh/)
-  assert.match(calls, /compose .* pull dsh/)
+  assert.match(calls, /^pull ghcr\.io\/univers629\/dsh-docker:latest$/m)
   assert.match(calls, /compose .* build dsh/)
   assert.match(calls, /compose .* up -d --no-build --force-recreate/)
   assert.match(calls, /run --rm -i --entrypoint htpasswd dsh:local -niB dsh/)

@@ -55,8 +55,7 @@ ensure_image() {
   fi
   if [ "$image_source" = prebuilt ]; then
     echo "==> 首次创建容器，正在拉取预构建 Debian 13 镜像：$image_ref"
-    DOCKER_ENV DSH_IMAGE="$image_ref" \
-      docker compose "${COMPOSE_ARGS[@]}" pull dsh
+    DOCKER pull "$image_ref"
     return 0
   fi
   echo "==> 首次创建容器，正在构建 Debian 13 镜像..."

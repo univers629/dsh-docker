@@ -55,7 +55,8 @@ docker image inspect "%IMAGE_REF%" >nul 2>nul
 if errorlevel 1 (
   if /i "%IMAGE_SOURCE%"=="prebuilt" (
     echo ==^> 首次创建容器，正在拉取预构建 Debian 13 镜像：%IMAGE_REF%
-    docker compose pull dsh
+    rem 拉取不经过 Compose：引用直接交给守护进程，插值出问题时也不会拉错镜像。
+    docker pull "%IMAGE_REF%"
   ) else (
     echo ==^> 首次创建容器，正在构建 Debian 13 镜像...
     docker compose build dsh
