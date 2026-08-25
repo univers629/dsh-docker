@@ -57,8 +57,10 @@ survive docker rm, docker compose down, or another operation that recreates
 the container. /tmp is ordinary temporary container storage, not a persistent
 mount.
 
-/app/dsh contains the managed DSH application. Do not store projects or
-credentials there because the built-in updater replaces it.
+/app/dsh holds the managed DSH installation: the npm-installed
+@deepseek-ai/dsh package under lib/node_modules plus a node_modules symlink for
+resolution. Do not store projects or credentials there because the built-in
+updater replaces the whole directory.
 
 ## Installing tools
 
@@ -95,11 +97,13 @@ For one-shot servers, uvx and npx use caches below /data/home:
 The WebUI settings panel has a **DSH environment** page in its left nav. It
 shows the installed and latest DSH versions, and provides **Check for updates**
 and **Update now**. It never checks online until the button is pressed.
-**Restart DSH** stays in the settings header. The updater pulls source into /tmp, reapplies
-/etc/dsh-patches, builds, validates Nginx, atomically replaces /app/dsh,
-and asks the in-container Supervisor to replace only the DSH child process.
-The Debian container and Nginx process stay running. Failed patching, building,
-or validation restores the previous application.
+**Restart DSH** stays in the settings header. The updater installs the target
+@deepseek-ai/dsh release from npm into a /tmp staging directory, reapplies the
+/etc/dsh-patches artifact patch set, validates Nginx, atomically replaces
+/app/dsh, and asks the in-container Supervisor to replace only the DSH child
+process. Nothing is cloned or compiled. The Debian container and Nginx process
+stay running. A failed patch anchor, install, or validation restores the
+previous application.
 
 Do not rebuild or recreate the container for an ordinary DSH update. Those
 operations discard apt-installed tools and other changes in the writable

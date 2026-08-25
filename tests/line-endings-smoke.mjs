@@ -3,8 +3,9 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 // Git for Windows checks out with core.autocrlf=true by default. CRLF in the
-// container scripts breaks their shebang inside the image and makes git apply
-// reject the DSH patches, so the checkout end-of-line must be pinned.
+// container scripts breaks their shebang inside the image, and CRLF in the
+// artifact patch definitions would make every anchor miss, so the checkout
+// end-of-line must be pinned.
 const root = fileURLToPath(new URL('..', import.meta.url))
 const checkAttr = (attribute, file) => {
   const result = spawnSync('git', ['-c', 'safe.directory=*', 'check-attr', attribute, '--', file], {
@@ -23,15 +24,15 @@ const lfFiles = [
   'bin/cleanup-dsh-plugin-transactions',
   'bin/configure-nginx-auth',
   'bin/entrypoint.sh',
-  'bin/apply-dsh-patches.sh',
+  'bin/install-dsh-runtime.sh',
   'bin/update-dsh.sh',
   'dsh.sh',
   'install.sh',
   'install.ps1',
   'nginx/dsh-nginx.conf',
-  'patches/public-local-mode.patch',
-  'patches/websocket-keepalive.patch',
-  'patches/workspace-session-attachment.patch',
+  'patches/artifact-patches.mjs',
+  'bin/apply-dsh-artifact-patches.mjs',
+  'bin/prepare-profile-modules.mjs',
   'dsh-home/docker-control/lib/index.js',
 ]
 for (const file of lfFiles) {

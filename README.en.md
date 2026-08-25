@@ -16,20 +16,22 @@ A local Docker build and persistent runtime for DeepSeek Harness, with a prebuil
 | --- | --- | --- | --- |
 | Pull the prebuilt image (default) | 1 vCPU / 2 GB | >= 10 GB | DSH is never compiled locally, so install time is mostly download time |
 | Long-term agent playground | 2 vCPU / 4 GB | >= 20 GB | Toolchains the agent installs with apt stay in the same writable layer |
-| Build the image locally | >= 4 vCPU / 8 GB | >= 25 GB | `pnpm install` plus the TypeScript build is a single-threaded heavy load |
+| Build the image locally | 1 vCPU / 2 GB | >= 15 GB | Only apt system packages plus an npm install of the prebuilt DSH package; no TypeScript build |
 
-Use the prebuilt image on hosts with less than 2 GB of RAM, and configure swap. On a 1 vCPU / 1 GB VPS a local build swaps constantly, `pnpm run build:official` regularly takes more than 20 minutes, and the OOM killer may end it. The unpacked image is about 3.3 GB.
+A local build no longer compiles DSH: the image installs the upstream prebuilt packages from npm and patches the published artifacts, which measured about 4 minutes end to end and produces an unpacked image of about 1.4 GB. A 1 vCPU / 1 GB VPS can build it; still configure swap and prefer the prebuilt image, which mainly saves download and apt time.
 
 ### Image source
 
 The installer's first question is where the Debian 13 image comes from:
 
 1. **Prebuilt (default)**: pull `ghcr.io/univers629/dsh-docker:latest`, a single multi-arch manifest covering `linux/amd64` and `linux/arm64`.
-2. **Local build**: compile from the `Dockerfile` in this checkout.
+2. **Local build**: build from the `Dockerfile` in this checkout (apt packages plus an npm install of DSH; nothing is compiled from source).
 
 When the pull fails the installer falls back to a local build and records the real source in `.env` as `DSH_IMAGE` and `DSH_IMAGE_SOURCE`. Unattended runs use `--image-source prebuilt|build` and `--image REF`; the Windows equivalents are `-ImageSource` and `-Image`.
 
-[.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) builds each architecture on a native GitHub amd64 or arm64 runner and merges them into one multi-arch manifest; a manual run can pick the DSH upstream ref to compile. A published image is a point-in-time snapshot: update DSH itself later from the WebUI "DSH environment" page or with `./dsh.sh update`.
+[.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) builds each architecture on a native GitHub amd64 or arm64 runner and merges them into one multi-arch manifest. Publishing runs from a manual dispatch on the Actions page, which can pick the DSH npm version to install (`latest` by default), or from pushing a `v*` tag. Standard GitHub runners are not billed for public repositories, so there is no quota limit on how often you publish.
+
+A published image is a point-in-time snapshot. The WebUI "DSH environment" page and `./dsh.sh update` install the new prebuilt package from npm inside the container and reapply the patch set, so they only cost download and install time (about one minute in practice) instead of a source build, and the container writable layer, including the toolchains the agent installed with apt, is kept throughout.
 
 After the first publish, switch the `dsh-docker` package in GitHub Packages to public once (repository -> Packages -> Package settings -> Change visibility). New GHCR packages are private by default, so an anonymous pull on a server returns `denied` and the installer falls back to a local build.
 
@@ -51,6 +53,18 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | i
 
 The Linux and Windows installers fetch the project, prepare the Debian 13 image (pulling the prebuilt one by default), and start the same container runtime. The Windows installer starts the Docker Desktop Linux Engine when necessary.
 
+Both one-line commands open the same interactive menu:
+
+| Option | What it does |
+| --- | --- |
+| 1 Fresh install | Becomes "reconfigure and recreate the container (mounted data kept)" when the project directory exists; asks for the image source, access protection, proxy location, domain, and port binding |
+| 2 Update DSH inside the container | Installs the new version from npm in the running container, reapplies the patch set, and restarts only the DSH process |
+| 3 Start / 4 Stop / 5 Restart | Acts on the existing container only; nothing is recreated and apt-installed toolchains are kept |
+| 6 Logs / 7 Status | Forwarded to `./dsh.sh logs` and `status` |
+| 8 Delete | Fully removes the container, images, mounts, networks, build cache, and project directory after a `DELETE` confirmation |
+
+Only option 1 asks for the Debian 13 image source (prebuilt or local build); options 2 through 8 act on the existing container.
+
 Unattended installation example:
 
 ```bash
@@ -68,7 +82,7 @@ Linux: ./dsh.sh [start|update|stop|restart|logs|status|shell|remove]
 Windows: .\dsh.bat [start|update|stop|restart|logs|status|shell|remove]
 ```
 
-`start` prepares the Debian 13 image only when the container does not exist, pulling or building it according to the source recorded in `.env`; later starts reuse the same container. `stop`, `restart`, and `apt install` performed by an in-container agent keep the container writable layer. `remove`/`down` deletes that layer, while `/data` and `/workspace` bind mounts remain. The `update` action is an in-container DSH source update, not a project or image rebuild.
+`start` prepares the Debian 13 image only when the container does not exist, pulling or building it according to the source recorded in `.env`; later starts reuse the same container. `stop`, `restart`, and `apt install` performed by an in-container agent keep the container writable layer. `remove`/`down` deletes that layer, while `/data` and `/workspace` bind mounts remain. The `update` action reinstalls the DSH npm package inside the container and swaps `/app/dsh`; it is not a project or image rebuild. The container healthcheck probes both the Nginx entry and DSH's own port, so a DSH crash loop shows as `unhealthy` in `docker ps` instead of being hidden behind a healthy gateway.
 
 To completely clear this project before a fresh install on a server, run the installer from the project directory and choose `delete` (menu item 8), or run:
 
@@ -163,7 +177,7 @@ Removing the container with `docker rm` or `docker compose down` removes the sys
 
 ### Built-in control plugin
 
-The image includes `dsh-docker-control` and restores it when the web profile is empty on first boot. It adds a DSH environment page to the settings left nav, beside General, Models, Plugins, and Agent presets. The page shows the installed and latest DSH versions and provides Check for updates, Update now, and a Desktop UI / Phone UI layout selector. Opening settings never reaches the network; only the check button queries the upstream ref. The phone layout makes the settings panel full screen, turns its left nav into a horizontally scrollable top tab strip, and turns the home sidebar into a drawer: closed it gives the whole width to the conversation and a floating button in the top-left corner opens it, open it floats over the conversation instead of squeezing it. The first visit picks a layout from the browser user agent. The update runs inside the container, reapplies the current patch set, builds into a temporary directory, and atomically swaps the app; failures leave the old version running. No SSH session is required. Updates and Restart DSH replace only the DSH child managed by the Supervisor; neither action restarts the Debian container or Nginx. The settings header also provides a WebUI editor for `/data/dsh/settings.yaml`. The editor validates YAML and protects against concurrent overwrites.
+The image includes `dsh-docker-control` and restores it when the web profile is empty on first boot. It adds a DSH environment page to the settings left nav, beside General, Models, Plugins, and Agent presets. The page shows the installed and latest DSH versions and provides Check for updates, Update now, and a Desktop UI / Phone UI layout selector. Opening settings never reaches the network; only the check button queries the npm registry for the latest version. The phone layout makes the settings panel full screen, turns its left nav into a horizontally scrollable top tab strip, and turns the home sidebar into a drawer: closed it gives the whole width to the conversation and a floating button in the top-left corner opens it, open it floats over the conversation instead of squeezing it. The first visit picks a layout from the browser user agent. The update installs the target version from npm inside the container, reapplies the current patch set to the published artifacts, and atomically swaps the app; failures leave the old version running. No SSH session is required. Updates and Restart DSH replace only the DSH child managed by the Supervisor; neither action restarts the Debian container or Nginx. The settings header also provides a WebUI editor for `/data/dsh/settings.yaml`. The editor validates YAML and protects against concurrent overwrites.
 
 In-container Agents should install, update, and remove plugins through `manage-dsh-plugin`. It creates a same-volume temporary profile under `/data/dsh/profiles`, permits the build scripts required by pnpm packages, validates configuration plus runtime resolution and import, then atomically replaces the live profile. Normal completion immediately removes the temporary profile and pnpm Git-build directories created by that transaction; the next DSH start or plugin operation recovers and cleans transactions or backups left by power loss or forced termination. The content-addressable pnpm store under `/data/home` is an intentional persistent download cache and can be reclaimed explicitly with `pnpm store prune`.
 

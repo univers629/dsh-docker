@@ -97,10 +97,10 @@ async function dshInfo() {
     ok: true,
     dsh: {
       version: typeof metadata.version === 'string' ? metadata.version : 'unknown',
-      upstreamCommit: typeof metadata.upstreamCommit === 'string' ? metadata.upstreamCommit : 'unknown',
+      package: typeof metadata.package === 'string' ? metadata.package : npmPackage(),
+      source: typeof metadata.source === 'string' ? metadata.source : 'npm',
       patchsetHash: typeof metadata.patchsetHash === 'string' ? metadata.patchsetHash : 'unknown',
-      builtAt: typeof metadata.builtAt === 'string' ? metadata.builtAt : 'unknown',
-      upstreamRef: upstreamRef(),
+      installedAt: typeof metadata.installedAt === 'string' ? metadata.installedAt : 'unknown',
     },
     system: {
       debianVersion: readTextFileSync('/etc/debian_version'),
@@ -114,76 +114,54 @@ async function dshInfo() {
 const LATEST_CHECK_TTL_MS = 60_000
 let latestCache = null
 
-function upstreamRepo() {
-  return process.env.DSH_UPSTREAM_REPO ?? 'https://github.com/deepseek-ai/deepseek-harness.git'
+function npmPackage() {
+  return process.env.DSH_NPM_PACKAGE ?? '@deepseek-ai/dsh'
 }
 
-function upstreamRef() {
-  return process.env.DSH_UPSTREAM_REF ?? 'master'
+function npmRegistry() {
+  return (process.env.DSH_NPM_REGISTRY ?? 'https://registry.npmjs.org').replace(/\/+$/, '')
 }
 
-// The image records the upstream commit it was built from; the remote head of
-// the same ref is what an in-container update would fetch, so comparing the
-// two is the honest "is there anything to update" answer. Version strings are
-// informational only: upstream bumps package.json rarely, commits often.
-async function remoteHeadCommit() {
-  const { stdout } = await execFileAsync('git', ['ls-remote', upstreamRepo(), upstreamRef()], {
-    timeout: 20000,
-    windowsHide: true,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+function npmDistTag() {
+  return process.env.DSH_NPM_TAG ?? 'latest'
+}
+
+// 运行时就是上游发布在 npm 上的预构建包，所以“有没有更新”等于 registry 上
+// 该 dist-tag 的版本和已安装版本是否一致——不需要比对上游提交。
+async function remoteVersion() {
+  const url = `${npmRegistry()}/${npmPackage().replace('/', '%2f')}`
+  const response = await fetch(url, {
+    cache: 'no-store',
+    // 精简 manifest：完整 packument 有几 MB，这里只需要 dist-tags。
+    headers: { accept: 'application/vnd.npm.install-v1+json' },
+    signal: AbortSignal.timeout(20000),
   })
-  const commit = stdout.trim().split(/\s+/)[0] ?? ''
-  return /^[0-9a-f]{40}$/.test(commit) ? commit : null
-}
-
-// Only github.com repositories expose a raw file endpoint we can read without
-// cloning; any other remote simply reports an unknown latest version.
-function rawManifestUrl(commit) {
-  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(upstreamRepo())
-  if (match === null) return null
-  return `https://raw.githubusercontent.com/${match[1]}/${match[2]}/${commit}/package.json`
-}
-
-async function remoteVersion(commit) {
-  const url = rawManifestUrl(commit)
-  if (url === null) return null
-  try {
-    const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(15000) })
-    if (!response.ok) return null
-    const manifest = JSON.parse(await response.text())
-    return typeof manifest.version === 'string' ? manifest.version : null
-  } catch {
-    return null
+  if (!response.ok) {
+    throw new Error(`npm registry 返回 ${response.status} / npm registry returned ${response.status}`)
   }
+  const manifest = JSON.parse(await response.text())
+  const version = manifest?.['dist-tags']?.[npmDistTag()]
+  if (typeof version !== 'string' || version.length === 0) {
+    throw new Error(`npm registry 上没有 ${npmDistTag()} 版本 / the npm registry has no ${npmDistTag()} release`)
+  }
+  return version
 }
 
 async function latestDshInfo(force) {
   if (!force && latestCache !== null && Date.now() - latestCache.at < LATEST_CHECK_TTL_MS) return latestCache.value
-  const commit = await remoteHeadCommit()
-  if (commit === null) {
-    throw new Error('无法读取上游仓库的最新提交 / could not read the upstream head commit')
-  }
+  const latest = await remoteVersion()
   const metadata = readJsonFileSync(join(dshAppDir(), 'DSH-BUILD-METADATA.json'), {})
-  const currentCommit = typeof metadata.upstreamCommit === 'string' ? metadata.upstreamCommit : 'unknown'
-  const comparable = /^[0-9a-f]{7,40}$/.test(currentCommit)
+  const current = typeof metadata.version === 'string' ? metadata.version : 'unknown'
   const value = {
     ok: true,
-    repo: upstreamRepo(),
-    ref: upstreamRef(),
+    package: npmPackage(),
+    registry: npmRegistry(),
+    tag: npmDistTag(),
     checkedAt: new Date().toISOString(),
-    latest: {
-      commit,
-      shortCommit: commit.slice(0, 12),
-      version: (await remoteVersion(commit)) ?? 'unknown',
-    },
-    current: {
-      commit: currentCommit,
-      shortCommit: comparable ? currentCommit.slice(0, 12) : currentCommit,
-      version: typeof metadata.version === 'string' ? metadata.version : 'unknown',
-    },
-    // null = the image carries no comparable commit (hand-built or legacy),
-    // so the page shows both versions without claiming either verdict.
-    updateAvailable: comparable ? !commit.startsWith(currentCommit) : null,
+    latest: { version: latest },
+    current: { version: current },
+    // null = 已安装版本未知（手工装出来的运行时），页面只展示两个版本，不给结论。
+    updateAvailable: current === 'unknown' ? null : latest !== current,
   }
   latestCache = { at: Date.now(), value }
   return value

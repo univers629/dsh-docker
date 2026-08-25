@@ -1,3 +1,5 @@
 #!/bin/sh
 set -eu
-exec node /app/dsh/apps/cli/lib/bin.js "$@"
+DSH_APP_DIR=${DSH_APP_DIR:-/app/dsh}
+DSH_NPM_PACKAGE=${DSH_NPM_PACKAGE:-@deepseek-ai/dsh}
+exec node "$DSH_APP_DIR/lib/node_modules/$DSH_NPM_PACKAGE/lib/bin.js" "$@"

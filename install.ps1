@@ -563,7 +563,7 @@ $writeBasicAuth = $false
 if ($DshAction -in @('install','configure')) {
     if ($interactive -and -not $ImageSource) {
         $imageDefault = if ($imageSource -eq 'build') { '2' } else { '1' }
-        Write-Host 'Debian 13 镜像来源：1=拉取公开预构建镜像（推荐，不在本机编译 DSH）  2=在本机构建镜像（1 核 1G 机器可能超过 20 分钟）'
+        Write-Host 'Debian 13 镜像来源：1=拉取公开预构建镜像（推荐）  2=在本机构建镜像（不编译 DSH 源码，约几分钟）'
         $imageSource = switch (Ask '请选择' $imageDefault) { '2' {'build'}; default {'prebuilt'} }
     }
     if ($Image) { $imageRef = $Image }
