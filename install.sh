@@ -213,10 +213,14 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+# sudo 默认 env_reset，导出的变量到不了 docker compose，插值会退回 dsh:local。
+# 需要变量的调用一律走 DOCKER_ENV，用 env 在命令行上显式透传。
 if docker info >/dev/null 2>&1; then
   DOCKER() { docker "$@"; }
+  DOCKER_ENV() { env "$@"; }
 elif command -v sudo >/dev/null 2>&1; then
   DOCKER() { sudo docker "$@"; }
+  DOCKER_ENV() { sudo env "$@"; }
 else
   echo "[错误] 当前用户无权访问 Docker，且系统没有 sudo。" >&2
   exit 1
@@ -681,17 +685,13 @@ configure_dsh() {
 }
 
 build_dsh_image() {
-  (
-    export DSH_IMAGE="$PENDING_IMAGE"
-    DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
-  )
+  DOCKER_ENV DSH_IMAGE="$PENDING_IMAGE" DOCKER_BUILDKIT=1 \
+    docker compose "${COMPOSE_ARGS[@]}" build dsh
 }
 
 pull_dsh_image() {
-  (
-    export DSH_IMAGE="$PENDING_IMAGE"
-    DOCKER compose "${COMPOSE_ARGS[@]}" pull dsh
-  )
+  DOCKER_ENV DSH_IMAGE="$PENDING_IMAGE" \
+    docker compose "${COMPOSE_ARGS[@]}" pull dsh
 }
 
 # 预构建优先，但公网拉取可能因为网络或尚未发布而失败；这时退回本机构建，

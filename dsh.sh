@@ -17,10 +17,14 @@ if ! command -v docker &>/dev/null; then
   exit 1
 fi
 
+# sudo 默认 env_reset，导出的变量到不了 docker compose，插值会退回 dsh:local。
+# 需要变量的调用一律走 DOCKER_ENV，用 env 在命令行上显式透传。
 if docker info >/dev/null 2>&1; then
   DOCKER() { docker "$@"; }
+  DOCKER_ENV() { env "$@"; }
 else
   DOCKER() { sudo docker "$@"; }
+  DOCKER_ENV() { sudo env "$@"; }
 fi
 
 COMPOSE_ARGS=(-f docker-compose.yml)
@@ -51,11 +55,13 @@ ensure_image() {
   fi
   if [ "$image_source" = prebuilt ]; then
     echo "==> 首次创建容器，正在拉取预构建 Debian 13 镜像：$image_ref"
-    DOCKER compose "${COMPOSE_ARGS[@]}" pull dsh
+    DOCKER_ENV DSH_IMAGE="$image_ref" \
+      docker compose "${COMPOSE_ARGS[@]}" pull dsh
     return 0
   fi
   echo "==> 首次创建容器，正在构建 Debian 13 镜像..."
-  DOCKER compose "${COMPOSE_ARGS[@]}" build dsh
+  DOCKER_ENV DSH_IMAGE="$image_ref" DOCKER_BUILDKIT=1 \
+    docker compose "${COMPOSE_ARGS[@]}" build dsh
 }
 
 ensure_container() {
