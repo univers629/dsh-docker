@@ -10,6 +10,29 @@ DeepSeek Harness 的本地 Docker 构建与持久化运行方案，提供可由 
 
 [简体中文](README.md) · [English](README.en.md)
 
+## 运行配置建议
+
+| 用法 | CPU / 内存 | 磁盘 | 说明 |
+| --- | --- | --- | --- |
+| 拉取预构建镜像（默认） | 1 vCPU / 2 GB | ≥ 10 GB | 不在本机编译 DSH，安装耗时基本等于下载耗时 |
+| 长期给 Agent 折腾 | 2 vCPU / 4 GB | ≥ 20 GB | 容器内 apt 安装的工具链都留在同一个可写层 |
+| 在本机构建镜像 | ≥ 4 vCPU / 8 GB | ≥ 25 GB | `pnpm install` 加 TypeScript 编译是单线程重负载 |
+
+内存低于 2 GB 的机器请使用预构建镜像，并配置 swap：在 1 vCPU / 1 GB 的 VPS 上本机构建会持续换页，`pnpm run build:official` 常超过 20 分钟，也可能被 OOM 终止。镜像解包后约 3.3 GB。
+
+### 镜像来源
+
+安装器的第一个问题是 Debian 13 镜像来源：
+
+1. **预构建（默认）**：拉取 `ghcr.io/univers629/dsh-docker:latest`，同一个多架构清单覆盖 `linux/amd64` 和 `linux/arm64`。
+2. **本机构建**：用当前工程的 `Dockerfile` 编译。
+
+拉取失败时安装器会自动退回本机构建，并把实际来源写进 `.env` 的 `DSH_IMAGE` 与 `DSH_IMAGE_SOURCE`。非交互安装用 `--image-source prebuilt|build`，自定义引用用 `--image REF`；Windows 对应 `-ImageSource` 和 `-Image`。
+
+镜像由 [.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) 在 GitHub 原生 amd64 与 arm64 runner 上分别构建后合并成多架构清单，手动触发时可以指定要编译的 DSH 上游分支。发布镜像是某一时刻的快照；之后用 WebUI 的“DSH 环境”页或 `./dsh.sh update` 在容器内更新 DSH 本体。
+
+首次发布后需要手动把 GitHub Packages 里的 `dsh-docker` 包可见性改成 public（仓库 → Packages → Package settings → Change visibility）。GHCR 新建的包默认私有，服务器上匿名拉取会得到 `denied`，安装器随后会退回本机构建。
+
 ## 安装与配置
 
 安装器会询问本次操作、访问保护方式、反向代理位置、域名和端口绑定，并自动写入 `.env`。选择内置 Basic Auth 时，密码只以 bcrypt 哈希保存到 `data/auth/htpasswd`。DSH 和 Agent 固定使用容器内 root，以便直接通过 apt 管理开发工具；这不会授予宿主机 root、Docker socket 或特权容器权限。
@@ -26,12 +49,12 @@ Windows PowerShell（需要 Docker Desktop，并切换到 Linux containers）：
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-Linux 和 Windows 安装器都会获取项目、构建 Debian 13 镜像并启动同一套容器运行时。Windows 安装器会在需要时自动启动 Docker Desktop Linux Engine。
+Linux 和 Windows 安装器都会获取项目、准备 Debian 13 镜像（默认拉取预构建镜像）并启动同一套容器运行时。Windows 安装器会在需要时自动启动 Docker Desktop Linux Engine。
 
 无人值守安装示例：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- install --access local --non-interactive
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- install --access local --image-source prebuilt --non-interactive
 ```
 
 在已下载的工程目录中执行 `bash install.sh --help` 可查看 Linux 参数；Windows 可直接运行 `powershell -ExecutionPolicy Bypass -File .\install.ps1`。
@@ -45,7 +68,7 @@ Linux: ./dsh.sh [start|update|stop|restart|logs|status|shell|remove]
 Windows: .\dsh.bat [start|update|stop|restart|logs|status|shell|remove]
 ```
 
-`start` 只在容器尚不存在时构建 Debian 13 镜像；之后只启动原容器。`stop`、`restart` 和容器内 Agent 执行的 `apt install` 都保留在同一个容器可写层。`remove`/`down` 会删除容器可写层，只有 `/data` 和 `/workspace` 绑定挂载会保留。不要把 `update` 当成项目或镜像更新，它只是从容器内源码构建并替换 DSH。
+`start` 只在容器尚不存在时准备 Debian 13 镜像（按 `.env` 记录的来源拉取或构建）；之后只启动原容器。`stop`、`restart` 和容器内 Agent 执行的 `apt install` 都保留在同一个容器可写层。`remove`/`down` 会删除容器可写层，只有 `/data` 和 `/workspace` 绑定挂载会保留。不要把 `update` 当成项目或镜像更新，它只是从容器内源码构建并替换 DSH。
 
 如需在服务器上彻底清空本项目后重新安装，请在工程目录中重新运行安装器并选择“删除”（菜单第 8 项），或执行：
 
@@ -59,7 +82,7 @@ Windows PowerShell：
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete
 ```
 
-删除会精确清理 `dsh` 容器、`dsh:*` 镜像、本项目挂载和网络、全局 Docker 构建缓存以及工程目录；需要输入 `DELETE` 确认。不会使用 `name=dsh` 子串筛选，也不会删除外部共享网络（例如 `dpanel-local`）。无论在工程目录内还是在它的上一级目录执行，安装器都会先把自己复制到临时目录再删除，脚本文件和当前目录不会因为位于被删目录内而中断删除。
+删除会精确清理 `dsh` 容器、DSH 镜像（`dsh:*` 以及 `.env` 记录的预构建引用）、本项目挂载和网络、全局 Docker 构建缓存以及工程目录；需要输入 `DELETE` 确认。不会使用 `name=dsh` 子串筛选，也不会删除外部共享网络（例如 `dpanel-local`）。无论在工程目录内还是在它的上一级目录执行，安装器都会先把自己复制到临时目录再删除，脚本文件和当前目录不会因为位于被删目录内而中断删除。
 
 ## 公网访问与认证
 

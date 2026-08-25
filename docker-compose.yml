@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: dsh:local
+    image: "${DSH_IMAGE:-dsh:local}"
     container_name: dsh
     hostname: dsh
     user: "0:0"

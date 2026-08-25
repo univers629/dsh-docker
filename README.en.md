@@ -10,6 +10,29 @@ A local Docker build and persistent runtime for DeepSeek Harness, with a prebuil
 
 [简体中文](README.md) · [English](README.en.md)
 
+## Recommended host sizing
+
+| Usage | CPU / RAM | Disk | Notes |
+| --- | --- | --- | --- |
+| Pull the prebuilt image (default) | 1 vCPU / 2 GB | >= 10 GB | DSH is never compiled locally, so install time is mostly download time |
+| Long-term agent playground | 2 vCPU / 4 GB | >= 20 GB | Toolchains the agent installs with apt stay in the same writable layer |
+| Build the image locally | >= 4 vCPU / 8 GB | >= 25 GB | `pnpm install` plus the TypeScript build is a single-threaded heavy load |
+
+Use the prebuilt image on hosts with less than 2 GB of RAM, and configure swap. On a 1 vCPU / 1 GB VPS a local build swaps constantly, `pnpm run build:official` regularly takes more than 20 minutes, and the OOM killer may end it. The unpacked image is about 3.3 GB.
+
+### Image source
+
+The installer's first question is where the Debian 13 image comes from:
+
+1. **Prebuilt (default)**: pull `ghcr.io/univers629/dsh-docker:latest`, a single multi-arch manifest covering `linux/amd64` and `linux/arm64`.
+2. **Local build**: compile from the `Dockerfile` in this checkout.
+
+When the pull fails the installer falls back to a local build and records the real source in `.env` as `DSH_IMAGE` and `DSH_IMAGE_SOURCE`. Unattended runs use `--image-source prebuilt|build` and `--image REF`; the Windows equivalents are `-ImageSource` and `-Image`.
+
+[.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) builds each architecture on a native GitHub amd64 or arm64 runner and merges them into one multi-arch manifest; a manual run can pick the DSH upstream ref to compile. A published image is a point-in-time snapshot: update DSH itself later from the WebUI "DSH environment" page or with `./dsh.sh update`.
+
+After the first publish, switch the `dsh-docker` package in GitHub Packages to public once (repository -> Packages -> Package settings -> Change visibility). New GHCR packages are private by default, so an anonymous pull on a server returns `denied` and the installer falls back to a local build.
+
 ## Installation and configuration
 
 The installer asks what to do, how access is protected, where the reverse proxy runs, which hosts are trusted, and where the host port is bound. It writes `.env` automatically. Built-in Basic Auth stores only a bcrypt hash in `data/auth/htpasswd`. DSH and the Agent always run as container root so they can manage development tools with apt; this does not grant host root, a Docker socket, or privileged-container capabilities.
@@ -26,12 +49,12 @@ Windows PowerShell (requires Docker Desktop in Linux containers mode):
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-The Linux and Windows installers fetch the project, build the Debian 13 image, and start the same container runtime. The Windows installer starts the Docker Desktop Linux Engine when necessary.
+The Linux and Windows installers fetch the project, prepare the Debian 13 image (pulling the prebuilt one by default), and start the same container runtime. The Windows installer starts the Docker Desktop Linux Engine when necessary.
 
 Unattended installation example:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- install --access local --non-interactive
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- install --access local --image-source prebuilt --non-interactive
 ```
 
 Run `bash install.sh --help` inside the downloaded project directory for Linux options. On Windows, run `powershell -ExecutionPolicy Bypass -File .\install.ps1` directly.
@@ -45,7 +68,7 @@ Linux: ./dsh.sh [start|update|stop|restart|logs|status|shell|remove]
 Windows: .\dsh.bat [start|update|stop|restart|logs|status|shell|remove]
 ```
 
-`start` builds the Debian 13 image only when the container does not exist; later starts reuse the same container. `stop`, `restart`, and `apt install` performed by an in-container agent keep the container writable layer. `remove`/`down` deletes that layer, while `/data` and `/workspace` bind mounts remain. The `update` action is an in-container DSH source update, not a project or image rebuild.
+`start` prepares the Debian 13 image only when the container does not exist, pulling or building it according to the source recorded in `.env`; later starts reuse the same container. `stop`, `restart`, and `apt install` performed by an in-container agent keep the container writable layer. `remove`/`down` deletes that layer, while `/data` and `/workspace` bind mounts remain. The `update` action is an in-container DSH source update, not a project or image rebuild.
 
 To completely clear this project before a fresh install on a server, run the installer from the project directory and choose `delete` (menu item 8), or run:
 
@@ -59,7 +82,7 @@ Windows PowerShell:
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete
 ```
 
-Deletion precisely removes the `dsh` container, `dsh:*` images, project mounts and networks, the global Docker build cache, and the project directory after a `DELETE` confirmation. It does not use a substring `name=dsh` filter and does not remove external shared networks such as `dpanel-local`. It works from inside the project directory or from its parent: the installer copies itself to a temporary file first, so the running script and the current directory never block the removal.
+Deletion precisely removes the `dsh` container, the DSH images (`dsh:*` plus the prebuilt reference recorded in `.env`), project mounts and networks, the global Docker build cache, and the project directory after a `DELETE` confirmation. It does not use a substring `name=dsh` filter and does not remove external shared networks such as `dpanel-local`. It works from inside the project directory or from its parent: the installer copies itself to a temporary file first, so the running script and the current directory never block the removal.
 
 ## Public access and authentication
 

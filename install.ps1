@@ -10,6 +10,9 @@ param(
     [switch]$NetworkExternal,
     [switch]$NetworkInternal,
     [switch]$NonInteractive,
+    [ValidateSet('','prebuilt','build')]
+    [string]$ImageSource = '',
+    [string]$Image = '',
     [string]$Dir = 'dsh-docker'
 )
 
@@ -21,6 +24,8 @@ if ($NetworkExternal -and $NetworkInternal) { throw '--NetworkExternal 与 --Net
 $interactive = -not $NonInteractive -and [Environment]::UserInteractive
 $GitHubSshUrl = 'ssh://git@ssh.github.com:443/univers629/dsh-docker.git'
 $GitHubHttpsUrl = 'https://github.com/univers629/dsh-docker.git'
+$DefaultPrebuiltImage = if ($env:DSH_PREBUILT_IMAGE) { $env:DSH_PREBUILT_IMAGE } else { 'ghcr.io/univers629/dsh-docker:latest' }
+$DefaultLocalImage = 'dsh:local'
 
 function Set-ComposeEnvValue {
     param([string]$Path, [string]$Key, [string]$Value)
@@ -161,7 +166,7 @@ function Test-DshContainer {
 function Confirm-DshDelete {
     if ($env:DSH_DELETE_CONFIRMED -eq '1') { return }
     if ($NonInteractive) { throw '删除是破坏性操作，需要交互确认；请不要使用 -NonInteractive。' }
-    Write-Host "[警告] 将删除 dsh 容器、dsh:* 镜像、本项目挂载和网络、全局 Docker 构建缓存，以及 $Dir。" -ForegroundColor Yellow
+    Write-Host "[警告] 将删除 dsh 容器、DSH 镜像（dsh:* 与 .env 记录的预构建引用）、本项目挂载和网络、全局 Docker 构建缓存，以及 $Dir。" -ForegroundColor Yellow
     $answer = Read-Host '请输入 DELETE 继续，其他输入取消'
     if ($answer -ne 'DELETE') { Write-Host '已取消。'; exit 0 }
 }
@@ -231,6 +236,17 @@ function Remove-DshProject {
     if ($namedContainer) { $containerIds += $namedContainer.Trim() }
     foreach ($id in @($containerIds | Where-Object { $_ } | Sort-Object -Unique)) { & docker container rm -f $id *> $null }
 
+    # 预构建安装用的引用不叫 dsh:*，而且多架构清单未必带上项目标签，所以要按
+    # .env 里记录的引用精确删除一次。这里内联读取 .env，让删除流程不依赖
+    # 向导前半部分的辅助函数。
+    if ($resolvedDir) {
+        $envPath = Join-Path $resolvedDir '.env'
+        if (Test-Path -LiteralPath $envPath -PathType Leaf) {
+            $imageLine = [IO.File]::ReadAllLines($envPath) | Where-Object { $_ -match '^\s*DSH_IMAGE\s*=' } | Select-Object -First 1
+            $configuredImage = if ($imageLine) { ($imageLine -replace '^\s*[^=]+=', '').Trim() } else { '' }
+            if ($configuredImage -and $configuredImage -ne 'dsh:local') { & docker image rm -f $configuredImage *> $null }
+        }
+    }
     $imageRefs = @(& docker image ls --format '{{.Repository}}:{{.Tag}}' --filter 'reference=dsh:*' 2>$null | Sort-Object -Unique)
     foreach ($ref in $imageRefs) { if ($ref) { & docker image rm -f $ref *> $null } }
     $imageIds = @(& docker image ls -q --filter "label=com.docker.compose.project=$projectName" 2>$null | Sort-Object -Unique)
@@ -538,11 +554,25 @@ if ($networkName -eq 'dsh-private' -and $networkExternalValue -eq 'true' -and -n
         $networkExternalValue = 'false'
     }
 }
+$imageSource = if ($ImageSource) { $ImageSource } else { Get-ComposeEnvValue $envFile 'DSH_IMAGE_SOURCE' 'prebuilt' }
+if ($imageSource -notin @('prebuilt','build')) { $imageSource = 'prebuilt' }
 $basicUser = $env:DSH_BASIC_AUTH_USER
 $basicPassword = $env:DSH_BASIC_AUTH_PASSWORD
 $writeBasicAuth = $false
 
 if ($DshAction -in @('install','configure')) {
+    if ($interactive -and -not $ImageSource) {
+        $imageDefault = if ($imageSource -eq 'build') { '2' } else { '1' }
+        Write-Host 'Debian 13 镜像来源：1=拉取公开预构建镜像（推荐，不在本机编译 DSH）  2=在本机构建镜像（1 核 1G 机器可能超过 20 分钟）'
+        $imageSource = switch (Ask '请选择' $imageDefault) { '2' {'build'}; default {'prebuilt'} }
+    }
+    if ($Image) { $imageRef = $Image }
+    elseif ($imageSource -eq 'build') { $imageRef = $DefaultLocalImage }
+    else {
+        $imageRef = Get-ComposeEnvValue $envFile 'DSH_IMAGE' $DefaultPrebuiltImage
+        # 旧安装的 .env 里记着本机构建的标签；切换到预构建时必须换成发布引用。
+        if ($imageRef -eq $DefaultLocalImage) { $imageRef = $DefaultPrebuiltImage }
+    }
     if ($interactive -and -not $Access) {
         $accessDefault = switch ($accessMode) { 'trusted-proxy' {'2'}; 'basic' {'3'}; default {'1'} }
         $accessMode = switch (Ask "访问保护：1=本机/SSH  2=已有 Access/面板  3=内置 Basic Auth" $accessDefault) { '2' {'trusted-proxy'}; '3' {'basic'}; default {'local'} }
@@ -598,15 +628,31 @@ if ($DshAction -in @('install','configure')) {
 
 switch ($DshAction) {
     { $_ -in @('install','configure') } {
-        docker compose build dsh
-        if ($LASTEXITCODE -ne 0) { throw 'DSH 镜像构建失败。' }
+        # 预构建优先，但公网拉取可能因为网络或尚未发布而失败；这时退回本机构建，
+        # 而不是让整次安装中断。回退发生在写入 .env 之前，所以配置不会记错来源。
+        $env:DSH_IMAGE = $imageRef
+        if ($imageSource -eq 'prebuilt') {
+            Write-Host "==> 正在拉取预构建 Debian 13 镜像：$imageRef" -ForegroundColor Yellow
+            docker compose pull dsh
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[警告] 无法拉取 $imageRef，改为在本机构建镜像。" -ForegroundColor Yellow
+                $imageSource = 'build'
+                $imageRef = $DefaultLocalImage
+                $env:DSH_IMAGE = $imageRef
+            }
+        }
+        if ($imageSource -eq 'build') {
+            Write-Host '==> 正在构建 DSH 镜像...' -ForegroundColor Yellow
+            docker compose build dsh
+            if ($LASTEXITCODE -ne 0) { throw 'DSH 镜像构建失败。' }
+        }
         if ($accessMode -eq 'basic' -and $writeBasicAuth) {
             # Windows PowerShell 5.1 的 $OutputEncoding 默认是 ASCII，会把非 ASCII
             # 密码字符替换成 '?' 并生成错误的哈希，所以显式使用无 BOM 的 UTF-8。
             $previousOutputEncoding = $OutputEncoding
             $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
             try {
-                $hashLine = $basicPassword | docker run --rm -i --entrypoint htpasswd dsh:local -niB $basicUser
+                $hashLine = $basicPassword | docker run --rm -i --entrypoint htpasswd $imageRef -niB $basicUser
             } finally { $OutputEncoding = $previousOutputEncoding }
             if ($LASTEXITCODE -ne 0) { throw 'Basic Auth bcrypt 哈希生成失败。' }
             $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -624,8 +670,10 @@ switch ($DshAction) {
             Set-ComposeEnvValue $pendingEnvFile 'DSH_TRUSTED_HOSTS' $trusted
             Set-ComposeEnvValue $pendingEnvFile 'DSH_DOCKER_NETWORK' $networkName
             Set-ComposeEnvValue $pendingEnvFile 'DSH_DOCKER_NETWORK_EXTERNAL' $networkExternalValue
-            $composeKeys = @('DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL')
-            $composeExitCode = Invoke-ComposeWithEnvFile -Path $pendingEnvFile -Arguments @('up','-d','--force-recreate') -EnvironmentKeys $composeKeys
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_IMAGE' $imageRef
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_IMAGE_SOURCE' $imageSource
+            $composeKeys = @('DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL','DSH_IMAGE','DSH_IMAGE_SOURCE')
+            $composeExitCode = Invoke-ComposeWithEnvFile -Path $pendingEnvFile -Arguments @('up','-d','--no-build','--force-recreate') -EnvironmentKeys $composeKeys
             if ($composeExitCode -ne 0) { throw 'DSH 容器启动失败，原配置未被覆盖。' }
             Move-Item -LiteralPath $pendingEnvFile -Destination $envFile -Force
             $pendingEnvFile = $null

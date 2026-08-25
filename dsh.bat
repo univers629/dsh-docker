@@ -11,6 +11,8 @@ set "DSH_BIND_HOST="
 set "DSH_TRUSTED_HOSTS="
 set "DSH_DOCKER_NETWORK="
 set "DSH_DOCKER_NETWORK_EXTERNAL="
+set "DSH_IMAGE="
+set "DSH_IMAGE_SOURCE="
 
 set "ACTION=%~1"
 if "%ACTION%"=="" set "ACTION=default"
@@ -44,10 +46,20 @@ exit /b 1
 :ensure_container
 docker container inspect dsh >nul 2>nul
 if not errorlevel 1 exit /b 0
-docker image inspect dsh:local >nul 2>nul
+call :read_env DSH_IMAGE
+set "IMAGE_REF=%ENV_VALUE%"
+if "%IMAGE_REF%"=="" set "IMAGE_REF=dsh:local"
+call :read_env DSH_IMAGE_SOURCE
+set "IMAGE_SOURCE=%ENV_VALUE%"
+docker image inspect "%IMAGE_REF%" >nul 2>nul
 if errorlevel 1 (
-  echo ==^> 首次创建容器，正在构建 Debian 13 镜像...
-  docker compose build dsh
+  if /i "%IMAGE_SOURCE%"=="prebuilt" (
+    echo ==^> 首次创建容器，正在拉取预构建 Debian 13 镜像：%IMAGE_REF%
+    docker compose pull dsh
+  ) else (
+    echo ==^> 首次创建容器，正在构建 Debian 13 镜像...
+    docker compose build dsh
+  )
   if errorlevel 1 exit /b 1
 )
 docker compose up -d --no-build dsh
@@ -124,6 +136,15 @@ exit /b %errorlevel%
 :status
 docker compose ps
 exit /b %errorlevel%
+
+rem 读取 .env 中的一个键；安装器把镜像引用和来源写在那里。
+:read_env
+set "ENV_VALUE="
+if not exist ".env" exit /b 0
+for /f "usebackq eol=# tokens=1,* delims==" %%a in (".env") do (
+  if /i "%%a"=="%~1" set "ENV_VALUE=%%b"
+)
+exit /b 0
 
 :ensure_docker
 set "DOCKER_OS="

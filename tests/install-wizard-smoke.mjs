@@ -8,6 +8,55 @@ const [compose, dockerfile, entrypoint, authConfig, nginx, installSh, installPs1
 ].map(read))
 
 assert.match(compose, /DSH_ACCESS_MODE: "\$\{DSH_ACCESS_MODE:-local\}"/)
+// 预构建安装把镜像引用写进 .env，Compose 必须读它而不是硬编码 dsh:local。
+assert.match(compose, /image: "\$\{DSH_IMAGE:-dsh:local\}"/)
+assert.match(envExample, /^DSH_IMAGE=ghcr\.io\/univers629\/dsh-docker:latest$/m)
+assert.match(envExample, /^DSH_IMAGE_SOURCE=prebuilt$/m)
+
+// 镜像来源：两条链路都要能拉预构建镜像，并在拉取失败时退回本机构建。
+for (const flag of ['--image-source', '--image']) {
+  assert.ok(installSh.includes(flag), `install.sh missing ${flag}`)
+}
+assert.match(installSh, /obtain_dsh_image\(\) \{/)
+assert.ok(
+  installSh.indexOf('pull_dsh_image') < installSh.indexOf('PENDING_IMAGE_SOURCE=build'),
+  'install.sh must try the pull before falling back to a local build',
+)
+assert.ok(
+  installSh.indexOf('obtain_dsh_image') < installSh.indexOf('set_compose_env DSH_IMAGE_SOURCE'),
+  'install.sh must resolve the real image source before persisting it',
+)
+assert.match(installSh, /set_compose_env DSH_IMAGE "\$PENDING_IMAGE"/)
+assert.match(installSh, /up -d --no-build --force-recreate/)
+assert.match(installPs1, /\[ValidateSet\('',\s*'prebuilt',\s*'build'\)\]/)
+assert.match(installPs1, /docker compose pull dsh/)
+assert.ok(
+  installPs1.indexOf('docker compose pull dsh') < installPs1.indexOf('docker compose build dsh'),
+  'install.ps1 must try the pull before falling back to a local build',
+)
+assert.match(installPs1, /Set-ComposeEnvValue \$pendingEnvFile 'DSH_IMAGE' \$imageRef/)
+assert.match(installPs1, /'up','-d','--no-build','--force-recreate'/)
+
+// 启动脚本在容器不存在时也要按 .env 记录的来源准备镜像。
+assert.match(dshSh, /image_source="\$\(env_value DSH_IMAGE_SOURCE ''\)"/)
+assert.match(dshSh, /compose "\$\{COMPOSE_ARGS\[@\]\}" pull dsh/)
+assert.match(dshBat, /call :read_env DSH_IMAGE/)
+assert.match(dshBat, /docker compose pull dsh/)
+
+// 删除必须能清掉预构建引用，它不叫 dsh:*。
+assert.match(installSh, /awk -F= '\$1 == "DSH_IMAGE"/)
+assert.ok(
+  installPs1.includes(String.raw`$_ -match '^\s*DSH_IMAGE\s*='`),
+  'install.ps1 delete must read DSH_IMAGE from .env without the wizard helpers',
+)
+
+for (const readme of [readmeZh, readmeEn]) {
+  assert.ok(readme.includes('ghcr.io/univers629/dsh-docker:latest'), 'README must document the published image')
+  assert.ok(
+    readme.indexOf('vCPU') < readme.indexOf('install.sh | bash'),
+    'README must state the host sizing guidance before the install command',
+  )
+}
 assert.match(compose, /\.\/data\/auth:\/opt\/dsh-auth:ro/)
 assert.match(compose, /127\.0\.0\.1:3080\/healthz/)
 assert.match(dockerfile, /apache2-utils/)
@@ -34,10 +83,10 @@ for (const mode of ['local', 'trusted-proxy', 'basic']) {
   assert.ok(installPs1.includes(mode), `install.ps1 missing access mode ${mode}`)
 }
 assert.match(installSh, /< \/dev\/tty/)
-assert.match(installSh, /htpasswd dsh:local -niB/)
+assert.match(installSh, /htpasswd "\$PENDING_IMAGE" -niB/)
 assert.match(installSh, /未写入 \.env/)
 assert.match(installPs1, /Read-Host .* -AsSecureString/)
-assert.match(installPs1, /htpasswd dsh:local -niB/)
+assert.match(installPs1, /htpasswd \$imageRef -niB/)
 assert.match(installPs1, /\[Alias\('Action'\)\][\s\S]*\$DshAction/)
 assert.match(installPs1, /\[ValidateSet\('',\s*'install'/)
 assert.match(installPs1, /\[ValidateSet\('',\s*'local'/)
@@ -109,7 +158,7 @@ assert.match(installPs1, /DSH_DELETE_DETACHED/)
 assert.match(installPs1, /DSH_DELETE_CONFIRMED/)
 assert.match(installPs1, /\[Environment\]::CurrentDirectory/)
 assert.match(installPs1, /PSNativeCommandUseErrorActionPreference = \$false/)
-assert.match(installPs1, /UTF8Encoding\(\$false\)[\s\S]*htpasswd dsh:local -niB/)
+assert.match(installPs1, /UTF8Encoding\(\$false\)[\s\S]*htpasswd \$imageRef -niB/)
 assert.match(dshSh, /^unset DSH_ACCESS_MODE DSH_BIND_HOST DSH_TRUSTED_HOSTS DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL$/m)
 assert.match(dshBat, /set "DSH_BIND_HOST="/)
 
