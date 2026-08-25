@@ -92,8 +92,10 @@ For one-shot servers, uvx and npx use caches below /data/home:
 
 ## DSH lifecycle
 
-The WebUI settings page shows the DSH version and provides **Update DSH** and
-**Restart DSH** actions. The updater pulls source into /tmp, reapplies
+The WebUI settings panel has a **DSH environment** page in its left nav. It
+shows the installed and latest DSH versions, and provides **Check for updates**
+and **Update now**. It never checks online until the button is pressed.
+**Restart DSH** stays in the settings header. The updater pulls source into /tmp, reapplies
 /etc/dsh-patches, builds, validates Nginx, atomically replaces /app/dsh,
 and asks the in-container Supervisor to replace only the DSH child process.
 The Debian container and Nginx process stay running. Failed patching, building,

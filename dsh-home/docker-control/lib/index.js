@@ -100,6 +100,7 @@ async function dshInfo() {
       upstreamCommit: typeof metadata.upstreamCommit === 'string' ? metadata.upstreamCommit : 'unknown',
       patchsetHash: typeof metadata.patchsetHash === 'string' ? metadata.patchsetHash : 'unknown',
       builtAt: typeof metadata.builtAt === 'string' ? metadata.builtAt : 'unknown',
+      upstreamRef: upstreamRef(),
     },
     system: {
       debianVersion: readTextFileSync('/etc/debian_version'),
@@ -108,6 +109,84 @@ async function dshInfo() {
     },
     update: updateStatus(),
   }
+}
+
+const LATEST_CHECK_TTL_MS = 60_000
+let latestCache = null
+
+function upstreamRepo() {
+  return process.env.DSH_UPSTREAM_REPO ?? 'https://github.com/deepseek-ai/deepseek-harness.git'
+}
+
+function upstreamRef() {
+  return process.env.DSH_UPSTREAM_REF ?? 'master'
+}
+
+// The image records the upstream commit it was built from; the remote head of
+// the same ref is what an in-container update would fetch, so comparing the
+// two is the honest "is there anything to update" answer. Version strings are
+// informational only: upstream bumps package.json rarely, commits often.
+async function remoteHeadCommit() {
+  const { stdout } = await execFileAsync('git', ['ls-remote', upstreamRepo(), upstreamRef()], {
+    timeout: 20000,
+    windowsHide: true,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  })
+  const commit = stdout.trim().split(/\s+/)[0] ?? ''
+  return /^[0-9a-f]{40}$/.test(commit) ? commit : null
+}
+
+// Only github.com repositories expose a raw file endpoint we can read without
+// cloning; any other remote simply reports an unknown latest version.
+function rawManifestUrl(commit) {
+  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(upstreamRepo())
+  if (match === null) return null
+  return `https://raw.githubusercontent.com/${match[1]}/${match[2]}/${commit}/package.json`
+}
+
+async function remoteVersion(commit) {
+  const url = rawManifestUrl(commit)
+  if (url === null) return null
+  try {
+    const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(15000) })
+    if (!response.ok) return null
+    const manifest = JSON.parse(await response.text())
+    return typeof manifest.version === 'string' ? manifest.version : null
+  } catch {
+    return null
+  }
+}
+
+async function latestDshInfo(force) {
+  if (!force && latestCache !== null && Date.now() - latestCache.at < LATEST_CHECK_TTL_MS) return latestCache.value
+  const commit = await remoteHeadCommit()
+  if (commit === null) {
+    throw new Error('无法读取上游仓库的最新提交 / could not read the upstream head commit')
+  }
+  const metadata = readJsonFileSync(join(dshAppDir(), 'DSH-BUILD-METADATA.json'), {})
+  const currentCommit = typeof metadata.upstreamCommit === 'string' ? metadata.upstreamCommit : 'unknown'
+  const comparable = /^[0-9a-f]{7,40}$/.test(currentCommit)
+  const value = {
+    ok: true,
+    repo: upstreamRepo(),
+    ref: upstreamRef(),
+    checkedAt: new Date().toISOString(),
+    latest: {
+      commit,
+      shortCommit: commit.slice(0, 12),
+      version: (await remoteVersion(commit)) ?? 'unknown',
+    },
+    current: {
+      commit: currentCommit,
+      shortCommit: comparable ? currentCommit.slice(0, 12) : currentCommit,
+      version: typeof metadata.version === 'string' ? metadata.version : 'unknown',
+    },
+    // null = the image carries no comparable commit (hand-built or legacy),
+    // so the page shows both versions without claiming either verdict.
+    updateAvailable: comparable ? !commit.startsWith(currentCommit) : null,
+  }
+  latestCache = { at: Date.now(), value }
+  return value
 }
 
 function spawnDshUpdate() {
@@ -281,6 +360,29 @@ export function apply(ctx) {
         return
       }
       sendJson(response, 200, { ...updateStatus(), ok: true, running: updateRunning() })
+    },
+  })
+  webServer.register({
+    kind: 'exact',
+    path: '/dsh-docker-control/update/latest',
+    handler: async (request, response) => {
+      if (request.method !== 'GET') {
+        response.writeHead(405, { allow: 'GET' })
+        response.end()
+        return
+      }
+      if (!trustedLoopbackRequest(request)) {
+        sendJson(response, 403, { ok: false, error: '更新检查仅允许已认证的回环请求 / update checks require an authenticated loopback request' })
+        return
+      }
+      // Explicit user gesture only: the settings page never checks on mount,
+      // so this endpoint is never hit by simply opening settings.
+      const force = new URL(request.url, 'http://127.0.0.1').searchParams.get('force') === '1'
+      try {
+        sendJson(response, 200, await latestDshInfo(force))
+      } catch (error) {
+        sendJson(response, 502, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
     },
   })
   webServer.register({
