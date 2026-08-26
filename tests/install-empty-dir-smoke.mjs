@@ -241,8 +241,14 @@ try {
   assert.equal(brokerKeys.upstreams[0].baseUrl, 'https://api.deepseek.com')
   assert.equal(brokerKeys.upstreams[0].key, deepseekKey)
   // 摘要要给出容器内实际填法，并说明这层只保护密钥字面值、不限制额度。
-  assert.match(broker.stdout, /base_url = http:\/\/dsh-key-broker:8080\/u\/deepseek\/v1/)
+  // base_url 不带 /v1：版本段属于上游 base_url，broker 会把两段拼起来，
+  // 这里再补一次就变成 /v1/v1/responses。
+  assert.match(broker.stdout, /base_url = http:\/\/dsh-key-broker:8080\/u\/deepseek(?!\/v1)/)
+  assert.doesNotMatch(broker.stdout, /\/u\/deepseek\/v1/)
   assert.match(broker.stdout, /不限制额度消耗/)
+  // 供应商必须真写进 DSH 自己的配置：只在摘要里说一遍等于让用户手抄。
+  assert.match(broker.stdout, /正在把模型供应商写进 DSH 配置/)
+  assert.match(broker.stdout, /模型设置: 已写进 data\/dsh\/settings\.yaml/)
 
   // 同名覆盖、异名保留：第二次只给 openai，deepseek 的密钥必须原样留着。
   const openaiKey = 'sk-test-installer-openai-key'
@@ -255,7 +261,8 @@ try {
   const mergedKeys = JSON.parse(await readFile(join(sandbox, 'broker-install', 'data', 'broker', 'keys.json'), 'utf8'))
   assert.deepEqual(mergedKeys.upstreams.map((entry) => entry.name).sort(), ['deepseek', 'openai'])
   assert.equal(mergedKeys.upstreams.find((entry) => entry.name === 'deepseek').key, deepseekKey)
-  assert.equal(mergedKeys.upstreams.find((entry) => entry.name === 'openai').baseUrl, 'https://api.openai.com')
+  // 版本段留在上游 base_url 里：DSH 侧只写 /u/<name>，客户端 SDK 自己补相对路径。
+  assert.equal(mergedKeys.upstreams.find((entry) => entry.name === 'openai').baseUrl, 'https://api.openai.com/v1')
 
   // anthropic 的认证头不是 Authorization，缺 anthropic-version 会被上游 400。
   const anthropic = runInstall('anthropic-install', [
@@ -315,6 +322,29 @@ try {
   const importedKeys = JSON.parse(await readFile(join(sandbox, 'imported-broker-install', 'data', 'broker', 'keys.json'), 'utf8'))
   assert.deepEqual(importedKeys.upstreams.map((entry) => entry.name), ['imported'])
 
+  // 自建网关：目录里没有它，必须自己给模型 id，否则 DSH 那边选不到任何模型。
+  const gatewayInstall = runInstall('gateway-install', [
+    '--access', 'local',
+    '--image-source', 'build',
+    '--model-key', 'mygw=sk-test-installer-gateway-key',
+    '--model-base-url', 'mygw=https://api.mygw.example.com/v1',
+    '--model-api', 'mygw=responses',
+    '--model-id', 'mygw=claude-opus-5-thinking,gpt-5.2',
+  ])
+  assert.equal(gatewayInstall.status, 0, `${gatewayInstall.stdout}\n${gatewayInstall.stderr}`)
+  assert.match(gatewayInstall.stdout, /正在把模型供应商写进 DSH 配置/)
+
+  // 显式关掉写配置时必须说清楚后果，而不是静默什么都不做。
+  const noSeed = runInstall('no-seed-install', [
+    '--access', 'local',
+    '--image-source', 'build',
+    '--model-key', 'deepseek=sk-test-installer-noseed-key',
+    '--no-model-settings-seed',
+  ])
+  assert.equal(noSeed.status, 0, `${noSeed.stdout}\n${noSeed.stderr}`)
+  assert.match(noSeed.stdout, /已跳过写入 DSH 模型配置/)
+  assert.doesNotMatch(noSeed.stdout, /正在把模型供应商写进 DSH 配置/)
+
   // 关闭必须连密钥一起清掉：只翻开关、把文件留在盘上等于密钥还在。
   const disabledBroker = runInstall('broker-install', [
     '--access', 'local',
@@ -371,6 +401,10 @@ try {
   assert.match(calls, /compose .* build dsh/)
   assert.match(calls, /compose .* up -d --no-build --force-recreate/)
   assert.match(calls, /run --rm -i --entrypoint htpasswd dsh:local -niB dsh/)
+  // 写 settings.yaml 借的是镜像里的 node（宿主不一定有 yaml 库），配置从 stdin 进去，
+  // 所以命令行上只能看到挂载点，不该出现任何密钥或模型 id 之外的内容。
+  assert.match(calls, /run --rm -i -v \S+\/bin:\/dsh-seed:ro -v \S+\/data\/dsh:\/seed-home --entrypoint node \S+ \/dsh-seed\/seed-dsh-model-settings\.mjs --home \/seed-home/)
+  assert.ok(!calls.includes('sk-test-installer-gateway-key'), 'a model key must never reach a docker command line')
 } finally {
   await rm(sandbox, { recursive: true, force: true })
 }

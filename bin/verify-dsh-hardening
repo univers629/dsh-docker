@@ -37,6 +37,10 @@ BROKER_MOUNT = "/etc/dsh-broker"
 APT_PROXY_CONF = "/etc/apt/apt.conf.d/00-dsh-proxy"
 MODEL_BROKER = os.environ.get("DSH_MODEL_BROKER", "off").strip().lower()
 MODEL_BROKER_BASE = os.environ.get("DSH_MODEL_BROKER_BASE", "http://dsh-key-broker:8080").strip()
+DSH_HOME = os.environ.get("DSH_HOME", "/data/dsh")
+CREDENTIALS_FILE = os.path.join(DSH_HOME, ".credentials.yaml")
+# 安装器写进 .credentials.yaml 的占位串。它不是秘密，出现在这里也不构成泄漏。
+MODEL_BROKER_PLACEHOLDER = os.environ.get("DSH_MODEL_BROKER_PLACEHOLDER", "dsh-broker-placeholder").strip()
 EGRESS_MODE = os.environ.get("DSH_EGRESS_MODE", "open").strip().lower()
 EGRESS_PROXY_URL = os.environ.get("DSH_EGRESS_PROXY_URL", "").strip()
 # 只按名字形态匹配，永远不看值。*_TOKEN 会把 GITHUB_TOKEN 这类也算进来，这是有意的：
@@ -500,6 +504,7 @@ def check_model_broker():
         record_skip("model-broker", f"DSH_MODEL_BROKER={MODEL_BROKER or 'off'}：未启用模型密钥代理，本项不适用")
         record_skip("model-key-env", "未启用模型密钥代理：不要求容器环境里没有密钥形态的变量")
         record_skip("model-key-env-dsh", "未启用模型密钥代理：不检查 DSH 主进程的环境")
+        record_skip("model-key-credentials", "未启用模型密钥代理：模型密钥本来就存在 DSH 自己的配置里")
         return
 
     healthz = MODEL_BROKER_BASE.rstrip("/") + "/healthz"
@@ -520,6 +525,58 @@ def check_model_broker():
         else "容器配置注入了密钥形态的变量（只列名字）：" + ", ".join(leaked),
     )
     check_dsh_process_env()
+    check_model_credentials()
+
+
+def check_model_credentials():
+    """启用密钥代理时，容器里那份凭据文件应当只有占位串。
+
+    这一项是对「密钥不在容器里」的最后一道确认：环境变量干净不代表没人后来在 WebUI
+    里手填了一个真实密钥，而那等于把密钥重新搬回 Agent 能 cat 到的地方。只比较值是不是
+    等于占位串，既不打印值也不打印长度——自检本身不能变成新的泄漏面。
+    结论用 warn 而不是 fail：往里填真实密钥是用户的选择，不是部署被改坏了。
+    """
+    if not os.path.exists(CREDENTIALS_FILE):
+        record(
+            "model-key-credentials",
+            True,
+            f"{CREDENTIALS_FILE} 不存在：容器里没有任何模型凭据文件",
+        )
+        return
+    # read_text 读不到就给空串，那会被当成“没有引用”——所以先确认文件非空。
+    text = read_text(CREDENTIALS_FILE)
+    if not text.strip():
+        record_skip("model-key-credentials", f"{CREDENTIALS_FILE} 读不到内容或为空")
+        return
+    # 只认 refs: 下面那一层 "NAME: VALUE"。这里刻意不引 yaml：这个自检必须能在
+    # 只有标准库的 python3 上跑，而这份文件的结构是 DSH 自己写出来的两层映射。
+    in_refs = False
+    foreign = []
+    total = 0
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[:1].isspace():
+            in_refs = line.split(":", 1)[0].strip() == "refs"
+            continue
+        if not in_refs or ":" not in line:
+            continue
+        name, _, value = line.partition(":")
+        total += 1
+        if value.strip().strip("'\"") != MODEL_BROKER_PLACEHOLDER:
+            foreign.append(name.strip())
+    if not foreign:
+        record(
+            "model-key-credentials",
+            True,
+            f"{CREDENTIALS_FILE} 里 {total} 个引用都是占位串，容器内没有真实模型密钥",
+        )
+        return
+    record_warn(
+        "model-key-credentials",
+        f"{CREDENTIALS_FILE} 里这些引用不是占位串（只列名字）：" + ", ".join(foreign) +
+        "；容器内的 Agent 能读到它们，要恢复保护请把密钥改回占位串并写进 data/broker/keys.json",
+    )
 
 
 def check_dsh_process_env():

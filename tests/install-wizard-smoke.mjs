@@ -198,6 +198,8 @@ for (const [shellFlag, powershellParameter] of [
   ['--egress', '$Egress'],
   ['--egress-allow', '$EgressAllow'],
   ['--userns-preflight', '$UsernsPreflight'],
+  ['--model-id', '$ModelId'],
+  ['--no-model-settings-seed', '$NoModelSettingsSeed'],
 ]) {
   assert.ok(installSh.includes(shellFlag), `install.sh missing ${shellFlag}`)
   assert.ok(installPs1.includes(powershellParameter), `install.ps1 missing ${powershellParameter}`)
@@ -217,6 +219,10 @@ for (const option of [
   '4) Anthropic Messages（认证头 x-api-key，自动带 anthropic-version）',
   '5) Gemini 原生（认证头 x-goog-api-key，端点 /v1beta/models）',
   '一行一个 name=value，回车结束。示例：user-agent=codex_cli_rs/0.101.0',
+  // 模型 id 那一问决定 WebUI 的模型下拉里有什么，两边必须一字不差。
+  '    deepseek、openai、anthropic、google、nvidia 这类 DSH 内置目录里的上游可以直接回车，',
+  '    安装器会沿用目录里的整份模型清单；自建网关请至少填一个模型 id。',
+  '模型 id（多个用逗号分隔）',
 ]) {
   assert.ok(installSh.includes(option), `install.sh 缺少形态问答：${option}`)
   assert.ok(installPs1.includes(option), `install.ps1 缺少形态问答：${option}`)
@@ -240,6 +246,34 @@ assert.match(installPs1, /\[switch\]\$NoModelBroker/)
 assert.match(installPs1, /\[ValidateSet\('',\s*'open',\s*'allowlist'\)\]/)
 assert.match(installPs1, /\[string\[\]\]\$EgressAllow = @\(\)/)
 assert.match(installPs1, /\[switch\]\$UsernsPreflight/)
+assert.match(installPs1, /\[string\[\]\]\$ModelId = @\(\)/)
+assert.match(installPs1, /\[switch\]\$NoModelSettingsSeed/)
+
+// ---------------------------------------------------------------------------
+// 模型配置种子：安装器要替用户把供应商写进 DSH 自己的配置，而不是只打印在摘要里
+// ---------------------------------------------------------------------------
+// 真正合并 YAML 的那一半必须存在，而且只依赖策略模块（宿主上没有 yaml 库）。
+for (const file of ['bin/dsh-model-settings-policy.mjs', 'bin/seed-dsh-model-settings.mjs']) {
+  assert.ok(existsSync(new URL(`../${file}`, import.meta.url)), `missing ${file}`)
+}
+assert.ok(installSh.includes('seed_dsh_model_settings'), 'install.sh 必须调用写配置的那一步')
+assert.ok(installPs1.includes('Invoke-DshModelSettingsSeed'), 'install.ps1 必须调用写配置的那一步')
+// 写盘位置是 DSH 官方那两份文件，路径不能各写一套。
+for (const [label, source] of [['install.sh', installSh], ['install.ps1', installPs1]]) {
+  assert.match(source, /data[\\/]dsh[\\/]settings\.yaml/, `${label} 必须指名 data/dsh/settings.yaml`)
+  assert.ok(source.includes('seed-dsh-model-settings.mjs'), `${label} 必须调用 seed 脚本`)
+}
+// base_url 里的版本段属于 keys.json 里的上游地址，DSH 侧只写 /u/<name>：
+// 两边都补一次就会变成 /v1/v1/responses。旧的 *UrlSuffix 助手必须彻底消失。
+for (const [label, source] of [['install.sh', installSh], ['install.ps1', installPs1]]) {
+  assert.ok(!source.includes('UrlSuffix'), `${label} 仍留着 base_url 版本段助手`)
+  assert.doesNotMatch(source, /\/u\/\$\{?name\}?\/v1/, `${label} 仍在 base_url 后面补 /v1`)
+  assert.doesNotMatch(source, /\/u\/\$\(?upstream\)?\/v1/, `${label} 仍在 base_url 后面补 /v1`)
+}
+// Gemini 走的是 /models/...，把放行前缀写成 /v1beta/models 会让每个请求都 403。
+for (const [label, source] of [['install.sh', installSh], ['install.ps1', installPs1]]) {
+  assert.match(source, /'\/models'?[ ,]'?\/v1beta\/models'?/, `${label} 的 gemini 必须同时放行 /models 与 /v1beta/models`)
+}
 // 密钥参数会进 ps，所以帮助文本必须把交互输入和 --model-keys-file 说成首选。
 assert.match(installSh, /--model-keys-file/)
 assert.match(installSh, /会出现在 ps 里/)

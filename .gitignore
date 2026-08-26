@@ -22,6 +22,10 @@ build/
 # so running it from inside the repo leaves a whole project tree here.
 /dsh-docker/
 
+# Test sandboxes that have to be mounted into a container: Docker file sharing
+# only covers the project directory, so they cannot live in the system temp dir.
+/.tmp/
+
 # Python leftovers. The image ships python3 and uv, and host-side experiments
 # with them drop these next to the sources.
 __pycache__/

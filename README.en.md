@@ -37,7 +37,7 @@ Windows PowerShell (requires Docker Desktop in Linux containers mode):
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-The installer asks what to do, where the image comes from, how access is protected, where the reverse proxy runs, which domain and port binding to use, which model-key-broker upstreams and quotas to configure, and which outbound mode to use, then writes `.env`. Model keys can be left empty and added later with menu item 9 or `./install.sh model-key`, which does not recreate the container. The container root password is stored only as a sha512crypt hash in `data/secret/root.hash` and the Basic Auth password only as a bcrypt hash in `data/auth/htpasswd`; neither is written to `.env`. Nothing in this flow uses a privileged container, mounts a Docker socket, or grants host root.
+The installer asks what to do, where the image comes from, how access is protected, where the reverse proxy runs, which domain and port binding to use, which model-key-broker upstreams and quotas to configure, which model ids to enable, and which outbound mode to use, then writes `.env`. Model keys can be left empty and added later with menu item 9 or `./install.sh model-key`, which does not recreate the container. The container root password is stored only as a sha512crypt hash in `data/secret/root.hash` and the Basic Auth password only as a bcrypt hash in `data/auth/htpasswd`; neither is written to `.env`. Nothing in this flow uses a privileged container, mounts a Docker socket, or grants host root.
 
 | Menu item | What it does |
 | --- | --- |
@@ -74,7 +74,7 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [service]|status|shell|root-s
 - `start` prepares the image only when the container does not exist and reuses it afterwards; `stop`, `restart`, and in-container `apt install` all keep the writable layer.
 - `update` only reinstalls the DSH npm package inside the container; it is not a project or image update. `remove` deletes the writable layer while bind mounts remain.
 - `shell` enters the unprivileged `dsh` account; `root-shell` is a host-side administration channel that cannot be reached from inside the container.
-- `verify` runs 22 hardening checks inside the container; `keys` and `egress` print the status of the key broker and the egress proxy.
+- `verify` runs 23 hardening checks inside the container; `keys` and `egress` print the status of the key broker and the egress proxy.
 - The healthcheck probes both the Nginx entry and DSH's own port, so a DSH crash loop shows the container as `unhealthy`.
 
 To remove the project completely, run menu item 8 from the project directory or `./install.sh delete` (Windows: `powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`). Deletion targets this project's container, images, mounts, networks, and directory by exact name; it never uses substring matching and never removes external shared networks.
@@ -186,13 +186,14 @@ The threat model, per-layer configuration, the broker `keys.json` schema, egress
 
 ## Model API keys
 
-Real keys are written only to `data/broker/keys.json` (0600) on the host and mounted read-only into `dsh-key-broker`, never into the DSH container. In DSH's model settings, set base_url to `http://dsh-key-broker:8080/u/<upstream>/v1` and the api key to any placeholder string.
+Real keys are written only to `data/broker/keys.json` (0600) on the host and mounted read-only into `dsh-key-broker`, never into the DSH container. The installer writes the DSH-side provider configuration into `data/dsh/settings.yaml` in DSH's own format (base_url pointing at `http://dsh-key-broker:8080/u/<upstream>`, api key set to a placeholder), so models can be picked directly under Settings → Models once the install finishes.
 
-- At install time: the wizard reads each upstream key without echoing it and asks for the API shape (OpenAI-compatible / Responses / Chat Completions / Anthropic Messages / native Gemini) and any fixed request headers; `--model-keys-file` with a 0600 `keys.json` also works.
-- Non-interactively: `--model-api NAME=PROFILE` and `--model-header NAME=HEADER=VALUE` (repeatable), for example the `originator` / `version` / `User-Agent` trio a Codex client expects. The profile decides the auth header, the allowed endpoints, and whether base_url ends in `/v1`; see [docs/security.en.md](docs/security.en.md).
+- At install time: the wizard reads each upstream key without echoing it and asks for the API shape (OpenAI-compatible / Responses / Chat Completions / Anthropic Messages / native Gemini), any fixed request headers, and the model ids to enable; `--model-keys-file` with a 0600 `keys.json` also works.
+- Non-interactively: `--model-api NAME=PROFILE` and `--model-header NAME=HEADER=VALUE` (repeatable), for example the `originator` / `version` / `User-Agent` trio a Codex client expects. The profile decides the auth header, the allowed endpoints, and the protocol written into DSH; see [docs/security.en.md](docs/security.en.md).
+- Model list: upstream names that match DSH's built-in catalog (`deepseek`, `openai`, `anthropic`, `google`, `nvidia`, and others) reuse the catalog's full model list; a self-hosted gateway needs `--model-id NAME=ID[,ID]` or the model ids typed into the wizard. `--no-model-settings-seed` skips writing the configuration and leaves it to the WebUI.
 - Afterwards: `./install.sh model-key` (Windows: `.\install.ps1 -DshAction model-key`) adds the broker container without recreating `dsh`.
 - Status: `./dsh.sh keys` prints upstreams, quotas, today's usage, and allow/deny counters, never the keys.
-- Keys cannot be moved into the WebUI: the WebUI runs inside the DSH container, so a key entered there is stored in the container where the agent can read the file directly. Entering keys in the WebUI still works when the broker is skipped, at the cost of this protection.
+- The keys themselves cannot be moved into the WebUI: the WebUI runs inside the DSH container, so a key entered there is stored in the container where the agent can read the file directly. Entering keys in the WebUI still works when the broker is skipped, at the cost of this protection.
 
 ## Outbound modes
 

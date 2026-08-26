@@ -37,7 +37,7 @@ Windows PowerShell（需要 Docker Desktop 并切换到 Linux containers）：
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-安装器依次询问操作类型、镜像来源、访问保护方式、反向代理位置、域名与端口绑定、模型密钥代理的上游与配额、容器出站模式，并写入 `.env`。模型密钥可以留空跳过，之后用菜单第 9 项或 `./install.sh model-key` 补填，该操作不重建容器。容器 root 密码仅以 sha512crypt 哈希写入 `data/secret/root.hash`，Basic Auth 密码仅以 bcrypt 哈希写入 `data/auth/htpasswd`，两者都不写入 `.env`。安装过程不使用特权容器、不挂载 Docker socket、不授予宿主机 root。
+安装器依次询问操作类型、镜像来源、访问保护方式、反向代理位置、域名与端口绑定、模型密钥代理的上游与配额、要启用的模型 id、容器出站模式，并写入 `.env`。模型密钥可以留空跳过，之后用菜单第 9 项或 `./install.sh model-key` 补填，该操作不重建容器。容器 root 密码仅以 sha512crypt 哈希写入 `data/secret/root.hash`，Basic Auth 密码仅以 bcrypt 哈希写入 `data/auth/htpasswd`，两者都不写入 `.env`。安装过程不使用特权容器、不挂载 Docker socket、不授予宿主机 root。
 
 | 菜单项 | 作用 |
 | --- | --- |
@@ -74,7 +74,7 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [服务]|status|shell|root-sh
 - `start` 只在容器不存在时准备镜像，之后复用同一个容器；`stop`、`restart` 与容器内的 `apt install` 都保留可写层。
 - `update` 只在容器内重装 DSH 的 npm 包，不是项目或镜像更新；`remove` 会删除容器可写层，绑定挂载保留。
 - `shell` 进入非特权 `dsh` 账户，`root-shell` 是宿主机侧的管理通道（容器内部无法以此提权）。
-- `verify` 在容器内运行 22 项加固自检，`keys` 与 `egress` 打印密钥代理和出站代理的状态。
+- `verify` 在容器内运行 23 项加固自检，`keys` 与 `egress` 打印密钥代理和出站代理的状态。
 - 健康检查同时探测 Nginx 入口与 DSH 自身端口，DSH 崩溃循环时容器状态为 `unhealthy`。
 
 彻底清空本项目：在工程目录运行菜单第 8 项，或执行 `./install.sh delete`（Windows：`powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`）。删除按精确名称清理本项目的容器、镜像、挂载、网络和工程目录，不使用子串匹配，也不会删除外部共享网络。
@@ -186,13 +186,14 @@ Debian 系统目录留在容器可写层，不使用 overlay 覆盖，因此同�
 
 ## 模型密钥
 
-真实密钥只写入宿主的 `data/broker/keys.json`（0600），以只读方式挂给 `dsh-key-broker`，不挂进 DSH 容器。DSH 的模型设置里 base_url 填 `http://dsh-key-broker:8080/u/<上游名>/v1`，api key 填任意占位串。
+真实密钥只写入宿主的 `data/broker/keys.json`（0600），以只读方式挂给 `dsh-key-broker`，不挂进 DSH 容器。DSH 侧的供应商配置由安装器按官方格式写进 `data/dsh/settings.yaml`（base_url 指向 `http://dsh-key-broker:8080/u/<上游名>`，api key 是占位串），装完在 WebUI 的「设置 → 模型」里直接选模型即可。
 
-- 安装时配置：向导逐个输入上游密钥（不回显），并逐个询问 API 形态（OpenAI 兼容 / Responses / Chat Completions / Anthropic Messages / Gemini 原生）与固定请求头；也可以用 `--model-keys-file` 指向一份 0600 的 `keys.json`。
-- 非交互指定形态与请求头：`--model-api NAME=PROFILE`、`--model-header NAME=HEADER=VALUE`（可重复），例如 Codex 客户端需要的 `originator` / `version` / `User-Agent`。形态决定认证头、放行端点，以及 base_url 结尾要不要带 `/v1`，详见 [docs/security.md](docs/security.md)。
+- 安装时配置：向导逐个输入上游密钥（不回显），并逐个询问 API 形态（OpenAI 兼容 / Responses / Chat Completions / Anthropic Messages / Gemini 原生）、固定请求头与模型 id；也可以用 `--model-keys-file` 指向一份 0600 的 `keys.json`。
+- 非交互指定形态与请求头：`--model-api NAME=PROFILE`、`--model-header NAME=HEADER=VALUE`（可重复），例如 Codex 客户端需要的 `originator` / `version` / `User-Agent`。形态决定认证头、放行端点，以及写进 DSH 的协议，详见 [docs/security.md](docs/security.md)。
+- 模型清单：上游名命中 DSH 内置目录（`deepseek`、`openai`、`anthropic`、`google`、`nvidia` 等）时自动沿用目录里的整份清单；自建网关要用 `--model-id NAME=ID[,ID]` 或在向导里给出模型 id。`--no-model-settings-seed` 可以跳过写配置，改为在 WebUI 里自己加。
 - 装完后补填：`./install.sh model-key`（Windows：`.\install.ps1 -DshAction model-key`），只新增代理容器，不重建 `dsh`。
 - 查看状态：`./dsh.sh keys` 输出上游、配额、今日用量与放行/拒绝计数，不输出密钥。
-- 密钥不能改到 WebUI 里填：WebUI 运行在 DSH 容器内，填入的密钥就落在容器内，容器内的 Agent 可以直接读取文件。跳过密钥代理后 WebUI 直填仍然可用，代价是失去这一层保护。
+- 密钥本身不能改到 WebUI 里填：WebUI 运行在 DSH 容器内，填入的密钥就落在容器内，容器内的 Agent 可以直接读取文件。跳过密钥代理后 WebUI 直填仍然可用，代价是失去这一层保护。
 
 ## 出站模式
 

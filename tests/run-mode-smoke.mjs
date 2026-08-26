@@ -263,9 +263,19 @@ assert.match(files.verifier, /NoNewPrivs/)
 assert.match(files.verifier, /docker\.sock/)
 assert.match(files.verifier, /core_pattern/)
 assert.match(files.verifier, /cgroup/)
-for (const check of ['boot-chain-immutable', 'signal-isolation', 'apt-removal-guard']) {
+for (const check of ['boot-chain-immutable', 'signal-isolation', 'apt-removal-guard', 'model-key-credentials']) {
   assert.ok(files.verifier.includes(check), `verifier must report ${check}`)
 }
+// 凭据自检只比较值是否等于占位串，绝不打印值：这个自检本身不能变成新的泄漏面。
+const credentialsCheck = files.verifier.slice(
+  files.verifier.indexOf('def check_model_credentials():'),
+  files.verifier.indexOf('def check_dsh_process_env():'),
+)
+assert.ok(credentialsCheck.length > 0, 'verifier 必须包含 check_model_credentials')
+assert.match(credentialsCheck, /MODEL_BROKER_PLACEHOLDER/)
+assert.match(credentialsCheck, /只列名字/)
+// 真实密钥出现在容器里是用户的选择，不是部署被改坏：报 warn，不改退出码。
+assert.match(credentialsCheck, /record_warn\(/)
 // 启动链自检必须按属主/权限位判定，而不是 os.access——docker exec 默认是容器 root，
 // root 带 DAC_OVERRIDE，os.access 会一律报可写，结论会随调用身份漂移。
 const bootChainCheck = files.verifier.slice(

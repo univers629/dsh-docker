@@ -29,6 +29,8 @@ MODEL_KEY_SPECS=()
 MODEL_BASE_URL_SPECS=()
 MODEL_API_SPECS=()
 MODEL_HEADER_SPECS=()
+MODEL_ID_SPECS=()
+NO_MODEL_SETTINGS_SEED=false
 MODEL_KEYS_FILE="${DSH_MODEL_KEYS_FILE:-}"
 NO_MODEL_BROKER=false
 EGRESS_MODE_OVERRIDE=""
@@ -49,6 +51,9 @@ BROKER_DAILY=()
 BROKER_PROFILES=()
 BROKER_HEADERS=()
 BROKER_HEADER_RS=$'\x1f'
+# 要写进 DSH settings.yaml 的模型 id（逗号分隔）。只有内置目录里没有的上游才必须填：
+# 目录里的上游（deepseek、google、nvidia……）沿用目录里的整份模型清单。
+BROKER_MODELS=()
 
 DEFAULT_PREBUILT_IMAGE="${DSH_PREBUILT_IMAGE:-ghcr.io/univers629/dsh-docker:latest}"
 DEFAULT_LOCAL_IMAGE="dsh:local"
@@ -74,9 +79,11 @@ usage() {
   --root-password VALUE           容器 root 密码（至少 12 位，也可用 DSH_ROOT_PASSWORD）
   --no-root-password              不设置容器 root 密码（容器内任意特权命令保持关闭）
   --model-key NAME=KEY            模型上游密钥（可重复；命令行参数会进 ps，仅供自动化）
-  --model-base-url NAME=URL       上游 base_url（可重复；deepseek/openai/anthropic 有内置默认）
+  --model-base-url NAME=URL       上游 base_url（可重复；常见上游有内置默认值）
   --model-api NAME=PROFILE        上游 API 形态：any（默认）、chat、responses、messages、gemini
   --model-header NAME=H=V         给某个上游固定一个请求头（可重复，例如 originator、user-agent）
+  --model-id NAME=ID[,ID]         写进 DSH 的模型 id（可重复；内置目录里的上游可省略）
+  --no-model-settings-seed        不替 DSH 写模型配置（供应商与模型要自己在 WebUI 里填）
   --model-keys-file PATH          导入一份完整的 keys.json（也可用 DSH_MODEL_KEYS_FILE）
   --no-model-broker               关闭模型密钥代理，并清空 data/broker/keys.json
   --egress open|allowlist         容器出站模式（allowlist 只放行白名单域名）
@@ -169,6 +176,13 @@ while [ "$#" -gt 0 ]; do
       MODEL_HEADER_SPECS+=("$1")
       ;;
     --model-header=*) MODEL_HEADER_SPECS+=("${1#*=}") ;;
+    --model-id)
+      [ "$#" -ge 2 ] || { echo "[错误] --model-id 缺少值。" >&2; exit 2; }
+      shift
+      MODEL_ID_SPECS+=("$1")
+      ;;
+    --model-id=*) MODEL_ID_SPECS+=("${1#*=}") ;;
+    --no-model-settings-seed) NO_MODEL_SETTINGS_SEED=true ;;
     --model-keys-file)
       [ "$#" -ge 2 ] || { echo "[错误] --model-keys-file 缺少值。" >&2; exit 2; }
       shift
@@ -744,13 +758,29 @@ set_compose_args() {
 # 只写 data/broker/keys.json（0600，只被 broker 容器只读挂载），.env 里只留开关和地址。
 # ---------------------------------------------------------------------------
 
-# 内置 base_url 只是省掉最常见三家的手输。其它上游必须显式给 --model-base-url：
+# 内置 base_url 只是省掉常见上游的手输。其它上游必须显式给 --model-base-url：
 # 猜错 base_url 等于把密钥发到一个我们没验证过的域名，宁可报错退出。
+#
+# 这些值抄的是 DSH 内置模型目录（pi-ai catalog）里同名 provider 的 base_url，
+# 版本段（/v1、/v1beta 等）必须留在这里：DSH 侧填的是 <代理>/u/<上游名>，客户端
+# SDK 只会往后接 /chat/completions、/responses、/v1/messages、/models/... 这类相对
+# 路径，版本段由代理这一侧的上游 base_url 提供。名字与目录对上还有一个额外好处：
+# 安装器写进 settings.yaml 时能直接沿用目录里的整份模型清单。
 model_default_base_url() {
   case "$1" in
     deepseek) printf '%s' 'https://api.deepseek.com' ;;
-    openai) printf '%s' 'https://api.openai.com' ;;
+    openai) printf '%s' 'https://api.openai.com/v1' ;;
     anthropic) printf '%s' 'https://api.anthropic.com' ;;
+    google) printf '%s' 'https://generativelanguage.googleapis.com/v1beta' ;;
+    nvidia) printf '%s' 'https://integrate.api.nvidia.com/v1' ;;
+    openrouter) printf '%s' 'https://openrouter.ai/api/v1' ;;
+    groq) printf '%s' 'https://api.groq.com/openai/v1' ;;
+    xai) printf '%s' 'https://api.x.ai/v1' ;;
+    moonshotai) printf '%s' 'https://api.moonshot.ai/v1' ;;
+    together) printf '%s' 'https://api.together.ai/v1' ;;
+    cerebras) printf '%s' 'https://api.cerebras.ai/v1' ;;
+    mistral) printf '%s' 'https://api.mistral.ai' ;;
+    zai) printf '%s' 'https://api.z.ai/api/coding/paas/v4' ;;
     *) return 1 ;;
   esac
 }
@@ -852,7 +882,7 @@ broker_profile_paths() {
     chat) printf '%s' '/v1/chat/completions /chat/completions /v1/models /models' ;;
     responses) printf '%s' '/v1/responses /responses /v1/models /models' ;;
     messages) printf '%s' '/v1/messages /messages /v1/models /models' ;;
-    gemini) printf '%s' '/v1beta/models' ;;
+    gemini) printf '%s' '/models /v1beta/models' ;;
     *) printf '%s' '' ;;
   esac
 }
@@ -862,15 +892,6 @@ broker_profile_headers() {
   case "$1" in
     messages) printf '%s' 'anthropic-version=2023-06-01' ;;
     *) printf '%s' '' ;;
-  esac
-}
-
-# WebUI 里该填哪个 base_url：OpenAI 系客户端自己会补 /chat/completions 或 /responses，
-# 所以代理侧要留出 /v1；Anthropic 与 Gemini 的路径自带版本号，不能再多一层。
-broker_profile_url_suffix() {
-  case "$1" in
-    messages|gemini) printf '%s' '' ;;
-    *) printf '%s' '/v1' ;;
   esac
 }
 
@@ -919,7 +940,7 @@ validate_broker_header() {
 }
 
 add_broker_upstream() {
-  local name="$1" base="$2" key="$3" rpm="${4:-0}" daily="${5:-0}" profile="${6:-}" headers="${7:-}" resolved index
+  local name="$1" base="$2" key="$3" rpm="${4:-0}" daily="${5:-0}" profile="${6:-}" headers="${7:-}" models="${8:-}" resolved index
   name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
   validate_upstream_name "$name" || return 1
   [ -n "$profile" ] || profile="$(broker_default_profile "$name")"
@@ -941,6 +962,7 @@ add_broker_upstream() {
       BROKER_DAILY[$index]="$daily"
       BROKER_PROFILES[$index]="$profile"
       BROKER_HEADERS[$index]="$headers"
+      BROKER_MODELS[$index]="$models"
       return 0
     fi
     index=$((index + 1))
@@ -952,20 +974,34 @@ add_broker_upstream() {
   BROKER_DAILY+=("$daily")
   BROKER_PROFILES+=("$profile")
   BROKER_HEADERS+=("$headers")
+  BROKER_MODELS+=("$models")
 }
 
-# 摘要要告诉人 WebUI 里到底填什么，而这取决于上游的 API 形态。内存里没有这个上游时
-# （例如选了"保留现有配置"，名字是从 keys.json 里捞的）退回 /v1，那是最常见的形态。
-broker_upstream_url_suffix() {
+# 上游的 API 形态：内存里没有这个上游时（例如选了"保留现有配置"，名字是从 keys.json
+# 里捞的）退回 any——那只影响端点收窄的宽窄，不影响认证头写对写错。
+broker_upstream_profile() {
   local wanted="$1" index=0
   while [ "$index" -lt "${#BROKER_NAMES[@]}" ]; do
     if [ "${BROKER_NAMES[$index]}" = "$wanted" ]; then
-      broker_profile_url_suffix "${BROKER_PROFILES[$index]}"
+      printf '%s' "${BROKER_PROFILES[$index]}"
       return 0
     fi
     index=$((index + 1))
   done
-  printf '%s' '/v1'
+  printf '%s' 'any'
+}
+
+# 这个上游在向导里填过的模型 id（逗号分隔）。没填过就是空串。
+broker_upstream_models() {
+  local wanted="$1" index=0
+  while [ "$index" -lt "${#BROKER_NAMES[@]}" ]; do
+    if [ "${BROKER_NAMES[$index]}" = "$wanted" ]; then
+      printf '%s' "${BROKER_MODELS[$index]}"
+      return 0
+    fi
+    index=$((index + 1))
+  done
+  printf '%s' ''
 }
 
 # 上游名字不是秘密，可以进摘要和日志；密钥永远不进。
@@ -1166,6 +1202,23 @@ validate_model_base_url_specs() {
     esac
     validate_broker_header "${spec#*=}" > /dev/null || exit 2
   done
+  for spec in ${MODEL_ID_SPECS[@]+"${MODEL_ID_SPECS[@]}"}; do
+    case "$spec" in
+      ?*=?*) ;;
+      *) echo "[错误] --model-id 需要 NAME=ID 格式（多个 id 用逗号分隔）。" >&2; exit 2 ;;
+    esac
+  done
+}
+
+# 同一个上游可以给多条 --model-id，也可以在一条里用逗号分隔，最后合成一条逗号分隔串。
+model_id_override() {
+  local wanted spec out=""
+  wanted="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  for spec in ${MODEL_ID_SPECS[@]+"${MODEL_ID_SPECS[@]}"}; do
+    [ "$(printf '%s' "${spec%%=*}" | tr '[:upper:]' '[:lower:]')" = "$wanted" ] || continue
+    out="${out:+$out,}${spec#*=}"
+  done
+  printf '%s' "$out"
 }
 
 model_api_override() {
@@ -1205,14 +1258,14 @@ apply_model_key_specs() {
     name="$(printf '%s' "${spec%%=*}" | tr '[:upper:]' '[:lower:]')"
     profile="$(model_api_override "$name" || true)"
     headers="$(model_header_overrides "$name")" || exit 2
-    add_broker_upstream "$name" "" "${spec#*=}" 0 0 "$profile" "$headers" || exit 2
+    add_broker_upstream "$name" "" "${spec#*=}" 0 0 "$profile" "$headers" "$(model_id_override "$name")" || exit 2
   done
   # --model-api / --model-header 挂在一个没给密钥的上游名上时静默丢掉最难查，所以点出来。
-  for spec in ${MODEL_API_SPECS[@]+"${MODEL_API_SPECS[@]}"} ${MODEL_HEADER_SPECS[@]+"${MODEL_HEADER_SPECS[@]}"}; do
+  for spec in ${MODEL_API_SPECS[@]+"${MODEL_API_SPECS[@]}"} ${MODEL_HEADER_SPECS[@]+"${MODEL_HEADER_SPECS[@]}"} ${MODEL_ID_SPECS[@]+"${MODEL_ID_SPECS[@]}"}; do
     name="$(printf '%s' "${spec%%=*}" | tr '[:upper:]' '[:lower:]')"
     case " $(broker_upstream_names) " in
       *" $name "*) ;;
-      *) echo "[警告] 没有名为 $name 的上游，对应的 --model-api / --model-header 不会生效。" >&2 ;;
+      *) echo "[警告] 没有名为 $name 的上游，对应的 --model-api / --model-header / --model-id 不会生效。" >&2 ;;
     esac
   done
 }
@@ -1225,7 +1278,7 @@ apply_model_key_specs() {
 #   - 还没填过任何上游 → 什么都不收集，调用方按"不启用"处理；
 #   - 已经填过 → 只是不再加下一个，前面填好的保留。
 prompt_broker_upstreams() {
-  local name base key confirm rpm daily profile choice headers pair
+  local name base key confirm rpm daily profile choice headers pair models
   while :; do
     while :; do
       prompt "上游名字（小写字母、数字、下划线、短横线）" deepseek
@@ -1304,7 +1357,16 @@ prompt_broker_upstreams() {
         headers="${headers:+$headers$BROKER_HEADER_RS}$pair"
       done
     fi
-    add_broker_upstream "$name" "$base" "$key" "$rpm" "$daily" "$profile" "$headers" || continue
+    # 模型 id 决定 WebUI 的模型下拉里能选到什么。内置目录里的上游不用填：安装器
+    # 会沿用 DSH 自带的那份清单；目录里没有的网关，DSH 无从知道它有哪些模型。
+    echo > /dev/tty
+    echo "$name 要在 DSH 里启用哪些模型：" > /dev/tty
+    echo "    deepseek、openai、anthropic、google、nvidia 这类 DSH 内置目录里的上游可以直接回车，" > /dev/tty
+    echo "    安装器会沿用目录里的整份模型清单；自建网关请至少填一个模型 id。" > /dev/tty
+    prompt_optional "模型 id（多个用逗号分隔）"
+    models="$PROMPT_RESULT"
+    [ -n "$models" ] || models="$(model_id_override "$name")"
+    add_broker_upstream "$name" "$base" "$key" "$rpm" "$daily" "$profile" "$headers" "$models" || continue
     key=""
     prompt_yes_no "再添加一个上游" n
     [ "$PROMPT_RESULT" = true ] || break
@@ -1737,6 +1799,76 @@ write_broker_config() {
   echo "==> 模型密钥已写入 $(pwd)/data/broker/keys.json（0600），未写入 .env。"
 }
 
+# 逗号分隔的模型 id → JSON 数组。空串给出 []，让 seed 脚本按"沿用目录清单"处理。
+broker_models_json() {
+  local raw="$1" id out="" IFS=','
+  for id in $raw; do
+    id="${id# }"
+    id="${id% }"
+    [ -n "$id" ] || continue
+    out="${out:+$out, }$(json_string "$id")"
+  done
+  printf '[%s]' "$out"
+}
+
+# DSH 以 UID 1000 跑，这两份文件是安装器（通常是 root）新建的，不改属主 DSH 就写不回去。
+# 失败只警告：rootless、userns-remap 或非 Linux 宿主上 chown 本来就会失败，那不是安装失败。
+seed_files_chown() {
+  local file failed=false
+  for file in data/dsh/settings.yaml data/dsh/.credentials.yaml; do
+    [ -e "$file" ] || continue
+    chown 1000:1000 "$file" 2>/dev/null || failed=true
+  done
+  [ "$failed" = true ] || return 0
+  echo "[警告] 无法把 data/dsh/settings.yaml 与 .credentials.yaml 的属主改成 1000:1000。" >&2
+  echo "       如果 DSH 报存不了模型设置，请在宿主上执行：" >&2
+  echo "       sudo chown 1000:1000 data/dsh/settings.yaml data/dsh/.credentials.yaml" >&2
+}
+
+# 把"该在 DSH 里怎么填"从摘要变成实际配置。
+#
+# 安装器手里已经有全部非秘密的事实：上游名、API 形态、模型 id，以及密钥代理的地址。
+# DSH 侧需要的就是这些加一个占位密钥，所以没有理由让用户照着摘要手抄一遍——抄错一处
+# （尤其是 base_url 的版本段）就是一个 404 或 403，而那时候人已经在 WebUI 里了。
+#
+# 写入的位置和格式都是 DSH 官方那套：
+#   data/dsh/settings.yaml  → llm-pi-ai.providers.<上游名> 与 agent-default-model
+#   data/dsh/.credentials.yaml → refs.<上游名>_API_KEY = 占位串
+# 两份文件 DSH 都在热加载，所以补填密钥不需要重启容器；引用名与 WebUI 自己派生的一致，
+# 用户之后在页面上改密钥会改到同一个引用上。
+#
+# 真正的合并交给镜像里的 node：那里才有 yaml 库（改 YAML 必须保住用户已有的注释和
+# 配置）和 DSH 内置模型目录（目录里的上游可以直接沿用整份模型清单）。
+seed_dsh_model_settings() {
+  local image="$1" names name upstreams="" payload
+  if [ "$NO_MODEL_SETTINGS_SEED" = true ]; then
+    echo "==> 已跳过写入 DSH 模型配置（--no-model-settings-seed）：供应商与模型请在 WebUI 里自己加。"
+    return 0
+  fi
+  [ "$PENDING_MODEL_BROKER" = on ] || return 0
+  names="$(broker_upstream_names)"
+  [ -n "$names" ] || return 0
+  if [ -z "$image" ]; then
+    echo "[警告] 不知道该用哪个镜像来写 DSH 模型配置，已跳过。" >&2
+    return 0
+  fi
+  mkdir -p data/dsh
+  for name in $names; do
+    upstreams="${upstreams:+$upstreams, }{\"name\": $(json_string "$name"), \"shape\": $(json_string "$(broker_upstream_profile "$name")"), \"models\": $(broker_models_json "$(broker_upstream_models "$name")")}"
+  done
+  payload="$(printf '{"brokerBase": %s, "placeholder": %s, "upstreams": [%s]}' \
+    "$(json_string "$MODEL_BROKER_BASE")" "$(json_string "$MODEL_BROKER_PLACEHOLDER_KEY")" "$upstreams")"
+  echo "==> 正在把模型供应商写进 DSH 配置（data/dsh/settings.yaml）："
+  if ! printf '%s' "$payload" | DOCKER run --rm -i \
+      -v "$(pwd)/bin:/dsh-seed:ro" -v "$(pwd)/data/dsh:/seed-home" \
+      --entrypoint node "$image" /dsh-seed/seed-dsh-model-settings.mjs --home /seed-home; then
+    echo "[警告] 没能替 DSH 写模型配置。WebUI 的「设置 → 模型」里可以自己加：" >&2
+    echo "       base_url = $MODEL_BROKER_BASE/u/<上游名>，API 密钥填占位串 $MODEL_BROKER_PLACEHOLDER_KEY。" >&2
+    return 0
+  fi
+  seed_files_chown
+}
+
 prepare_pending_env() {
   PENDING_ENV_FILE="$(mktemp .env.pending.XXXXXX)"
   if [ -f .env ]; then cp .env "$PENDING_ENV_FILE"; fi
@@ -1899,8 +2031,13 @@ print_config_summary() {
   if [ "$PENDING_MODEL_BROKER" = on ]; then
     echo "    模型密钥代理: 开（dsh-key-broker；真实密钥只在 data/broker/keys.json 与该容器内）"
     for upstream_name in $(broker_upstream_names); do
-      echo "      - $upstream_name: base_url = $MODEL_BROKER_BASE/u/$upstream_name$(broker_upstream_url_suffix "$upstream_name")，api key 填占位串 $MODEL_BROKER_PLACEHOLDER_KEY"
+      echo "      - $upstream_name: DSH 侧 base_url = $MODEL_BROKER_BASE/u/$upstream_name，密钥是占位串 $MODEL_BROKER_PLACEHOLDER_KEY"
     done
+    if [ "$NO_MODEL_SETTINGS_SEED" = true ]; then
+      echo "    模型设置: 未写入（--no-model-settings-seed），请在 WebUI 的「设置 → 模型」里自己加供应商"
+    else
+      echo "    模型设置: 已写进 data/dsh/settings.yaml，WebUI 的「设置 → 模型」里可直接选模型"
+    fi
     echo "    作用范围: 只保证密钥字面值不进入 dsh 容器，不限制额度消耗，也不阻止数据外发。"
     echo "      容器里的 Agent 用占位密钥仍可发起请求，因此建议为每个上游设置"
     echo "      requestsPerMinute / dailyRequestBudget，并按需启用 allowlist 出站模式。"
@@ -1923,7 +2060,6 @@ print_config_summary() {
 # 存在就会直接拒绝执行（那是为了保护容器可写层里 apt 装的东西），而 docker-compose.keys.yml
 # 只新增 dsh-key-broker，完全不改 dsh 服务的定义，所以补填密钥根本不需要重建 dsh。
 add_model_key() {
-  local upstream_name
   if [ "$NO_MODEL_BROKER" = true ]; then
     echo "[错误] model-key 是补填密钥的动作，不能和 --no-model-broker 一起用。" >&2
     exit 2
@@ -1973,10 +2109,9 @@ add_model_key() {
   fi
   assert_model_broker
   echo
-  echo "==> 密钥代理已就绪，在 DSH 的模型设置里这样填："
-  for upstream_name in $(broker_upstream_names); do
-    echo "      - $upstream_name: base_url = $MODEL_BROKER_BASE/u/$upstream_name$(broker_upstream_url_suffix "$upstream_name")，api key 填占位串 $MODEL_BROKER_PLACEHOLDER_KEY"
-  done
+  seed_dsh_model_settings "$(get_compose_env DSH_IMAGE "")"
+  echo "==> 密钥代理已就绪。DSH 的 settings.yaml 与 .credentials.yaml 都是热加载的，"
+  echo "    刷新一下 WebUI 就能在「设置 → 模型」里看到这些供应商，密钥框里是占位串。"
   echo "    容器内那份 skill 文档上的 DSH_MODEL_BROKER 仍显示安装时的值，要等下次重建容器"
   echo "    才会刷新——那只是说明文字，不影响代理生效。"
 }
@@ -1993,6 +2128,7 @@ case "$ACTION" in
     write_basic_auth
     write_root_password
     write_broker_config
+    seed_dsh_model_settings "$PENDING_IMAGE"
     prepare_pending_env
     echo "==> 正在启动 DSH..."
     if ! compose_up_with_pending_env; then

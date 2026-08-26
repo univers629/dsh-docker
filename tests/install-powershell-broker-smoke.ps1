@@ -26,8 +26,10 @@ Invoke-Expression (Get-InstallerRegion 'function Ask {' 'function Get-ProxyNetwo
 # 安装器里的全局状态。
 $script:BrokerUpstreams = New-Object System.Collections.ArrayList
 $script:BrokerProfiles = @{}
+$script:BrokerModels = @{}
 $script:ModelApi = @()
 $script:ModelHeader = @()
+$script:ModelId = @()
 
 # 假 Read-Host：按顺序吐出预置答案，队列空了就说明问答步骤比预期多。
 $script:Answers = New-Object System.Collections.Generic.Queue[string]
@@ -68,6 +70,7 @@ $codexKey = 'sk-test-powershell-broker-key'
     'originator=codex_cli_rs',            # 请求头 2
     'version=0.101.0',                    # 请求头 3
     '',                                   # 请求头输入结束
+    'gpt-fake-1, gpt-fake-2',             # 要在 DSH 里启用的模型 id
     'n'                                   # 不再添加上游
 ) | ForEach-Object { $script:Answers.Enqueue($_) }
 Read-BrokerUpstreams
@@ -87,9 +90,12 @@ if ($entry.allowedPathPrefixes -contains '/v1/chat/completions') { throw 'respon
 Assert-Equal 'codex_cli_rs/0.101.0' $entry.extraHeaders['user-agent'] '固定请求头 user-agent'
 Assert-Equal 'codex_cli_rs' $entry.extraHeaders['originator'] '固定请求头 originator'
 Assert-Equal '0.101.0' $entry.extraHeaders['version'] '固定请求头 version'
-# 摘要里的 base_url：responses 形态要带 /v1，Anthropic/Gemini 不能带。
-Assert-Equal '/v1' (Get-BrokerUpstreamUrlSuffix 'justwoker') 'responses 形态的 base_url 结尾'
-Assert-Equal '/v1' (Get-BrokerUpstreamUrlSuffix 'never-configured') '未知上游的 base_url 结尾'
+# 形态要记在内存里：写 DSH settings.yaml 时靠它决定 api 是 responses 还是 chat。
+Assert-Equal 'responses' (Get-BrokerUpstreamProfile 'justwoker') '向导记下的 API 形态'
+Assert-Equal 'any' (Get-BrokerUpstreamProfile 'never-configured') '没配过的上游按 any 处理'
+# 模型 id 只进 DSH 的 settings.yaml，不进 keys.json（broker 不认这个字段）。
+Assert-Equal 'gpt-fake-1, gpt-fake-2' $script:BrokerModels['justwoker'] '向导记下的模型 id'
+if ($entry.Contains('models')) { throw 'keys.json 不应带 models 字段' }
 
 # 写盘之后交给 broker 自己的 parseBrokerConfig 校验：那是唯一权威的校验器。
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ("dsh-ps-broker-" + [guid]::NewGuid().ToString('N'))
@@ -136,6 +142,12 @@ $script:ModelApi = @('JustWoker=Responses')
 $script:ModelHeader = @('justwoker=user-agent=codex_cli_rs/0.101.0', 'justwoker=originator=codex_cli_rs')
 Test-ModelSpecFormat
 Assert-Equal 'responses' (Get-ModelApiOverride 'justwoker') '-ModelApi 大小写归一'
+# -ModelId 同一个上游可以给多条，也可以在一条里用逗号分隔，最后合成一条。
+$script:ModelId = @('JustWoker=claude-opus-5-thinking', 'justwoker=gpt-5.2,gpt-5.2-codex')
+Test-ModelSpecFormat
+Assert-Equal 'claude-opus-5-thinking,gpt-5.2,gpt-5.2-codex' (Get-ModelIdOverride 'justwoker') '-ModelId 合并'
+Assert-Equal '' (Get-ModelIdOverride 'deepseek') '没有 -ModelId 时返回空串'
+$script:ModelId = @()
 Assert-Equal '' (Get-ModelApiOverride 'deepseek') '没有覆盖时返回空串'
 # 先落到变量再数：@(命令) 会把「返回值本身是数组」再包一层，数出来永远是 1。
 $headerOverrides = Get-ModelHeaderOverrides 'justwoker'
@@ -160,7 +172,7 @@ $anthropicEntry = $script:BrokerUpstreams[0]
 Assert-Equal 'x-api-key' $anthropicEntry.headerName 'anthropic 的认证头'
 Assert-Equal '{key}' $anthropicEntry.headerTemplate 'anthropic 的认证头模板'
 Assert-Equal '2023-06-01' $anthropicEntry.extraHeaders['anthropic-version'] 'anthropic-version'
-Assert-Equal '' (Get-BrokerUpstreamUrlSuffix 'anthropic') 'messages 形态的 base_url 不带 /v1'
+Assert-Equal 'messages' (Get-BrokerUpstreamProfile 'anthropic') 'anthropic 推断出的形态'
 
 # ---------------------------------------------------------------------------
 # 拒绝项：形态写错、请求头格式错、覆盖认证头
@@ -180,5 +192,15 @@ foreach ($case in @(
     if (-not $failure) { throw "应当被拒绝但通过了：$($case.Api -join ',') $($case.Header -join ',')" }
     if ($failure -notmatch $case.Match) { throw "拒绝原因不对：$failure（期望包含 $($case.Match)）" }
 }
+
+# -ModelId 也必须是 NAME=ID：写错了要当场报错，而不是在 DSH 拒绝整份 settings 之后才发现。
+$script:ModelApi = @()
+$script:ModelHeader = @()
+$script:ModelId = @('justwoker')
+$idFailure = $null
+try { Test-ModelSpecFormat } catch { $idFailure = $_.Exception.Message }
+if (-not $idFailure) { throw '-ModelId 缺少 = 应当被拒绝' }
+if ($idFailure -notmatch 'NAME=ID') { throw "拒绝原因不对：$idFailure" }
+$script:ModelId = @()
 
 Write-Output 'PowerShell model-broker smoke: ok'
