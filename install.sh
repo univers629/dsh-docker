@@ -14,6 +14,9 @@ TARGET_DIR="${DSH_INSTALL_DIR:-dsh-docker}"
 PROMPT_RESULT=""
 PENDING_BASIC_USER="${DSH_BASIC_AUTH_USER:-}"
 PENDING_BASIC_PASSWORD="${DSH_BASIC_AUTH_PASSWORD:-}"
+PENDING_ROOT_PASSWORD="${DSH_ROOT_PASSWORD:-}"
+ROOT_PASSWORD_OVERRIDE=""
+NO_ROOT_PASSWORD=false
 PENDING_ACCESS_MODE=""
 PENDING_BIND_HOST=""
 PENDING_TRUSTED_HOSTS=""
@@ -22,9 +25,30 @@ PENDING_NETWORK_EXTERNAL=""
 PENDING_IMAGE=""
 PENDING_IMAGE_SOURCE=""
 PENDING_ENV_FILE=""
+MODEL_KEY_SPECS=()
+MODEL_BASE_URL_SPECS=()
+MODEL_KEYS_FILE="${DSH_MODEL_KEYS_FILE:-}"
+NO_MODEL_BROKER=false
+EGRESS_MODE_OVERRIDE=""
+EGRESS_ALLOW_OVERRIDE=""
+USERNS_PREFLIGHT=false
+PENDING_MODEL_BROKER=off
+PENDING_EGRESS_MODE=open
+PENDING_EGRESS_ALLOWED_HOSTS=""
+# 收集到的上游用几个下标对齐的数组存。密钥只在 BROKER_KEYS 里短暂停留，写盘之后
+# 立刻清空，和 PENDING_ROOT_PASSWORD 一样的处理。
+BROKER_NAMES=()
+BROKER_BASE_URLS=()
+BROKER_KEYS=()
+BROKER_RPM=()
+BROKER_DAILY=()
 
 DEFAULT_PREBUILT_IMAGE="${DSH_PREBUILT_IMAGE:-ghcr.io/univers629/dsh-docker:latest}"
 DEFAULT_LOCAL_IMAGE="dsh:local"
+# 容器内只填占位密钥，真实密钥由 dsh-key-broker 在转发时注入，所以这个地址是契约的
+# 一部分：compose 用它渲染 DSH_MODEL_BROKER_BASE，摘要用它拼出给 Agent 的 base_url。
+MODEL_BROKER_BASE="http://dsh-key-broker:8080"
+MODEL_BROKER_PLACEHOLDER_KEY="dsh-broker-placeholder"
 
 usage() {
   cat <<'EOF'
@@ -39,8 +63,21 @@ usage() {
   --network-external / --network-internal
   --image-source prebuilt|build   prebuilt 拉取已发布镜像，build 在本机编译
   --image REF                     自定义镜像引用（默认按来源推导）
+  --root-password VALUE           容器 root 密码（至少 12 位，也可用 DSH_ROOT_PASSWORD）
+  --no-root-password              不设置容器 root 密码（容器内任意特权命令保持关闭）
+  --model-key NAME=KEY            模型上游密钥（可重复；命令行参数会进 ps，仅供自动化）
+  --model-base-url NAME=URL       上游 base_url（可重复；deepseek/openai/anthropic 有内置默认）
+  --model-keys-file PATH          导入一份完整的 keys.json（也可用 DSH_MODEL_KEYS_FILE）
+  --no-model-broker               关闭模型密钥代理，并清空 data/broker/keys.json
+  --egress open|allowlist         容器出站模式（allowlist 只放行白名单域名）
+  --egress-allow HOSTS            allowlist 下额外放行的域名（可重复，逗号分隔，支持 *.example.com）
+  --userns-preflight              只做宿主 userns-remap 预检并退出，不安装
   --non-interactive               不显示问答，使用参数或安全默认值
   --dir PATH                      工程目录（默认 ./dsh-docker）
+
+关于模型密钥：写在命令行上的密钥会出现在 ps 里，所以人工安装请直接跑向导逐个输入
+（不回显），自动化请用 --model-keys-file 指向一份 0600 的 keys.json；--model-key 只是
+给没法交互的流水线留的后路。真实密钥永远不会写进 .env。
 EOF
 }
 
@@ -91,6 +128,46 @@ while [ "$#" -gt 0 ]; do
       IMAGE_OVERRIDE="$1"
       ;;
     --image=*) IMAGE_OVERRIDE="${1#*=}" ;;
+    --root-password)
+      [ "$#" -ge 2 ] || { echo "[错误] --root-password 缺少值。" >&2; exit 2; }
+      shift
+      ROOT_PASSWORD_OVERRIDE="$1"
+      ;;
+    --root-password=*) ROOT_PASSWORD_OVERRIDE="${1#*=}" ;;
+    --no-root-password) NO_ROOT_PASSWORD=true ;;
+    --model-key)
+      [ "$#" -ge 2 ] || { echo "[错误] --model-key 缺少值。" >&2; exit 2; }
+      shift
+      MODEL_KEY_SPECS+=("$1")
+      ;;
+    --model-key=*) MODEL_KEY_SPECS+=("${1#*=}") ;;
+    --model-base-url)
+      [ "$#" -ge 2 ] || { echo "[错误] --model-base-url 缺少值。" >&2; exit 2; }
+      shift
+      MODEL_BASE_URL_SPECS+=("$1")
+      ;;
+    --model-base-url=*) MODEL_BASE_URL_SPECS+=("${1#*=}") ;;
+    --model-keys-file)
+      [ "$#" -ge 2 ] || { echo "[错误] --model-keys-file 缺少值。" >&2; exit 2; }
+      shift
+      MODEL_KEYS_FILE="$1"
+      ;;
+    --model-keys-file=*) MODEL_KEYS_FILE="${1#*=}" ;;
+    --no-model-broker) NO_MODEL_BROKER=true ;;
+    --egress)
+      [ "$#" -ge 2 ] || { echo "[错误] --egress 缺少值。" >&2; exit 2; }
+      shift
+      EGRESS_MODE_OVERRIDE="$1"
+      ;;
+    --egress=*) EGRESS_MODE_OVERRIDE="${1#*=}" ;;
+    # 可重复：多次 --egress-allow 累积成一条逗号分隔的 DSH_EGRESS_ALLOWED_HOSTS。
+    --egress-allow)
+      [ "$#" -ge 2 ] || { echo "[错误] --egress-allow 缺少值。" >&2; exit 2; }
+      shift
+      EGRESS_ALLOW_OVERRIDE="${EGRESS_ALLOW_OVERRIDE:+$EGRESS_ALLOW_OVERRIDE,}$1"
+      ;;
+    --egress-allow=*) EGRESS_ALLOW_OVERRIDE="${EGRESS_ALLOW_OVERRIDE:+$EGRESS_ALLOW_OVERRIDE,}${1#*=}" ;;
+    --userns-preflight) USERNS_PREFLIGHT=true ;;
     --network-external) NETWORK_EXTERNAL_OVERRIDE=true ;;
     --network-internal) NETWORK_EXTERNAL_OVERRIDE=false ;;
     --non-interactive|-y|--yes) INTERACTIVE=false ;;
@@ -124,6 +201,10 @@ esac
 case "$IMAGE_SOURCE_OVERRIDE" in
   ''|prebuilt|build) ;;
   *) echo "[错误] --image-source 只支持 prebuilt 或 build。" >&2; exit 2 ;;
+esac
+case "$EGRESS_MODE_OVERRIDE" in
+  ''|open|allowlist) ;;
+  *) echo "[错误] --egress 只支持 open 或 allowlist。" >&2; exit 2 ;;
 esac
 
 if [ "$INTERACTIVE" = auto ]; then
@@ -159,6 +240,19 @@ prompt_secret() {
   PROMPT_RESULT="$answer"
 }
 
+# prompt 会一直问到非空，但有些配置项"留空"本身就是有效答案（例如额外放行的域名），
+# 所以这一个只问一次，回车即表示清空当前值。
+prompt_optional() {
+  local message="$1" default="${2:-}" answer
+  if [ -n "$default" ]; then
+    printf '%s [当前 %s，回车表示清空]: ' "$message" "$default" > /dev/tty
+  else
+    printf '%s（可留空）: ' "$message" > /dev/tty
+  fi
+  IFS= read -r answer < /dev/tty || exit 1
+  PROMPT_RESULT="$answer"
+}
+
 prompt_yes_no() {
   local message="$1" default="$2" answer
   while :; do
@@ -177,7 +271,8 @@ echo "  DeepSeek Harness (DSH) 安装与管理向导"
 echo "==================================================="
 echo
 
-if [ -z "$ACTION" ]; then
+# --userns-preflight 只做宿主检查，不该被"这次要做什么"的菜单挡住。
+if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
   if [ "$INTERACTIVE" = true ]; then
     if [ -d "$TARGET_DIR" ]; then
       echo "1) 重新配置并重建容器（保留挂载数据）"
@@ -223,6 +318,114 @@ elif command -v sudo >/dev/null 2>&1; then
   DOCKER_ENV() { sudo env "$@"; }
 else
   echo "[错误] 当前用户无权访问 Docker，且系统没有 sudo。" >&2
+  exit 1
+fi
+
+userns_chown() {
+  local path="$1" owner="$2"
+  if chown -R "$owner" "$path" 2>/dev/null; then
+    echo "    已对齐 $path -> $owner"
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1 && sudo chown -R "$owner" "$path" 2>/dev/null; then
+    echo "    已对齐 $path -> $owner（经 sudo）"
+    return 0
+  fi
+  echo "[警告] 无法把 $path 的属主改成 $owner。" >&2
+  return 1
+}
+
+# 宿主 userns-remap 预检。开了它之后容器里的 UID 0 在宿主上只是 subuid 区间里的一个
+# 普通账户，就算内核漏洞逃逸出去也不是宿主 root——这是纵深防御的最后一层。
+#
+# 但它是 daemon 级设置，一改会影响这台宿主上的所有容器（所有绑定卷的属主都要重新
+# 对齐），所以安装器只做三件事：检测、算出 subuid 基址、对齐本工程的绑定挂载属主。
+# 绝不代写 /etc/docker/daemon.json，也绝不代重启 Docker。
+userns_preflight() {
+  local security_options base root_dir project_dir directory mapped_user mapped_root failed=false
+  echo "==> user namespace remap 预检"
+  security_options="$(DOCKER info --format '{{.SecurityOptions}}' 2>/dev/null || true)"
+  case "$security_options" in
+    *name=userns*) ;;
+    *)
+      echo "    当前状态：未启用（docker info 的 SecurityOptions 里没有 name=userns）"
+      echo
+      echo "    需要人工执行的步骤（只对 Linux 宿主有意义）："
+      echo "      1) 编辑 /etc/docker/daemon.json，加入一行： \"userns-remap\": \"default\""
+      echo "      2) sudo systemctl restart docker"
+      echo "      3) 回来再跑一次 ./install.sh --userns-preflight，让它把绑定挂载的属主对齐"
+      echo
+      echo "    重启守护进程之后，这台宿主上所有现有容器的卷属主都会失配：容器里的 UID N"
+      echo "    在宿主上变成 BASE+N，原来属于宿主 UID N 的文件容器里就读不到了。不只是 DSH，"
+      echo "    每个用绑定挂载的项目都要重新对齐一次。"
+      echo "    另外 Docker Desktop / WSL2 不支持 userns-remap（docker run --userns 只接受 host），"
+      echo "    在这类环境里改 daemon.json 也不会生效，这条只对 Linux VPS 有意义。"
+      return 0
+      ;;
+  esac
+  echo "    当前状态：已启用（$security_options）"
+  # 容器 UID N 在宿主上的真实身份是 BASE+N，BASE 就是 dockremap 的起始 subuid。
+  base="$(awk -F: '$1 == "dockremap" { print $2; exit }' /etc/subuid 2>/dev/null || true)"
+  if [ -z "$base" ]; then
+    # /etc/subuid 读不到（远端守护进程、只读宿主）时退一步看 DockerRootDir：
+    # remap 打开后它会带上 <uid>.<gid> 后缀，那个 uid 就是 BASE。
+    root_dir="$(DOCKER info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+    case "$root_dir" in
+      */[0-9]*.[0-9]*)
+        base="${root_dir##*/}"
+        base="${base%%.*}"
+        ;;
+    esac
+  fi
+  case "$base" in
+    ''|*[!0-9]*)
+      echo "[错误] 宿主已启用 userns-remap，但取不到 dockremap 的起始 subuid。" >&2
+      echo "       既读不到 /etc/subuid 的 dockremap 行（格式 dockremap:BASE:COUNT），" >&2
+      echo "       docker info 的 DockerRootDir 也没有 <uid>.<gid> 后缀。" >&2
+      echo "       请手动确认 BASE 后执行（1000 是容器内 dsh 账户的 UID）：" >&2
+      echo "         sudo chown -R \$((BASE + 1000)):\$((BASE + 1000)) data/dsh data/home data/agents data/mcp workspace data/broker" >&2
+      echo "         sudo chown -R \$((BASE + 0)):\$((BASE + 0)) data/secret data/auth" >&2
+      return 1
+      ;;
+  esac
+  mapped_user=$((base + 1000))
+  mapped_root=$((base + 0))
+  echo "    dockremap 起始 subuid：$base"
+  echo "    映射结果：容器 UID 1000（dsh 账户）== 宿主 UID $mapped_user，容器 root == 宿主 UID $mapped_root"
+  echo "    为什么必须在宿主侧改：remap 之后容器 root 只是它自己 user namespace 里的 root，"
+  echo "    CAP_CHOWN 也只在那个 namespace 内有效，所以容器改不了绑定挂载目录在宿主上的属主。"
+  project_dir=""
+  if [ -f "$TARGET_DIR/docker-compose.yml" ]; then
+    project_dir="$TARGET_DIR"
+  elif [ -f docker-compose.yml ] && [ -f Dockerfile ]; then
+    project_dir="."
+  fi
+  if [ -z "$project_dir" ]; then
+    echo "    未找到工程目录（$TARGET_DIR），只打印需要在工程目录里执行的命令："
+    echo "      sudo chown -R $mapped_user:$mapped_user data/dsh data/home data/agents data/mcp workspace data/broker"
+    echo "      sudo chown -R $mapped_root:$mapped_root data/secret data/auth"
+    return 0
+  fi
+  ( cd "$project_dir" && mkdir -p data/dsh data/home data/agents data/mcp data/broker data/secret data/auth workspace )
+  # 走 DSH 账户的目录用 BASE+1000；data/secret 与 data/auth 只被容器 root 读，用 BASE+0。
+  for directory in data/dsh data/home data/agents data/mcp workspace data/broker; do
+    userns_chown "$project_dir/$directory" "$mapped_user:$mapped_user" || failed=true
+  done
+  for directory in data/secret data/auth; do
+    userns_chown "$project_dir/$directory" "$mapped_root:$mapped_root" || failed=true
+  done
+  if [ "$failed" = true ]; then
+    echo "[错误] 有目录的属主没能对齐，容器起来之后会读不到它们。" >&2
+    echo "       请用 root 重跑：sudo ./install.sh --userns-preflight --dir $TARGET_DIR" >&2
+    return 1
+  fi
+  echo "==> 绑定挂载的属主已全部对齐，可以继续安装或启动容器。"
+}
+
+if [ "$USERNS_PREFLIGHT" = true ]; then
+  if userns_preflight; then
+    exit 0
+  fi
   exit 1
 fi
 
@@ -313,6 +516,7 @@ detach_delete() {
 
 delete_project() {
   local project_name=dsh-docker image_refs ref ids id target_abs network_ids network_project container_ids
+  local container_name
   local configured_image
   confirm_delete
 
@@ -329,6 +533,11 @@ delete_project() {
       # 旧版安装（曾把 /usr、/etc、/var 拆成 data/system 下的绑定卷）时才叠加它，
       # 以便一次性清掉那些遗留卷。
       [ -f docker-compose.system.yml ] && compose_files+=( -f docker-compose.system.yml )
+      # 密钥代理与出站隔离的叠加文件同样要带上，否则 down 看不到 dsh-key-broker /
+      # dsh-egress / dsh-ingress 这几个服务，它们会连着 dsh-internal 网络一起留下来。
+      # 老部署目录里没有这两个文件，所以必须逐个判断存在性。
+      [ -f docker-compose.keys.yml ] && compose_files+=( -f docker-compose.keys.yml )
+      [ -f docker-compose.isolated.yml ] && compose_files+=( -f docker-compose.isolated.yml )
       DOCKER compose -p "$project_name" "${compose_files[@]}" down --volumes --remove-orphans
     ) || true
   fi
@@ -337,7 +546,10 @@ delete_project() {
   while IFS= read -r id; do
     [ -n "$id" ] && DOCKER container rm -f "$id" >/dev/null 2>&1 || true
   done <<< "$container_ids"
-  DOCKER container rm -f dsh >/dev/null 2>&1 || true
+  # 兜底按名字删：叠加文件缺失、或者容器被手工从项目里摘掉时，标签过滤都找不到它们。
+  for container_name in dsh dsh-key-broker dsh-egress dsh-ingress; do
+    DOCKER container rm -f "$container_name" >/dev/null 2>&1 || true
+  done
   # 预构建安装用的引用不叫 dsh:*，而且多架构清单未必带上项目标签，所以要按
   # .env 里记录的引用精确删除一次。delete 可能在工程目录的上一级执行，因此
   # 这里不能依赖当前目录的 .env。
@@ -374,10 +586,12 @@ delete_project() {
       DOCKER network rm "$id" >/dev/null 2>&1 || true
     fi
   done <<< "$network_ids"
-  network_project="$(DOCKER network inspect --format '{{ index .Labels "com.docker.compose.project" }}' dsh-private 2>/dev/null || true)"
-  if [ "$network_project" = "$project_name" ]; then
-    DOCKER network rm dsh-private >/dev/null 2>&1 || true
-  fi
+  for container_name in dsh-private dsh-internal; do
+    network_project="$(DOCKER network inspect --format '{{ index .Labels "com.docker.compose.project" }}' "$container_name" 2>/dev/null || true)"
+    if [ "$network_project" = "$project_name" ]; then
+      DOCKER network rm "$container_name" >/dev/null 2>&1 || true
+    fi
+  done
   DOCKER builder prune -af
 
   if [ -d "$TARGET_DIR" ]; then
@@ -469,8 +683,267 @@ get_compose_env() {
   printf '%s' "${value:-$fallback}"
 }
 
-mkdir -p data/auth
+# data/auth 存 Basic Auth 的 bcrypt 文件；data/secret 只存容器 root 口令哈希，
+# 并且只挂到容器的 /root/dsh-secret（0700 root:root），dsh 账户读不到。
+# data/broker 存模型密钥，只被 dsh-key-broker 容器以 UID 1000 只读挂载，
+# 完全不出现在 DSH 容器的挂载表里。
+mkdir -p data/auth data/secret data/broker
 COMPOSE_ARGS=(-f docker-compose.yml)
+
+# 叠加顺序是契约的一部分，不能按别的顺序拼：keys.yml 先把 dsh-key-broker 放进
+# dsh-internal，isolated.yml 才能把 dsh 收进那张没有网关的网络而不切断模型请求。
+set_compose_args() {
+  COMPOSE_ARGS=(-f docker-compose.yml)
+  if [ "$PENDING_MODEL_BROKER" = on ]; then
+    if [ ! -f docker-compose.keys.yml ]; then
+      echo "[错误] 需要 docker-compose.keys.yml 才能启用模型密钥代理，但工程目录里没有它。" >&2
+      echo "       请更新工程源码，或用 --no-model-broker 关闭密钥代理。" >&2
+      exit 1
+    fi
+    COMPOSE_ARGS+=(-f docker-compose.keys.yml)
+  fi
+  if [ "$PENDING_EGRESS_MODE" = allowlist ]; then
+    if [ ! -f docker-compose.isolated.yml ]; then
+      echo "[错误] 需要 docker-compose.isolated.yml 才能启用出站白名单模式，但工程目录里没有它。" >&2
+      echo "       请更新工程源码，或用 --egress open 保持直连出网。" >&2
+      exit 1
+    fi
+    COMPOSE_ARGS+=(-f docker-compose.isolated.yml)
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 模型密钥代理（dsh-key-broker）
+#
+# 这一整段只为一件事服务：真实模型密钥不要出现在 DSH 容器里。那个容器里的 Agent 以
+# danger-full-access 运行，放进去的密钥不需要"骗"它说出来，一条 cat 就够了。所以密钥
+# 只写 data/broker/keys.json（0600，只被 broker 容器只读挂载），.env 里只留开关和地址。
+# ---------------------------------------------------------------------------
+
+# 内置 base_url 只是省掉最常见三家的手输。其它上游必须显式给 --model-base-url：
+# 猜错 base_url 等于把密钥发到一个我们没验证过的域名，宁可报错退出。
+model_default_base_url() {
+  case "$1" in
+    deepseek) printf '%s' 'https://api.deepseek.com' ;;
+    openai) printf '%s' 'https://api.openai.com' ;;
+    anthropic) printf '%s' 'https://api.anthropic.com' ;;
+    *) return 1 ;;
+  esac
+}
+
+# 转义全程用 bash 自己的字符串替换，不调用任何外部命令：密钥因此不会出现在
+# 任何进程的命令行里，也就不会进 ps。
+json_escape() {
+  local text="$1"
+  text="${text//\\/\\\\}"
+  text="${text//\"/\\\"}"
+  text="${text//$'\n'/\\n}"
+  text="${text//$'\r'/\\r}"
+  text="${text//$'\t'/\\t}"
+  printf '%s' "$text"
+}
+
+json_string() {
+  printf '"%s"' "$(json_escape "$1")"
+}
+
+validate_upstream_name() {
+  local name="$1"
+  case "$name" in
+    ''|*[!a-z0-9_-]*)
+      echo "[错误] 上游名字只允许小写字母、数字、下划线和短横线：$name" >&2
+      return 1
+      ;;
+  esac
+  if [ "${#name}" -gt 32 ]; then
+    echo "[错误] 上游名字最多 32 个字符：$name" >&2
+    return 1
+  fi
+}
+
+# 这里只挡明显写错的（明文、内嵌凭据、带 query）。严格校验在 broker 的
+# parseBrokerConfig 里，配置写错它会直接拒绝启动——所以早报错比晚报错好。
+validate_upstream_base_url() {
+  local url="$1"
+  case "$url" in
+    https://?*) ;;
+    *) echo "[错误] base_url 必须使用 https（密钥不能走明文）：$url" >&2; return 1 ;;
+  esac
+  case "$url" in
+    *[?#]*) echo "[错误] base_url 不允许带 query 或 fragment：$url" >&2; return 1 ;;
+    *@*) echo "[错误] base_url 不允许内嵌凭据：$url" >&2; return 1 ;;
+  esac
+}
+
+model_base_url_override() {
+  local wanted="$1" spec
+  for spec in ${MODEL_BASE_URL_SPECS[@]+"${MODEL_BASE_URL_SPECS[@]}"}; do
+    if [ "${spec%%=*}" = "$wanted" ]; then
+      printf '%s' "${spec#*=}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 优先级：显式传入 > --model-base-url > 内置默认表 > 报错。
+resolve_upstream_base_url() {
+  local name="$1" explicit="$2" url=""
+  if [ -n "$explicit" ]; then
+    url="$explicit"
+  elif url="$(model_base_url_override "$name")"; then
+    :
+  elif url="$(model_default_base_url "$name")"; then
+    :
+  else
+    echo "[错误] 上游 $name 没有内置 base_url，请显式指定：--model-base-url $name=https://..." >&2
+    return 1
+  fi
+  validate_upstream_base_url "$url" || return 1
+  printf '%s' "$url"
+}
+
+add_broker_upstream() {
+  local name="$1" base="$2" key="$3" rpm="${4:-0}" daily="${5:-0}" resolved index
+  name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+  validate_upstream_name "$name" || return 1
+  if [ -z "$key" ]; then
+    echo "[错误] 上游 $name 的密钥为空。" >&2
+    return 1
+  fi
+  resolved="$(resolve_upstream_base_url "$name" "$base")" || return 1
+  case "$rpm" in ''|*[!0-9]*) echo "[错误] 每分钟请求上限必须是非负整数：$rpm" >&2; return 1 ;; esac
+  case "$daily" in ''|*[!0-9]*) echo "[错误] 每日请求配额必须是非负整数：$daily" >&2; return 1 ;; esac
+  # 同名上游以最后一次为准，和 keys.json 的合并语义保持一致。
+  index=0
+  while [ "$index" -lt "${#BROKER_NAMES[@]}" ]; do
+    if [ "${BROKER_NAMES[$index]}" = "$name" ]; then
+      BROKER_BASE_URLS[$index]="$resolved"
+      BROKER_KEYS[$index]="$key"
+      BROKER_RPM[$index]="$rpm"
+      BROKER_DAILY[$index]="$daily"
+      return 0
+    fi
+    index=$((index + 1))
+  done
+  BROKER_NAMES+=("$name")
+  BROKER_BASE_URLS+=("$resolved")
+  BROKER_KEYS+=("$key")
+  BROKER_RPM+=("$rpm")
+  BROKER_DAILY+=("$daily")
+}
+
+# 上游名字不是秘密，可以进摘要和日志；密钥永远不进。
+broker_upstream_names() {
+  local index=0 names=""
+  while [ "$index" -lt "${#BROKER_NAMES[@]}" ]; do
+    names="${names:+$names }${BROKER_NAMES[$index]}"
+    index=$((index + 1))
+  done
+  if [ -z "$names" ] && [ -s data/broker/keys.json ]; then
+    # 选了"保留现有配置"时内存里没有上游列表，只为摘要从文件里捞一遍名字。
+    names="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([a-z0-9_-]\{1,32\}\)".*/\1/p' data/broker/keys.json | sort -u | tr '\n' ' ')"
+  fi
+  printf '%s' "$names"
+}
+
+# 可选字段能省就省：把 broker 的默认值抄一份进 keys.json，只会在 broker 改默认值之后
+# 变成静默的行为分叉，也让人更难看出哪些限制是自己真的设过的。
+broker_upstreams_json() {
+  local index=0 body="" entry name newline
+  newline=$'\n'
+  while [ "$index" -lt "${#BROKER_NAMES[@]}" ]; do
+    name="${BROKER_NAMES[$index]}"
+    entry="$(printf '{"name": %s, "baseUrl": %s, "key": %s' \
+      "$(json_string "$name")" \
+      "$(json_string "${BROKER_BASE_URLS[$index]}")" \
+      "$(json_string "${BROKER_KEYS[$index]}")")"
+    case "$name" in
+      anthropic)
+        # Anthropic 不用 Authorization: Bearer，密钥走 x-api-key，而且缺 anthropic-version
+        # 会被上游直接 400。这两条不是默认值，必须显式写进配置。
+        entry="$entry, \"headerName\": \"x-api-key\", \"headerTemplate\": \"{key}\", \"extraHeaders\": {\"anthropic-version\": \"2023-06-01\"}"
+        ;;
+    esac
+    [ "${BROKER_RPM[$index]}" = 0 ] || entry="$entry, \"requestsPerMinute\": ${BROKER_RPM[$index]}"
+    [ "${BROKER_DAILY[$index]}" = 0 ] || entry="$entry, \"dailyRequestBudget\": ${BROKER_DAILY[$index]}"
+    entry="$entry}"
+    body="${body:+$body,$newline    }$entry"
+    index=$((index + 1))
+  done
+  printf '[%s    %s%s  ]' "$newline" "$body" "$newline"
+}
+
+# 合并交给 node：现有 keys.json 里可能还有这次没提到的上游，整体覆盖会把它们丢掉，
+# 而 shell 没法可靠地拆一份可能含任意字符的 JSON。宿主有 node 就用宿主的，没有就用
+# 镜像里的（镜像必然带 node，broker 本身就跑在上面）。密钥全程走 stdin，不进命令行。
+BROKER_MERGE_SCRIPT='
+const chunks = []
+process.stdin.on("data", (chunk) => chunks.push(chunk))
+process.stdin.on("end", () => {
+  const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"))
+  const incoming = Array.isArray(payload.incoming) ? payload.incoming : []
+  const names = new Set(incoming.map((entry) => entry && entry.name))
+  let kept = []
+  if (payload.existing) {
+    const document = JSON.parse(payload.existing)
+    if (Array.isArray(document.upstreams)) {
+      kept = document.upstreams.filter((entry) => entry && !names.has(entry.name))
+    }
+  }
+  process.stdout.write(JSON.stringify({ version: 1, upstreams: kept.concat(incoming) }, null, 2))
+})
+'
+
+merge_broker_config() {
+  local incoming="$1" payload
+  payload="$(printf '{"existing": %s, "incoming": %s}' \
+    "$(json_string "$(cat data/broker/keys.json)")" "$incoming")"
+  if command -v node >/dev/null 2>&1; then
+    printf '%s' "$payload" | node -e "$BROKER_MERGE_SCRIPT"
+  else
+    printf '%s' "$payload" | DOCKER run --rm -i --entrypoint node "$PENDING_IMAGE" -e "$BROKER_MERGE_SCRIPT"
+  fi
+}
+
+# --no-model-broker 必须真的把密钥清掉：只翻开关、把文件留在盘上，等于密钥还在。
+clear_broker_config() {
+  [ -e data/broker/keys.json ] || return 0
+  rm -f data/broker/keys.json
+  echo "==> 已删除 data/broker/keys.json（模型密钥代理已关闭）。"
+}
+
+import_model_keys_file() {
+  local source="$1" temporary
+  if [ ! -r "$source" ]; then
+    echo "[错误] 读不到 --model-keys-file 指定的文件：$source" >&2
+    exit 2
+  fi
+  # 只做最基本的形状检查：完整校验在 broker 的 parseBrokerConfig 里，写错了它会拒绝启动。
+  if ! grep -q '"upstreams"' "$source"; then
+    echo "[错误] $source 里没有 upstreams 字段，不像是 keys.json。" >&2
+    exit 2
+  fi
+  mkdir -p data/broker
+  temporary="$(mktemp data/broker/keys.json.tmp.XXXXXX)"
+  chmod 600 "$temporary"
+  cat "$source" > "$temporary"
+  mv "$temporary" data/broker/keys.json
+  broker_config_chown
+  echo "==> 已从 $source 导入模型密钥配置（0600）。"
+}
+
+# broker 容器以 UID 1000 只读挂载这份文件，属主不对它就读不到。chown 会在 rootless、
+# 非 1000 的宿主用户或非 Linux 宿主上失败，那不是安装失败，所以只警告不中断。
+broker_config_chown() {
+  if chown 1000:1000 data/broker/keys.json 2>/dev/null; then
+    return 0
+  fi
+  echo "[警告] 无法把 data/broker/keys.json 的属主改成 1000:1000。" >&2
+  echo "       dsh-key-broker 以 UID 1000 只读挂载它；如果容器报读不到配置，请在宿主上执行：" >&2
+  echo "       sudo chown 1000:1000 data/broker/keys.json" >&2
+}
+
 
 # 列出可以作为反向代理网络的候选，排除 Docker 内置网络和 DSH 自己管理的网络。
 list_proxy_network_candidates() {
@@ -516,9 +989,154 @@ ensure_external_network() {
   return 1
 }
 
+configure_model_broker() {
+  local name base key confirm rpm daily spec
+  PENDING_MODEL_BROKER="$(get_compose_env DSH_MODEL_BROKER off)"
+  case "$PENDING_MODEL_BROKER" in on|off) ;; *) PENDING_MODEL_BROKER=off ;; esac
+
+  # 先统一检查格式，否则报错时机会取决于上游出现的顺序，很难看懂。
+  for spec in ${MODEL_BASE_URL_SPECS[@]+"${MODEL_BASE_URL_SPECS[@]}"}; do
+    case "$spec" in
+      ?*=?*) ;;
+      *) echo "[错误] --model-base-url 需要 NAME=URL 格式。" >&2; exit 2 ;;
+    esac
+  done
+
+  if [ "$NO_MODEL_BROKER" = true ]; then
+    PENDING_MODEL_BROKER=off
+    clear_broker_config
+    return 0
+  fi
+
+  if [ -n "$MODEL_KEYS_FILE" ]; then
+    import_model_keys_file "$MODEL_KEYS_FILE"
+    PENDING_MODEL_BROKER=on
+  fi
+
+  for spec in ${MODEL_KEY_SPECS[@]+"${MODEL_KEY_SPECS[@]}"}; do
+    # 报错文案里不能回显 spec：格式写错时它整体可能就是一段密钥。
+    case "$spec" in
+      ?*=?*) ;;
+      *) echo "[错误] --model-key 需要 NAME=KEY 格式，且两边都不能为空。" >&2; exit 2 ;;
+    esac
+    add_broker_upstream "${spec%%=*}" "" "${spec#*=}" 0 0 || exit 2
+    PENDING_MODEL_BROKER=on
+  done
+
+  if [ "$INTERACTIVE" != true ]; then
+    # 非交互的默认行为必须和以前完全一样：既没给密钥、盘上也没有配置，就保持 off，
+    # 否则一条不带新参数的老安装命令会突然多起来一个容器。
+    if [ "${#BROKER_NAMES[@]}" -eq 0 ] && [ ! -s data/broker/keys.json ]; then
+      PENDING_MODEL_BROKER=off
+    elif [ -s data/broker/keys.json ]; then
+      PENDING_MODEL_BROKER=on
+    fi
+    return 0
+  fi
+
+  # 命令行已经把密钥给全了就不再追问：自动化和交互混用时不该被问答打断。
+  if [ "${#BROKER_NAMES[@]}" -gt 0 ] || [ -n "$MODEL_KEYS_FILE" ]; then
+    return 0
+  fi
+
+  echo
+  echo "模型 API 密钥放在哪里："
+  echo "    DSH 容器里的 Agent 以 danger-full-access 运行。密钥放在那个容器里的话，提示注入"
+  echo "    根本不需要骗它说出来，一条 cat 就够了；容器内被拿到 root 也一样。"
+  echo "    开启后真实密钥只留在 data/broker/keys.json 和独立的 dsh-key-broker 容器里，"
+  echo "    DSH 容器只拿到占位密钥和 $MODEL_BROKER_BASE 这个地址。"
+  if [ -s data/broker/keys.json ]; then
+    prompt_yes_no "保留现有模型密钥配置" y
+    if [ "$PROMPT_RESULT" = true ]; then
+      PENDING_MODEL_BROKER=on
+      echo "==> 保留 data/broker/keys.json，本次完全不改动其中的密钥。"
+      return 0
+    fi
+  fi
+  prompt_yes_no "把模型 API 密钥搬到独立的密钥代理容器" y
+  if [ "$PROMPT_RESULT" != true ]; then
+    PENDING_MODEL_BROKER=off
+    return 0
+  fi
+  while :; do
+    while :; do
+      prompt "上游名字（小写字母、数字、下划线、短横线）" deepseek
+      name="$(printf '%s' "$PROMPT_RESULT" | tr '[:upper:]' '[:lower:]')"
+      validate_upstream_name "$name" && break
+    done
+    while :; do
+      base="$(model_default_base_url "$name" 2>/dev/null || true)"
+      prompt "$name 的 base_url" "$base"
+      base="$PROMPT_RESULT"
+      validate_upstream_base_url "$base" && break
+    done
+    while :; do
+      prompt_secret "$name 的 API 密钥（不回显）"
+      key="$PROMPT_RESULT"
+      if [ -z "$key" ]; then
+        echo "密钥不能为空。" > /dev/tty
+        continue
+      fi
+      prompt_secret "再次输入 $name 的 API 密钥"
+      confirm="$PROMPT_RESULT"
+      [ "$key" = "$confirm" ] && break
+      echo "两次输入不一致，请重试。" > /dev/tty
+    done
+    confirm=""
+    # 配额是这一层唯一能限制"额度被别人花掉"的手段：密钥代理保证的是密钥不外泄，
+    # 不保证额度不被用，被注入的 Agent 照样可以拿占位密钥发请求。
+    while :; do
+      prompt "$name 每分钟请求上限（0 = 不限）" 0
+      rpm="$PROMPT_RESULT"
+      case "$rpm" in ''|*[!0-9]*) echo "请输入非负整数。" > /dev/tty ;; *) break ;; esac
+    done
+    while :; do
+      prompt "$name 每日请求配额（0 = 不限）" 0
+      daily="$PROMPT_RESULT"
+      case "$daily" in ''|*[!0-9]*) echo "请输入非负整数。" > /dev/tty ;; *) break ;; esac
+    done
+    add_broker_upstream "$name" "$base" "$key" "$rpm" "$daily" || continue
+    key=""
+    PENDING_MODEL_BROKER=on
+    prompt_yes_no "再添加一个上游" n
+    [ "$PROMPT_RESULT" = true ] || break
+  done
+}
+
+configure_egress_mode() {
+  local default_route
+  PENDING_EGRESS_MODE="${EGRESS_MODE_OVERRIDE:-$(get_compose_env DSH_EGRESS_MODE open)}"
+  case "$PENDING_EGRESS_MODE" in open|allowlist) ;; *) PENDING_EGRESS_MODE=open ;; esac
+  if [ "$INTERACTIVE" = true ] && [ -z "$EGRESS_MODE_OVERRIDE" ]; then
+    case "$PENDING_EGRESS_MODE" in allowlist) default_route=2 ;; *) default_route=1 ;; esac
+    echo
+    echo "容器出站网络："
+    echo "1) open（默认，容器可直接访问任意外网）"
+    echo "2) allowlist（只放行白名单域名，其余全部拒绝）"
+    echo "    选 2 之后会发生这些变化，请先确认能接受："
+    echo "    - dsh 容器不再直连外网，所有出站流量只能经过 dsh-egress 正向代理；"
+    echo "    - 宿主的 3080 改由 dsh-ingress 容器发布（它在 dsh-private 网络上顶替 dsh 这个"
+    echo "      名字，所以 DPanel 那边写的 http://dsh:3080 不用改）；"
+    echo "    - 白名单以外的域名，apt / npm / pip / git 全都会拿到 403。"
+    prompt "请选择" "$default_route"
+    case "$PROMPT_RESULT" in
+      1) PENDING_EGRESS_MODE=open ;;
+      2) PENDING_EGRESS_MODE=allowlist ;;
+      *) echo "[错误] 无效出站模式选项。" >&2; exit 2 ;;
+    esac
+  fi
+  PENDING_EGRESS_ALLOWED_HOSTS="${EGRESS_ALLOW_OVERRIDE:-$(get_compose_env DSH_EGRESS_ALLOWED_HOSTS '')}"
+  if [ "$PENDING_EGRESS_MODE" = allowlist ] && [ "$INTERACTIVE" = true ] && [ -z "$EGRESS_ALLOW_OVERRIDE" ]; then
+    echo "    代理内置的白名单已经覆盖 Debian / npm / PyPI / GitHub / uv 这些源，留空就只用它。"
+    prompt_optional "额外放行的域名（逗号分隔，支持 *.example.com）" "$PENDING_EGRESS_ALLOWED_HOSTS"
+    PENDING_EGRESS_ALLOWED_HOSTS="$PROMPT_RESULT"
+  fi
+}
+
 configure_dsh() {
   local access_mode bind_host trusted_hosts network network_external
   local route default_route default_network keep_auth confirm_password
+  local keep_root_password confirm_root_password
   local candidates image_source image_ref
 
   image_source="${IMAGE_SOURCE_OVERRIDE:-$(get_compose_env DSH_IMAGE_SOURCE prebuilt)}"
@@ -675,6 +1293,53 @@ configure_dsh() {
     fi
   fi
 
+  # 容器 root 密码：降权后的 dsh 账户要执行任意特权命令必须提供它，校验走带失败
+  # 锁定的特权代理。不设置就等于关掉这条提权路径，apt 与 DSH 更新仍然可用。
+  if [ -n "$ROOT_PASSWORD_OVERRIDE" ]; then
+    PENDING_ROOT_PASSWORD="$ROOT_PASSWORD_OVERRIDE"
+  fi
+  if [ "$NO_ROOT_PASSWORD" = true ]; then
+    PENDING_ROOT_PASSWORD=""
+    rm -f data/secret/root.hash
+  elif [ -n "$PENDING_ROOT_PASSWORD" ]; then
+    if [ "${#PENDING_ROOT_PASSWORD}" -lt 12 ]; then
+      echo "[错误] 容器 root 密码至少需要 12 个字符。" >&2
+      exit 2
+    fi
+  elif [ "$INTERACTIVE" = true ]; then
+    keep_root_password=false
+    if [ -s data/secret/root.hash ]; then
+      prompt_yes_no "保留现有的容器 root 密码" y
+      keep_root_password="$PROMPT_RESULT"
+    fi
+    if [ "$keep_root_password" != true ]; then
+      echo
+      echo "容器 root 密码（用于容器内的特权命令：dsh-root run <命令> 或 sudo <命令>）："
+      echo "    不设置也能用 apt 安装软件和更新 DSH，只是任意特权命令保持关闭。"
+      prompt_yes_no "现在设置容器 root 密码" y
+      if [ "$PROMPT_RESULT" = true ]; then
+        while :; do
+          prompt_secret "容器 root 密码（至少 12 个字符）"
+          PENDING_ROOT_PASSWORD="$PROMPT_RESULT"
+          if [ "${#PENDING_ROOT_PASSWORD}" -lt 12 ]; then
+            echo "密码至少需要 12 个字符。" > /dev/tty
+            continue
+          fi
+          prompt_secret "再次输入容器 root 密码"
+          confirm_root_password="$PROMPT_RESULT"
+          [ "$PENDING_ROOT_PASSWORD" = "$confirm_root_password" ] && break
+          echo "两次密码不一致，请重试。" > /dev/tty
+        done
+      else
+        PENDING_ROOT_PASSWORD=""
+        rm -f data/secret/root.hash
+      fi
+    fi
+  fi
+
+  configure_model_broker
+  configure_egress_mode
+
   PENDING_ACCESS_MODE="$access_mode"
   PENDING_BIND_HOST="$bind_host"
   PENDING_TRUSTED_HOSTS="$trusted_hosts"
@@ -682,6 +1347,9 @@ configure_dsh() {
   PENDING_NETWORK_EXTERNAL="$network_external"
   PENDING_IMAGE="$image_ref"
   PENDING_IMAGE_SOURCE="$image_source"
+  # 叠加文件由上面两段问答决定，所以 COMPOSE_ARGS 必须在这里重算一次；
+  # build 与 up 都用它，两边不能出现不同的 -f 组合。
+  set_compose_args
 }
 
 build_dsh_image() {
@@ -729,6 +1397,56 @@ write_basic_auth() {
   echo "==> Basic Auth 凭据已使用 bcrypt 哈希保存，未写入 .env。"
 }
 
+# 明文密码只经过一次管道交给容器里的 openssl，宿主机上只留下 sha512crypt 哈希，
+# 而且这个哈希在容器里只挂到 dsh 账户进不去的 /root/dsh-secret。
+write_root_password() {
+  local temporary
+  [ -n "$PENDING_ROOT_PASSWORD" ] || return 0
+  mkdir -p data/secret
+  temporary="$(mktemp data/secret/root.hash.tmp.XXXXXX)"
+  if ! printf '%s\n' "$PENDING_ROOT_PASSWORD" \
+    | DOCKER run --rm -i --entrypoint /usr/local/bin/hash-dsh-password "$PENDING_IMAGE" > "$temporary"; then
+    rm -f "$temporary"
+    echo "[错误] 无法生成容器 root 密码哈希。" >&2
+    exit 1
+  fi
+  if ! grep -q '^\$6\$' "$temporary"; then
+    rm -f "$temporary"
+    echo "[错误] 容器 root 密码哈希格式异常，未写入。" >&2
+    exit 1
+  fi
+  chmod 600 "$temporary"
+  mv "$temporary" data/secret/root.hash
+  PENDING_ROOT_PASSWORD=""
+  echo "==> 容器 root 密码已用 sha512crypt 哈希保存到 data/secret/root.hash，未写入 .env。"
+}
+
+# 原子写 + 0600 + Linux 上 chown 1000:1000。写完立刻清空内存里的密钥，和上面
+# write_root_password 把 PENDING_ROOT_PASSWORD 清空是同一个理由。
+write_broker_config() {
+  local temporary document upstreams
+  [ "${#BROKER_NAMES[@]}" -gt 0 ] || return 0
+  mkdir -p data/broker
+  upstreams="$(broker_upstreams_json)"
+  if [ -s data/broker/keys.json ]; then
+    if ! document="$(merge_broker_config "$upstreams")"; then
+      echo "[错误] 无法与现有 data/broker/keys.json 合并，原文件未改动。" >&2
+      exit 1
+    fi
+  else
+    document="$(printf '{\n  "version": 1,\n  "upstreams": %s\n}' "$upstreams")"
+  fi
+  temporary="$(mktemp data/broker/keys.json.tmp.XXXXXX)"
+  chmod 600 "$temporary"
+  printf '%s\n' "$document" > "$temporary"
+  mv "$temporary" data/broker/keys.json
+  document=""
+  upstreams=""
+  BROKER_KEYS=()
+  broker_config_chown
+  echo "==> 模型密钥已写入 $(pwd)/data/broker/keys.json（0600），未写入 .env。"
+}
+
 prepare_pending_env() {
   PENDING_ENV_FILE="$(mktemp .env.pending.XXXXXX)"
   if [ -f .env ]; then cp .env "$PENDING_ENV_FILE"; fi
@@ -740,43 +1458,169 @@ prepare_pending_env() {
   set_compose_env DSH_TRUSTED_HOSTS "$PENDING_TRUSTED_HOSTS" "$PENDING_ENV_FILE"
   set_compose_env DSH_IMAGE "$PENDING_IMAGE" "$PENDING_ENV_FILE"
   set_compose_env DSH_IMAGE_SOURCE "$PENDING_IMAGE_SOURCE" "$PENDING_ENV_FILE"
+  # 这四个键只是开关和地址，真实密钥永远不进 .env。
+  set_compose_env DSH_MODEL_BROKER "$PENDING_MODEL_BROKER" "$PENDING_ENV_FILE"
+  set_compose_env DSH_MODEL_BROKER_BASE "$MODEL_BROKER_BASE" "$PENDING_ENV_FILE"
+  set_compose_env DSH_EGRESS_MODE "$PENDING_EGRESS_MODE" "$PENDING_ENV_FILE"
+  set_compose_env DSH_EGRESS_ALLOWED_HOSTS "$PENDING_EGRESS_ALLOWED_HOSTS" "$PENDING_ENV_FILE"
 }
 
 compose_up_with_pending_env() {
   (
     unset DSH_ACCESS_MODE DSH_BIND_HOST DSH_TRUSTED_HOSTS
     unset DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL DSH_IMAGE DSH_IMAGE_SOURCE
+    unset DSH_MODEL_BROKER DSH_MODEL_BROKER_BASE DSH_EGRESS_MODE DSH_EGRESS_ALLOWED_HOSTS
     DOCKER compose --env-file "$PENDING_ENV_FILE" "${COMPOSE_ARGS[@]}" up -d --no-build --force-recreate
   )
 }
 
-assert_dsh_root() {
+# DSH 必须以非 root 的 dsh 账户（UID 1000）运行，容器的能力集、no_new_privs、
+# Docker socket 与 /proc 挂载状态再由容器内的自检脚本实际验证一遍。
+assert_dsh_hardening() {
   local uid attempt
   # /run/dsh.pid 由 dsh-supervisor 写入：第一行是 PID，第二行是进程启动时刻，
   # 所以只能取第一行，整读会拼出无效的 /proc 路径。
+  uid=""
   for ((attempt = 0; attempt < 120; attempt++)); do
     uid="$(DOCKER exec dsh sh -c 'pid="$(sed -n 1p /run/dsh.pid 2>/dev/null)"; case "$pid" in ""|*[!0-9]*) exit 1 ;; esac; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>/dev/null || true)"
     if [ -n "$uid" ]; then
-      if [ "$uid" != 0 ]; then
-        echo "[错误] DSH 进程 UID 核验失败：期望 0，实际为 $uid。" >&2
-        return 1
-      fi
-      echo "==> 已核验 DSH 进程 UID：0"
-      return 0
+      break
     fi
     sleep 1
   done
-  echo "[错误] DSH 容器已创建，但无法在 120 秒内核验主进程 UID。" >&2
-  return 1
+  if [ -z "$uid" ]; then
+    echo "[错误] DSH 容器已创建，但无法在 120 秒内核验主进程 UID。" >&2
+    return 1
+  fi
+  if [ "$uid" != 1000 ]; then
+    echo "[错误] DSH 进程 UID 核验失败：期望 1000（非特权 dsh 账户），实际为 $uid。" >&2
+    return 1
+  fi
+  echo "==> 已核验 DSH 进程 UID：1000（dsh 账户）"
+  echo "==> 正在核验容器加固状态..."
+  if ! DOCKER exec dsh /usr/local/bin/verify-dsh-hardening; then
+    echo "[错误] 容器加固自检未通过，请按上面的失败项排查后重试。" >&2
+    return 1
+  fi
+}
+
+# 密钥代理的核验分两半，缺一半都不算通过：
+#   1) broker 自己活着（/healthz 必须是 204）；
+#   2) DSH 容器里看不到 /etc/dsh-broker——这是整个设计的前提，一旦那份配置被挂进了
+#      Agent 能读的容器，密钥就等于没搬走，这时宁可让安装失败。
+assert_model_broker() {
+  local attempt state=""
+  [ "$PENDING_MODEL_BROKER" = on ] || return 0
+  echo "==> 正在核验模型密钥代理（dsh-key-broker）..."
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    if DOCKER exec dsh-key-broker node -e "fetch('http://127.0.0.1:8080/healthz').then((response) => process.exit(response.status === 204 ? 0 : 1)).catch(() => process.exit(1))" >/dev/null 2>&1; then
+      state=ok
+      break
+    fi
+    sleep 1
+  done
+  if [ "$state" != ok ]; then
+    echo "[错误] dsh-key-broker 未在 30 秒内让 /healthz 返回 204。" >&2
+    echo "       查看原因：docker logs dsh-key-broker（配置写错时 broker 会拒绝启动）。" >&2
+    return 1
+  fi
+  echo "==> 已核验 dsh-key-broker /healthz = 204"
+  if DOCKER exec dsh sh -c 'ls /etc/dsh-broker' >/dev/null 2>&1; then
+    echo "[错误] DSH 容器里能看到 /etc/dsh-broker：密钥配置被挂进了 Agent 可读的容器。" >&2
+    echo "       这会让密钥代理完全失去意义，请检查 docker-compose.keys.yml 有没有被改过。" >&2
+    return 1
+  fi
+  echo "==> 已核验 DSH 容器内不存在 /etc/dsh-broker（真实密钥不在 Agent 可达范围内）"
+}
+
+assert_egress_isolation() {
+  local attempt payload="" state="" ingress_host
+  [ "$PENDING_EGRESS_MODE" = allowlist ] || return 0
+  echo "==> 正在核验出站白名单代理（dsh-egress）..."
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    payload="$(DOCKER exec dsh-egress node -e "fetch('http://127.0.0.1:3128/status').then(async (response) => { if (response.status !== 200) { process.exit(1) } process.stdout.write(await response.text()) }).catch(() => process.exit(1))" 2>/dev/null || true)"
+    case "$payload" in
+      *'"status":"ok"'*) state=ok; break ;;
+    esac
+    payload=""
+    sleep 1
+  done
+  if [ "$state" != ok ]; then
+    echo "[错误] dsh-egress 未在 30 秒内从 /status 返回可用的 JSON。" >&2
+    echo "       查看原因：docker logs dsh-egress。" >&2
+    return 1
+  fi
+  echo "==> 已核验 dsh-egress /status：$payload"
+  # 隔离之后 dsh 自己不再发布端口，宿主的 3080 全靠 dsh-ingress 顶着，所以这一条
+  # 必须单独探一次，否则"装完了但打不开"要到用户点链接时才发现。
+  state=""
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    if DOCKER exec dsh-ingress node -e "const net = require('node:net'); const socket = net.connect(3080, '127.0.0.1'); socket.on('connect', () => { socket.destroy(); process.exit(0) }); socket.on('error', () => process.exit(1)); setTimeout(() => process.exit(1), 4000)" >/dev/null 2>&1; then
+      state=ok
+      break
+    fi
+    sleep 1
+  done
+  if [ "$state" != ok ]; then
+    echo "[错误] dsh-ingress 的 3080 监听未在 30 秒内就绪，隔离模式下宿主入口会不通。" >&2
+    echo "       查看原因：docker logs dsh-ingress。" >&2
+    return 1
+  fi
+  echo "==> 已核验 dsh-ingress 容器内 3080 已监听"
+  # 宿主侧只警告不失败：端口发布是否可达还取决于宿主防火墙和 Docker 的端口转发时序，
+  # 那些都不是安装器能修的，容器内的监听才是它的责任范围。
+  ingress_host="$PENDING_BIND_HOST"
+  case "$ingress_host" in '['*']') ingress_host="${ingress_host#[}"; ingress_host="${ingress_host%]}" ;; esac
+  state=""
+  for ((attempt = 0; attempt < 15; attempt++)); do
+    if (exec 3<>"/dev/tcp/$ingress_host/3080") >/dev/null 2>&1; then
+      state=ok
+      break
+    fi
+    sleep 1
+  done
+  if [ "$state" = ok ]; then
+    echo "==> 已核验宿主 $ingress_host:3080 可连接（由 dsh-ingress 发布）"
+  else
+    echo "[警告] 宿主 $ingress_host:3080 暂时连不上；请确认防火墙放行，并用 docker ps 确认 dsh-ingress 在运行。" >&2
+  fi
 }
 
 print_config_summary() {
+  local upstream_name
   echo
   echo "==> 配置已保存到 $(pwd)/.env"
   echo "    访问模式: $PENDING_ACCESS_MODE"
   echo "    端口绑定: $PENDING_BIND_HOST:3080"
   echo "    镜像来源: $PENDING_IMAGE_SOURCE（$PENDING_IMAGE）"
   [ -z "$PENDING_TRUSTED_HOSTS" ] || echo "    Trusted hosts: $PENDING_TRUSTED_HOSTS"
+  echo "    运行账户: dsh (UID 1000)，容器已 cap_drop ALL + no-new-privileges"
+  if [ -s data/secret/root.hash ]; then
+    echo "    容器 root 密码: 已设置（容器内 dsh-root run / sudo <命令> 可用，连续错误会锁定）"
+  else
+    echo "    容器 root 密码: 未设置（容器内任意特权命令关闭；apt 与 DSH 更新不受影响）"
+  fi
+  if [ "$PENDING_MODEL_BROKER" = on ]; then
+    echo "    模型密钥代理: 开（dsh-key-broker；真实密钥只在 data/broker/keys.json 与该容器内）"
+    for upstream_name in $(broker_upstream_names); do
+      echo "      - $upstream_name: base_url = $MODEL_BROKER_BASE/u/$upstream_name/v1，api key 填占位串 $MODEL_BROKER_PLACEHOLDER_KEY"
+    done
+    echo "    边界（请如实理解）: 它保护的只是「密钥字面值不外泄」，不保护额度，也不保护数据。"
+    echo "      被提示注入的 Agent 拿着占位密钥照样能用你的额度发请求，只是拿不到密钥本身。"
+    echo "      所以每个上游都该配 requestsPerMinute / dailyRequestBudget，并把出站模式切到 allowlist。"
+  else
+    echo "    模型密钥代理: 关（密钥若写进容器内的配置或环境，容器里的 Agent 一条 cat 就能读到）"
+  fi
+  if [ "$PENDING_EGRESS_MODE" = allowlist ]; then
+    echo "    出站模式: allowlist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）"
+    if [ -n "$PENDING_EGRESS_ALLOWED_HOSTS" ]; then
+      echo "    白名单来源: 内置白名单 + 自定义 $(printf '%s' "$PENDING_EGRESS_ALLOWED_HOSTS" | awk -F, '{ print NF }') 条（DSH_EGRESS_ALLOWED_HOSTS）"
+    else
+      echo "    白名单来源: 代理内置白名单（Debian / npm / PyPI / GitHub / uv）"
+    fi
+  else
+    echo "    出站模式: open（容器可直接访问任意外网；被注入的 Agent 也可以把数据 POST 出去）"
+  fi
 }
 
 cleanup_pending_env() {
@@ -789,6 +1633,8 @@ case "$ACTION" in
     configure_dsh
     obtain_dsh_image
     write_basic_auth
+    write_root_password
+    write_broker_config
     prepare_pending_env
     echo "==> 正在启动 DSH..."
     if ! compose_up_with_pending_env; then
@@ -797,7 +1643,9 @@ case "$ACTION" in
     fi
     mv "$PENDING_ENV_FILE" .env
     PENDING_ENV_FILE=""
-    assert_dsh_root
+    assert_dsh_hardening
+    assert_model_broker
+    assert_egress_isolation
     print_config_summary
     ;;
   update) ./dsh.sh update ;;

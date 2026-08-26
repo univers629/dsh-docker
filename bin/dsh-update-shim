@@ -1,0 +1,14 @@
+#!/bin/sh
+# /usr/local/bin/update-dsh。
+#
+# 宿主机通过 docker exec 以 root 调用时直接执行真正的更新脚本；WebUI 里的
+# “更新”按钮由非 root 的 DSH 进程触发，这时转交给特权代理执行。
+set -eu
+
+REAL_UPDATER=${DSH_UPDATE_SCRIPT:-/usr/local/lib/dsh/update-dsh.sh}
+
+if [ "$(id -u)" = 0 ]; then
+  exec "$REAL_UPDATER" "$@"
+fi
+
+exec /usr/local/bin/dsh-root update-dsh "$@"

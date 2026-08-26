@@ -10,6 +10,16 @@ param(
     [switch]$NetworkExternal,
     [switch]$NetworkInternal,
     [switch]$NonInteractive,
+    [string]$RootPassword = '',
+    [switch]$NoRootPassword,
+    [string[]]$ModelKey = @(),
+    [string[]]$ModelBaseUrl = @(),
+    [string]$ModelKeysFile = '',
+    [switch]$NoModelBroker,
+    [ValidateSet('','open','allowlist')]
+    [string]$Egress = '',
+    [string[]]$EgressAllow = @(),
+    [switch]$UsernsPreflight,
     [ValidateSet('','prebuilt','build')]
     [string]$ImageSource = '',
     [string]$Image = '',
@@ -20,12 +30,227 @@ $ErrorActionPreference = 'Stop'
 # 原生命令（docker/git）靠退出码判断结果；如果调用方或 profile 打开了
 # PSNativeCommandUseErrorActionPreference，非零退出会变成终止错误并中断向导。
 if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
-if ($NetworkExternal -and $NetworkInternal) { throw '--NetworkExternal 与 --NetworkInternal 不能同时使用。' }
+if ($NetworkExternal -and $NetworkInternal) { throw '-NetworkExternal 与 -NetworkInternal 不能同时使用。' }
 $interactive = -not $NonInteractive -and [Environment]::UserInteractive
 $GitHubSshUrl = 'ssh://git@ssh.github.com:443/univers629/dsh-docker.git'
 $GitHubHttpsUrl = 'https://github.com/univers629/dsh-docker.git'
 $DefaultPrebuiltImage = if ($env:DSH_PREBUILT_IMAGE) { $env:DSH_PREBUILT_IMAGE } else { 'ghcr.io/univers629/dsh-docker:latest' }
 $DefaultLocalImage = 'dsh:local'
+# 容器内只填占位密钥，真实密钥由 dsh-key-broker 在转发时注入，所以这个地址是契约的
+# 一部分：compose 用它渲染 DSH_MODEL_BROKER_BASE，摘要用它拼出给 Agent 的 base_url。
+$ModelBrokerBase = 'http://dsh-key-broker:8080'
+$ModelBrokerPlaceholderKey = 'dsh-broker-placeholder'
+if (-not $ModelKeysFile -and $env:DSH_MODEL_KEYS_FILE) { $ModelKeysFile = $env:DSH_MODEL_KEYS_FILE }
+# 收集到的上游先留在内存里，写盘之后立刻清空（和 $rootPassword 一样的处理）。
+$BrokerUpstreams = New-Object System.Collections.ArrayList
+$composeFileArgs = @('-f','docker-compose.yml')
+
+# ---------------------------------------------------------------------------
+# 模型密钥代理（dsh-key-broker）
+#
+# 这一整段只为一件事服务：真实模型密钥不要出现在 DSH 容器里。那个容器里的 Agent 以
+# danger-full-access 运行，放进去的密钥不需要"骗"它说出来，一条 cat 就够了。所以密钥
+# 只写 data\broker\keys.json（只被 broker 容器只读挂载），.env 里只留开关和地址。
+# ---------------------------------------------------------------------------
+
+# 内置 base_url 只是省掉最常见三家的手输。其它上游必须显式给 -ModelBaseUrl：
+# 猜错 base_url 等于把密钥发到一个我们没验证过的域名，宁可报错退出。
+function Get-ModelDefaultBaseUrl {
+    param([string]$Name)
+    switch ($Name) {
+        'deepseek' { return 'https://api.deepseek.com' }
+        'openai' { return 'https://api.openai.com' }
+        'anthropic' { return 'https://api.anthropic.com' }
+    }
+    return ''
+}
+
+# 这里只挡明显写错的（明文、内嵌凭据、带 query）。严格校验在 broker 的
+# parseBrokerConfig 里，配置写错它会直接拒绝启动，所以早报错比晚报错好。
+function Test-UpstreamBaseUrl {
+    param([string]$Url)
+    if ($Url -notmatch '^https://.+') { throw "base_url 必须使用 https（密钥不能走明文）：$Url" }
+    if ($Url -match '[?#]') { throw "base_url 不允许带 query 或 fragment：$Url" }
+    if ($Url -match '@') { throw "base_url 不允许内嵌凭据：$Url" }
+}
+
+# 优先级：显式传入 > -ModelBaseUrl > 内置默认表 > 报错。
+function Resolve-UpstreamBaseUrl {
+    param([string]$Name, [string]$Explicit, [hashtable]$Overrides)
+    $url = ''
+    if ($Explicit) { $url = $Explicit }
+    elseif ($Overrides -and $Overrides.ContainsKey($Name)) { $url = $Overrides[$Name] }
+    else { $url = Get-ModelDefaultBaseUrl $Name }
+    if (-not $url) { throw "上游 $Name 没有内置 base_url，请显式指定：-ModelBaseUrl $Name=https://..." }
+    Test-UpstreamBaseUrl $url
+    return $url
+}
+
+function Add-BrokerUpstream {
+    param([string]$Name, [string]$BaseUrl, [string]$Key, [int]$RequestsPerMinute = 0, [int]$DailyRequestBudget = 0)
+    $normalized = $Name.ToLowerInvariant()
+    if ($normalized -notmatch '^[a-z0-9_-]{1,32}$') { throw "上游名字只允许小写字母、数字、下划线和短横线，且不超过 32 个字符：$normalized" }
+    if (-not $Key) { throw "上游 $normalized 的密钥为空。" }
+    $entry = [ordered]@{ name = $normalized; baseUrl = $BaseUrl; key = $Key }
+    if ($normalized -eq 'anthropic') {
+        # Anthropic 不用 Authorization: Bearer，密钥走 x-api-key，而且缺 anthropic-version
+        # 会被上游直接 400。这两条不是默认值，必须显式写进配置。
+        $entry['headerName'] = 'x-api-key'
+        $entry['headerTemplate'] = '{key}'
+        $entry['extraHeaders'] = [ordered]@{ 'anthropic-version' = '2023-06-01' }
+    }
+    # 可选字段能省就省：把 broker 的默认值抄一份进 keys.json，只会在 broker 改默认值之后
+    # 变成静默的行为分叉，也让人更难看出哪些限制是自己真的设过的。
+    if ($RequestsPerMinute -gt 0) { $entry['requestsPerMinute'] = $RequestsPerMinute }
+    if ($DailyRequestBudget -gt 0) { $entry['dailyRequestBudget'] = $DailyRequestBudget }
+    # 同名上游以最后一次为准，和 keys.json 的合并语义保持一致。
+    foreach ($item in @($BrokerUpstreams | Where-Object { $_.name -eq $normalized })) { $BrokerUpstreams.Remove($item) | Out-Null }
+    $BrokerUpstreams.Add($entry) | Out-Null
+}
+
+# Windows 上没有 UID 概念，Docker Desktop 的绑定挂载也不按宿主属主映射，所以这里做不了
+# install.sh 的 chown 1000:1000；能做的是把宿主侧的可读范围收到当前用户，失败只警告。
+function Protect-BrokerConfigFile {
+    param([string]$Path)
+    try {
+        $acl = Get-Acl -LiteralPath $Path
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($rule in @($acl.Access)) { $acl.RemoveAccessRule($rule) | Out-Null }
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'Allow')))
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    } catch {
+        Write-Host "[警告] 无法收紧 $Path 的 ACL：$($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+function Write-BrokerConfig {
+    param([string]$Path)
+    if ($BrokerUpstreams.Count -eq 0) { return }
+    $kept = @()
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        # 现有配置里可能还有这次没提到的上游，整体覆盖会把它们丢掉。
+        $names = @($BrokerUpstreams | ForEach-Object { $_.name })
+        $existing = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+        if ($existing.upstreams) { $kept = @($existing.upstreams | Where-Object { $_.name -notin $names }) }
+    }
+    $document = [ordered]@{ version = 1; upstreams = @($kept + @($BrokerUpstreams)) }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    $temporary = "$Path.tmp." + [guid]::NewGuid().ToString('N')
+    [IO.File]::WriteAllText($temporary, (($document | ConvertTo-Json -Depth 8) + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    Protect-BrokerConfigFile $temporary
+    Move-Item -LiteralPath $temporary -Destination $Path -Force
+    $BrokerUpstreams.Clear()
+    Write-Host "==> 模型密钥已写入 $Path，未写入 .env。" -ForegroundColor Yellow
+}
+
+function Clear-BrokerConfig {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    # 只翻开关、把文件留在盘上等于密钥还在，所以关闭必须连密钥一起清掉。
+    Remove-Item -LiteralPath $Path -Force
+    Write-Host "==> 已删除 $Path（模型密钥代理已关闭）。" -ForegroundColor Yellow
+}
+
+function Import-ModelKeysFile {
+    param([string]$Source, [string]$Path)
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { throw "读不到 -ModelKeysFile 指定的文件：$Source" }
+    $content = [IO.File]::ReadAllText($Source)
+    # 只做最基本的形状检查：完整校验在 broker 的 parseBrokerConfig 里，写错了它会拒绝启动。
+    if ($content -notmatch '"upstreams"') { throw "$Source 里没有 upstreams 字段，不像是 keys.json。" }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    $temporary = "$Path.tmp." + [guid]::NewGuid().ToString('N')
+    [IO.File]::WriteAllText($temporary, $content, (New-Object System.Text.UTF8Encoding($false)))
+    Protect-BrokerConfigFile $temporary
+    Move-Item -LiteralPath $temporary -Destination $Path -Force
+    Write-Host "==> 已从 $Source 导入模型密钥配置。" -ForegroundColor Yellow
+}
+
+# 上游名字不是秘密，可以进摘要和日志；密钥永远不进。
+function Get-BrokerUpstreamNames {
+    param([string]$Path)
+    if ($BrokerUpstreams.Count -gt 0) { return @($BrokerUpstreams | ForEach-Object { $_.name }) }
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        # 选了"保留现有配置"时内存里没有上游列表，只为摘要从文件里读一遍名字。
+        try {
+            $document = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+            if ($document.upstreams) { return @($document.upstreams | ForEach-Object { $_.name }) }
+        } catch { }
+    }
+    return @()
+}
+
+# 密钥代理的核验分两半，缺一半都不算通过：
+#   1) broker 自己活着（/healthz 必须是 204）；
+#   2) DSH 容器里看不到 /etc/dsh-broker——这是整个设计的前提，一旦那份配置被挂进了
+#      Agent 能读的容器，密钥就等于没搬走，这时宁可让安装失败。
+function Assert-ModelBroker {
+    Write-Host '==> 正在核验模型密钥代理（dsh-key-broker）...' -ForegroundColor Yellow
+    $healthy = $false
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        & docker exec dsh-key-broker node -e "fetch('http://127.0.0.1:8080/healthz').then((response) => process.exit(response.status === 204 ? 0 : 1)).catch(() => process.exit(1))" *> $null
+        if ($LASTEXITCODE -eq 0) { $healthy = $true; break }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $healthy) { throw 'dsh-key-broker 未在 30 秒内让 /healthz 返回 204。查看原因：docker logs dsh-key-broker（配置写错时 broker 会拒绝启动）。' }
+    Write-Host '==> 已核验 dsh-key-broker /healthz = 204' -ForegroundColor Green
+    & docker exec dsh sh -c 'ls /etc/dsh-broker' *> $null
+    if ($LASTEXITCODE -eq 0) { throw 'DSH 容器里能看到 /etc/dsh-broker：密钥配置被挂进了 Agent 可读的容器，密钥代理会完全失去意义。请检查 docker-compose.keys.yml 有没有被改过。' }
+    Write-Host '==> 已核验 DSH 容器内不存在 /etc/dsh-broker（真实密钥不在 Agent 可达范围内）' -ForegroundColor Green
+}
+
+function Assert-EgressIsolation {
+    param([string]$ProbeHost)
+    Write-Host '==> 正在核验出站白名单代理（dsh-egress）...' -ForegroundColor Yellow
+    $payload = ''
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        $payload = ((& docker exec dsh-egress node -e "fetch('http://127.0.0.1:3128/status').then(async (response) => { if (response.status !== 200) { process.exit(1) } process.stdout.write(await response.text()) }).catch(() => process.exit(1))" 2>$null) -join '')
+        if ($LASTEXITCODE -eq 0 -and $payload -match '"status":"ok"') { break }
+        $payload = ''
+        Start-Sleep -Seconds 1
+    }
+    if (-not $payload) { throw 'dsh-egress 未在 30 秒内从 /status 返回可用的 JSON。查看原因：docker logs dsh-egress。' }
+    Write-Host "==> 已核验 dsh-egress /status：$payload" -ForegroundColor Green
+    # 隔离之后 dsh 自己不再发布端口，宿主的 3080 全靠 dsh-ingress 顶着，所以这一条必须
+    # 单独探一次，否则"装完了但打不开"要等用户点链接时才发现。
+    $listening = $false
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        & docker exec dsh-ingress node -e "const net = require('node:net'); const socket = net.connect(3080, '127.0.0.1'); socket.on('connect', () => { socket.destroy(); process.exit(0) }); socket.on('error', () => process.exit(1)); setTimeout(() => process.exit(1), 4000)" *> $null
+        if ($LASTEXITCODE -eq 0) { $listening = $true; break }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $listening) { throw 'dsh-ingress 的 3080 监听未在 30 秒内就绪，隔离模式下宿主入口会不通。查看原因：docker logs dsh-ingress。' }
+    Write-Host '==> 已核验 dsh-ingress 容器内 3080 已监听' -ForegroundColor Green
+    # 宿主侧只警告不失败：端口发布是否可达还取决于宿主防火墙和 Docker 的端口转发时序，
+    # 那些都不是安装器能修的，容器内的监听才是它的责任范围。
+    $probe = $ProbeHost.Trim('[', ']')
+    $reachable = $false
+    for ($attempt = 0; $attempt -lt 15; $attempt++) {
+        $client = New-Object Net.Sockets.TcpClient
+        try { if ($client.ConnectAsync($probe, 3080).Wait(2000)) { $reachable = $client.Connected } }
+        catch { }
+        finally { $client.Dispose() }
+        if ($reachable) { break }
+        Start-Sleep -Seconds 1
+    }
+    if ($reachable) { Write-Host "==> 已核验宿主 ${probe}:3080 可连接（由 dsh-ingress 发布）" -ForegroundColor Green }
+    else { Write-Host "[警告] 宿主 ${probe}:3080 暂时连不上；请确认防火墙放行，并用 docker ps 确认 dsh-ingress 在运行。" -ForegroundColor Yellow }
+}
+
+# userns-remap 预检。Windows 上不做任何"检测式的成功"：Docker Desktop 的 Linux 引擎
+# 跑在 WSL2 里，根本不支持 userns-remap（docker run --userns 只接受 host），在
+# daemon.json 里写 userns-remap 也不会生效。假装成功只会给出虚假的安全感。
+function Invoke-UsernsPreflight {
+    Write-Host '==> user namespace remap 预检'
+    Write-Host '    当前平台：Windows + Docker Desktop（Linux 引擎跑在 WSL2 里）'
+    Write-Host '    结论：这台机器上无法启用 userns-remap。Docker Desktop 不支持它，docker run --userns'
+    Write-Host '          只接受 host，往 daemon.json 里写 "userns-remap": "default" 也不会生效。'
+    Write-Host '    要用上这一层纵深防御（容器 UID 0 在宿主上只是一个普通 subuid，逃逸出去也不是宿主'
+    Write-Host '    root），需要把 DSH 部署到 Linux 宿主，并在那台机器上执行：'
+    Write-Host '      ./install.sh --userns-preflight'
+    Write-Host '    它会检测宿主是否已启用 userns-remap，取出 dockremap 的起始 subuid，并把绑定挂载'
+    Write-Host '    目录的属主对齐到对应的宿主 UID（容器内改不了，CAP_CHOWN 只在本 namespace 内有效）。'
+}
 
 function Set-ComposeEnvValue {
     param([string]$Path, [string]$Key, [string]$Value)
@@ -61,7 +286,9 @@ function Get-ComposeEnvValue {
 }
 
 function Invoke-ComposeWithEnvFile {
-    param([string]$Path, [string[]]$Arguments, [string[]]$EnvironmentKeys)
+    # FileArguments 单独收 -f：叠加文件由密钥代理和出站模式决定，必须紧跟在 compose
+    # 后面，而调用方只关心自己那条子命令。
+    param([string]$Path, [string[]]$Arguments, [string[]]$EnvironmentKeys, [string[]]$FileArguments = @())
     $previous = @{}
     foreach ($key in $EnvironmentKeys) {
         $previous[$key] = [pscustomobject]@{
@@ -71,7 +298,7 @@ function Invoke-ComposeWithEnvFile {
         Remove-Item -LiteralPath "Env:$key" -ErrorAction SilentlyContinue
     }
     try {
-        & docker compose --env-file $Path @Arguments | Out-Host
+        & docker compose --env-file $Path @FileArguments @Arguments | Out-Host
         $exitCode = $LASTEXITCODE
     } finally {
         foreach ($key in $EnvironmentKeys) {
@@ -82,16 +309,21 @@ function Invoke-ComposeWithEnvFile {
     return $exitCode
 }
 
-function Assert-DshRoot {
+# DSH 必须以非 root 的 dsh 账户（UID 1000）运行；容器的能力集、no_new_privs、
+# Docker socket 与 /proc 挂载状态再由容器内的自检脚本实际验证一遍。
+function Assert-DshHardening {
     # /run/dsh.pid 由 dsh-supervisor 写入：第一行是 PID，第二行是进程启动时刻，
     # 所以只能取第一行，整读会拼出无效的 /proc 路径。
     for ($attempt = 0; $attempt -lt 120; $attempt++) {
         $uid = (& docker exec dsh sh -c 'pid="$(sed -n 1p /run/dsh.pid 2>/dev/null)"; case "$pid" in ""|*[!0-9]*) exit 1 ;; esac; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>$null | Select-Object -Last 1)
         if ($LASTEXITCODE -eq 0 -and $uid -match '^\d+$') {
-            if ($uid.Trim() -ne '0') {
-                throw "DSH 进程 UID 核验失败：期望 0，实际为 $($uid.Trim())。"
+            if ($uid.Trim() -ne '1000') {
+                throw "DSH 进程 UID 核验失败：期望 1000（非特权 dsh 账户），实际为 $($uid.Trim())。"
             }
-            Write-Host '==> 已核验 DSH 进程 UID：0' -ForegroundColor Green
+            Write-Host '==> 已核验 DSH 进程 UID：1000（dsh 账户）' -ForegroundColor Green
+            Write-Host '==> 正在核验容器加固状态...' -ForegroundColor Yellow
+            & docker exec dsh /usr/local/bin/verify-dsh-hardening | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw '容器加固自检未通过，请按上面的失败项排查后重试。' }
             return
         }
         Start-Sleep -Seconds 1
@@ -226,14 +458,23 @@ function Remove-DshProject {
             try {
                 $composeArgs = @('-p',$projectName,'-f','docker-compose.yml')
                 if (Test-Path -LiteralPath $systemFile -PathType Leaf) { $composeArgs += @('-f','docker-compose.system.yml') }
+                # 密钥代理与出站隔离的叠加文件同样要带上，否则 down 看不到 dsh-key-broker /
+                # dsh-egress / dsh-ingress 这几个服务，它们会连着 dsh-internal 网络一起留下来。
+                # 老部署目录里没有这两个文件，所以必须逐个判断存在性。
+                foreach ($overlay in @('docker-compose.keys.yml','docker-compose.isolated.yml')) {
+                    if (Test-Path -LiteralPath (Join-Path $resolvedDir $overlay) -PathType Leaf) { $composeArgs += @('-f',$overlay) }
+                }
                 & docker compose @composeArgs down --volumes --remove-orphans | Out-Host
             } finally { Pop-Location }
         }
     }
 
     $containerIds = @(& docker container ls -aq --filter "label=com.docker.compose.project=$projectName" 2>$null)
-    $namedContainer = (& docker container inspect --format '{{.Id}}' dsh 2>$null | Select-Object -Last 1)
-    if ($namedContainer) { $containerIds += $namedContainer.Trim() }
+    # 兜底按名字删：叠加文件缺失、或者容器被手工从项目里摘掉时，标签过滤都找不到它们。
+    foreach ($name in @('dsh','dsh-key-broker','dsh-egress','dsh-ingress')) {
+        $namedContainer = (& docker container inspect --format '{{.Id}}' $name 2>$null | Select-Object -Last 1)
+        if ($namedContainer) { $containerIds += $namedContainer.Trim() }
+    }
     foreach ($id in @($containerIds | Where-Object { $_ } | Sort-Object -Unique)) { & docker container rm -f $id *> $null }
 
     # 预构建安装用的引用不叫 dsh:*，而且多架构清单未必带上项目标签，所以要按
@@ -265,8 +506,10 @@ function Remove-DshProject {
         $attached = (& docker network inspect --format '{{ len .Containers }}' $id 2>$null | Select-Object -Last 1)
         if ($attached -and $attached.Trim() -eq '0') { & docker network rm $id *> $null }
     }
-    $defaultNetworkProject = (& docker network inspect --format '{{ index .Labels "com.docker.compose.project" }}' dsh-private 2>$null | Select-Object -Last 1)
-    if ($defaultNetworkProject -and $defaultNetworkProject.Trim() -eq $projectName) { & docker network rm dsh-private *> $null }
+    foreach ($name in @('dsh-private','dsh-internal')) {
+        $defaultNetworkProject = (& docker network inspect --format '{{ index .Labels "com.docker.compose.project" }}' $name 2>$null | Select-Object -Last 1)
+        if ($defaultNetworkProject -and $defaultNetworkProject.Trim() -eq $projectName) { & docker network rm $name *> $null }
+    }
     & docker builder prune -af | Out-Host
 
     if ($resolvedDir) {
@@ -502,6 +745,12 @@ function Fetch-Project {
 }
 
 Ensure-DockerEngine
+# --userns-preflight 只做宿主检查，不该被"这次要做什么"的菜单挡住，也不需要工程目录。
+if ($UsernsPreflight) {
+    Invoke-UsernsPreflight
+    exit 0
+}
+
 if (-not $DshAction -and $interactive) {
     $installLabel = if (Test-Path $Dir) { '重新配置并重建容器（保留挂载数据）' } else { '全新安装' }
     Write-Host "1) $installLabel`n2) 在容器内更新 DSH`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态`n8) 删除"
@@ -559,6 +808,15 @@ if ($imageSource -notin @('prebuilt','build')) { $imageSource = 'prebuilt' }
 $basicUser = $env:DSH_BASIC_AUTH_USER
 $basicPassword = $env:DSH_BASIC_AUTH_PASSWORD
 $writeBasicAuth = $false
+$rootPassword = if ($RootPassword) { $RootPassword } else { $env:DSH_ROOT_PASSWORD }
+$writeRootPassword = $false
+$rootHashFile = Join-Path (Get-Location) 'data\secret\root.hash'
+$brokerConfigFile = Join-Path (Get-Location) 'data\broker\keys.json'
+$modelBroker = Get-ComposeEnvValue $envFile 'DSH_MODEL_BROKER' 'off'
+if ($modelBroker -notin @('on','off')) { $modelBroker = 'off' }
+$egressMode = if ($Egress) { $Egress } else { Get-ComposeEnvValue $envFile 'DSH_EGRESS_MODE' 'open' }
+if ($egressMode -notin @('open','allowlist')) { $egressMode = 'open' }
+$egressAllowed = if ($EgressAllow.Count -gt 0) { ($EgressAllow -join ',') } else { Get-ComposeEnvValue $envFile 'DSH_EGRESS_ALLOWED_HOSTS' '' }
 
 if ($DshAction -in @('install','configure')) {
     if ($interactive -and -not $ImageSource) {
@@ -610,6 +868,10 @@ if ($DshAction -in @('install','configure')) {
     if ($bind -in @('0.0.0.0','::','[::]','*')) { throw '为避免绕过认证，不能使用通配绑定地址。' }
     if ($networkExternalValue -eq 'true') { Assert-ExternalNetwork -Name $networkName -Interactive:([bool]$interactive) }
     New-Item -ItemType Directory -Path (Join-Path (Get-Location) 'data\auth') -Force | Out-Null
+    # data\secret 只存容器 root 口令哈希，容器里只挂到 dsh 账户进不去的 /root/dsh-secret。
+    New-Item -ItemType Directory -Path (Join-Path (Get-Location) 'data\secret') -Force | Out-Null
+    # data\broker 存模型密钥，只被 dsh-key-broker 容器只读挂载，不出现在 DSH 容器的挂载表里。
+    New-Item -ItemType Directory -Path (Join-Path (Get-Location) 'data\broker') -Force | Out-Null
     $authFile = Join-Path (Get-Location) 'data\auth\htpasswd'
     $replaceAuth = -not (Test-Path $authFile)
     if ($accessMode -eq 'basic' -and $interactive -and -not $replaceAuth) { $replaceAuth = -not (Ask-YesNo '保留现有 Basic Auth 用户名和密码' $true) }
@@ -623,6 +885,154 @@ if ($DshAction -in @('install','configure')) {
         }
         if ($basicUser -notmatch '^[A-Za-z0-9._-]+$') { throw 'Basic Auth 用户名包含不支持的字符。' }
         $writeBasicAuth = $true
+    }
+    # 容器 root 密码：降权后的 dsh 账户要执行任意特权命令必须提供它，校验走带失败
+    # 锁定的特权代理。不设置就等于关掉这条提权路径，apt 与 DSH 更新仍然可用。
+    if ($NoRootPassword) {
+        $rootPassword = $null
+        if (Test-Path -LiteralPath $rootHashFile) { Remove-Item -LiteralPath $rootHashFile -Force }
+    } elseif ($rootPassword) {
+        if ($rootPassword.Length -lt 12) { throw '容器 root 密码至少需要 12 个字符。' }
+        $writeRootPassword = $true
+    } elseif ($interactive) {
+        $keepRootPassword = $false
+        if (Test-Path -LiteralPath $rootHashFile) { $keepRootPassword = Ask-YesNo '保留现有的容器 root 密码' $true }
+        if (-not $keepRootPassword) {
+            Write-Host '容器 root 密码（用于容器内的特权命令：dsh-root run <命令> 或 sudo <命令>）：'
+            Write-Host '    不设置也能用 apt 安装软件和更新 DSH，只是任意特权命令保持关闭。'
+            if (Ask-YesNo '现在设置容器 root 密码' $true) {
+                do { $rootPassword = Ask-Secret '容器 root 密码（至少 12 个字符）'; if ($rootPassword.Length -lt 12) { Write-Host '密码至少需要 12 个字符。' -ForegroundColor Red } } while ($rootPassword.Length -lt 12)
+                do { $againRoot = Ask-Secret '再次输入容器 root 密码'; if ($againRoot -ne $rootPassword) { Write-Host '两次密码不一致。' -ForegroundColor Red } } while ($againRoot -ne $rootPassword)
+                $writeRootPassword = $true
+            } else {
+                $rootPassword = $null
+                if (Test-Path -LiteralPath $rootHashFile) { Remove-Item -LiteralPath $rootHashFile -Force }
+            }
+        }
+    }
+
+    # ---- 模型密钥代理 ----
+    $baseUrlOverrides = @{}
+    foreach ($spec in @($ModelBaseUrl)) {
+        # 先统一检查格式，否则报错时机会取决于上游出现的顺序，很难看懂。
+        if ($spec -notmatch '^[^=]+=.+$') { throw '-ModelBaseUrl 需要 NAME=URL 格式。' }
+        $baseUrlOverrides[($spec -replace '=.*$','').ToLowerInvariant()] = ($spec -replace '^[^=]+=','')
+    }
+    if ($NoModelBroker) {
+        $modelBroker = 'off'
+        Clear-BrokerConfig $brokerConfigFile
+    } else {
+        if ($ModelKeysFile) {
+            Import-ModelKeysFile $ModelKeysFile $brokerConfigFile
+            $modelBroker = 'on'
+        }
+        foreach ($spec in @($ModelKey)) {
+            # 报错文案里不能回显 spec：格式写错时它整体可能就是一段密钥。
+            if ($spec -notmatch '^[^=]+=.+$') { throw '-ModelKey 需要 NAME=KEY 格式，且两边都不能为空。' }
+            $upstreamName = ($spec -replace '=.*$','').ToLowerInvariant()
+            Add-BrokerUpstream -Name $upstreamName -Key ($spec -replace '^[^=]+=','') `
+                -BaseUrl (Resolve-UpstreamBaseUrl -Name $upstreamName -Explicit '' -Overrides $baseUrlOverrides)
+            $modelBroker = 'on'
+        }
+        if (-not $interactive) {
+            # 非交互的默认行为必须和以前完全一样：既没给密钥、盘上也没有配置，就保持 off，
+            # 否则一条不带新参数的老安装命令会突然多起来一个容器。
+            if ($BrokerUpstreams.Count -eq 0 -and -not (Test-Path -LiteralPath $brokerConfigFile -PathType Leaf)) { $modelBroker = 'off' }
+            elseif (Test-Path -LiteralPath $brokerConfigFile -PathType Leaf) { $modelBroker = 'on' }
+        } elseif ($BrokerUpstreams.Count -eq 0 -and -not $ModelKeysFile) {
+            # 命令行已经把密钥给全了就不再追问：自动化和交互混用时不该被问答打断。
+            Write-Host '模型 API 密钥放在哪里：'
+            Write-Host '    DSH 容器里的 Agent 以 danger-full-access 运行。密钥放在那个容器里的话，提示注入'
+            Write-Host '    根本不需要骗它说出来，一条 cat 就够了；容器内被拿到 root 也一样。'
+            Write-Host "    开启后真实密钥只留在 data\broker\keys.json 和独立的 dsh-key-broker 容器里，"
+            Write-Host "    DSH 容器只拿到占位密钥和 $ModelBrokerBase 这个地址。"
+            $keepBrokerConfig = $false
+            if (Test-Path -LiteralPath $brokerConfigFile -PathType Leaf) { $keepBrokerConfig = Ask-YesNo '保留现有模型密钥配置' $true }
+            if ($keepBrokerConfig) {
+                $modelBroker = 'on'
+                Write-Host '==> 保留 data\broker\keys.json，本次完全不改动其中的密钥。' -ForegroundColor Yellow
+            } elseif (Ask-YesNo '把模型 API 密钥搬到独立的密钥代理容器' $true) {
+                $addMoreUpstreams = $true
+                while ($addMoreUpstreams) {
+                    $upstreamName = ''
+                    while (-not $upstreamName) {
+                        $candidate = (Ask '上游名字（小写字母、数字、下划线、短横线）' 'deepseek').ToLowerInvariant()
+                        if ($candidate -match '^[a-z0-9_-]{1,32}$') { $upstreamName = $candidate }
+                        else { Write-Host '上游名字只允许小写字母、数字、下划线和短横线，且不超过 32 个字符。' -ForegroundColor Red }
+                    }
+                    $upstreamBase = ''
+                    while (-not $upstreamBase) {
+                        $candidate = Ask "$upstreamName 的 base_url" (Get-ModelDefaultBaseUrl $upstreamName)
+                        try { Test-UpstreamBaseUrl $candidate; $upstreamBase = $candidate }
+                        catch { Write-Host $_.Exception.Message -ForegroundColor Red }
+                    }
+                    $upstreamKey = ''
+                    while (-not $upstreamKey) {
+                        $candidate = Ask-Secret "$upstreamName 的 API 密钥（不回显）"
+                        if (-not $candidate) { Write-Host '密钥不能为空。' -ForegroundColor Red; continue }
+                        if ($candidate -ne (Ask-Secret "再次输入 $upstreamName 的 API 密钥")) {
+                            Write-Host '两次输入不一致，请重试。' -ForegroundColor Red
+                            continue
+                        }
+                        $upstreamKey = $candidate
+                    }
+                    # 配额是这一层唯一能限制"额度被别人花掉"的手段：密钥代理保证的是密钥不外泄，
+                    # 不保证额度不被用，被注入的 Agent 照样可以拿占位密钥发请求。
+                    $upstreamRpm = -1
+                    while ($upstreamRpm -lt 0) {
+                        $candidate = Ask "$upstreamName 每分钟请求上限（0 = 不限）" '0'
+                        if ($candidate -match '^\d+$') { $upstreamRpm = [int]$candidate } else { Write-Host '请输入非负整数。' -ForegroundColor Red }
+                    }
+                    $upstreamDaily = -1
+                    while ($upstreamDaily -lt 0) {
+                        $candidate = Ask "$upstreamName 每日请求配额（0 = 不限）" '0'
+                        if ($candidate -match '^\d+$') { $upstreamDaily = [int]$candidate } else { Write-Host '请输入非负整数。' -ForegroundColor Red }
+                    }
+                    Add-BrokerUpstream -Name $upstreamName -BaseUrl $upstreamBase -Key $upstreamKey `
+                        -RequestsPerMinute $upstreamRpm -DailyRequestBudget $upstreamDaily
+                    $upstreamKey = $null
+                    $modelBroker = 'on'
+                    $addMoreUpstreams = Ask-YesNo '再添加一个上游' $false
+                }
+            } else {
+                $modelBroker = 'off'
+            }
+        }
+    }
+
+    # ---- 出站模式 ----
+    if ($interactive -and -not $Egress) {
+        Write-Host '容器出站网络：'
+        Write-Host '1) open（默认，容器可直接访问任意外网）'
+        Write-Host '2) allowlist（只放行白名单域名，其余全部拒绝）'
+        Write-Host '    选 2 之后会发生这些变化，请先确认能接受：'
+        Write-Host '    - dsh 容器不再直连外网，所有出站流量只能经过 dsh-egress 正向代理；'
+        Write-Host '    - 宿主的 3080 改由 dsh-ingress 容器发布（它在 dsh-private 网络上顶替 dsh 这个'
+        Write-Host '      名字，所以 DPanel 那边写的 http://dsh:3080 不用改）；'
+        Write-Host '    - 白名单以外的域名，apt / npm / pip / git 全都会拿到 403。'
+        $egressDefault = if ($egressMode -eq 'allowlist') { '2' } else { '1' }
+        $egressMode = switch (Ask '请选择' $egressDefault) { '2' {'allowlist'}; default {'open'} }
+    }
+    if ($egressMode -eq 'allowlist' -and $interactive -and $EgressAllow.Count -eq 0) {
+        Write-Host '    代理内置的白名单已经覆盖 Debian / npm / PyPI / GitHub / uv 这些源，留空就只用它。'
+        $hint = if ($egressAllowed) { "[当前 $egressAllowed，回车表示清空]" } else { '（可留空）' }
+        $egressAllowed = (Read-Host "额外放行的域名（逗号分隔，支持 *.example.com）$hint").Trim()
+    }
+
+    # 叠加顺序是契约的一部分，不能按别的顺序拼：keys.yml 先把 dsh-key-broker 放进
+    # dsh-internal，isolated.yml 才能把 dsh 收进那张没有网关的网络而不切断模型请求。
+    $composeFileArgs = @('-f','docker-compose.yml')
+    if ($modelBroker -eq 'on') {
+        if (-not (Test-Path -LiteralPath 'docker-compose.keys.yml' -PathType Leaf)) {
+            throw '需要 docker-compose.keys.yml 才能启用模型密钥代理，但工程目录里没有它。请更新工程源码，或用 -NoModelBroker 关闭密钥代理。'
+        }
+        $composeFileArgs += @('-f','docker-compose.keys.yml')
+    }
+    if ($egressMode -eq 'allowlist') {
+        if (-not (Test-Path -LiteralPath 'docker-compose.isolated.yml' -PathType Leaf)) {
+            throw '需要 docker-compose.isolated.yml 才能启用出站白名单模式，但工程目录里没有它。请更新工程源码，或用 -Egress open 保持直连出网。'
+        }
+        $composeFileArgs += @('-f','docker-compose.isolated.yml')
     }
 }
 
@@ -644,6 +1054,8 @@ switch ($DshAction) {
         }
         if ($imageSource -eq 'build') {
             Write-Host '==> 正在构建 DSH 镜像...' -ForegroundColor Yellow
+            # 构建只需要基文件：只有 dsh 服务带 build 段，叠加文件里的三个旁路服务都直接
+            # 复用 ${DSH_IMAGE}，不参与构建，所以这里不叠加 -f 与启动时并不矛盾。
             docker compose build dsh
             if ($LASTEXITCODE -ne 0) { throw 'DSH 镜像构建失败。' }
         }
@@ -661,6 +1073,22 @@ switch ($DshAction) {
             $basicPassword = $null; $env:DSH_BASIC_AUTH_PASSWORD = $null
             Write-Host '==> Basic Auth 凭据已使用 bcrypt 哈希保存，未写入 .env。' -ForegroundColor Yellow
         }
+        if ($writeRootPassword) {
+            # 明文密码只经过一次管道交给容器里的 openssl；宿主机上只留 sha512crypt 哈希。
+            $previousOutputEncoding = $OutputEncoding
+            $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+            try {
+                $rootHashLine = $rootPassword | docker run --rm -i --entrypoint /usr/local/bin/hash-dsh-password $imageRef
+            } finally { $OutputEncoding = $previousOutputEncoding }
+            if ($LASTEXITCODE -ne 0) { throw '容器 root 密码哈希生成失败。' }
+            $rootHash = @($rootHashLine)[-1]
+            if ($rootHash -notmatch '^\$6\$') { throw '容器 root 密码哈希格式异常，未写入。' }
+            [IO.File]::WriteAllText($rootHashFile, ($rootHash + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+            $rootPassword = $null
+            $env:DSH_ROOT_PASSWORD = $null
+            Write-Host '==> 容器 root 密码已用 sha512crypt 哈希保存到 data\secret\root.hash，未写入 .env。' -ForegroundColor Yellow
+        }
+        Write-BrokerConfig $brokerConfigFile
         $pendingEnvFile = Join-Path (Get-Location) ('.env.pending.' + $PID + '.' + [guid]::NewGuid().ToString('N'))
         try {
             if (Test-Path -LiteralPath $envFile) { Copy-Item -LiteralPath $envFile -Destination $pendingEnvFile }
@@ -673,12 +1101,19 @@ switch ($DshAction) {
             Set-ComposeEnvValue $pendingEnvFile 'DSH_DOCKER_NETWORK_EXTERNAL' $networkExternalValue
             Set-ComposeEnvValue $pendingEnvFile 'DSH_IMAGE' $imageRef
             Set-ComposeEnvValue $pendingEnvFile 'DSH_IMAGE_SOURCE' $imageSource
-            $composeKeys = @('DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL','DSH_IMAGE','DSH_IMAGE_SOURCE')
-            $composeExitCode = Invoke-ComposeWithEnvFile -Path $pendingEnvFile -Arguments @('up','-d','--no-build','--force-recreate') -EnvironmentKeys $composeKeys
+            # 这四个键只是开关和地址，真实密钥永远不进 .env。
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_MODEL_BROKER' $modelBroker
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_MODEL_BROKER_BASE' $ModelBrokerBase
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_EGRESS_MODE' $egressMode
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_EGRESS_ALLOWED_HOSTS' $egressAllowed
+            $composeKeys = @('DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL','DSH_IMAGE','DSH_IMAGE_SOURCE','DSH_MODEL_BROKER','DSH_MODEL_BROKER_BASE','DSH_EGRESS_MODE','DSH_EGRESS_ALLOWED_HOSTS')
+            $composeExitCode = Invoke-ComposeWithEnvFile -Path $pendingEnvFile -Arguments @('up','-d','--no-build','--force-recreate') -EnvironmentKeys $composeKeys -FileArguments $composeFileArgs
             if ($composeExitCode -ne 0) { throw 'DSH 容器启动失败，原配置未被覆盖。' }
             Move-Item -LiteralPath $pendingEnvFile -Destination $envFile -Force
             $pendingEnvFile = $null
-            Assert-DshRoot
+            Assert-DshHardening
+            if ($modelBroker -eq 'on') { Assert-ModelBroker }
+            if ($egressMode -eq 'allowlist') { Assert-EgressIsolation -ProbeHost $bind }
         } finally {
             if ($pendingEnvFile -and (Test-Path -LiteralPath $pendingEnvFile)) {
                 Remove-Item -LiteralPath $pendingEnvFile -Force -ErrorAction SilentlyContinue
@@ -690,7 +1125,45 @@ switch ($DshAction) {
     'stop' { & .\dsh.bat stop }
     'restart' { & .\dsh.bat restart }
     'logs' { & .\dsh.bat logs }
-    'status' { docker compose ps }
+    'status' {
+        # status 不走安装问答，内存里没有本次配置，所以叠加文件只能从已落盘的 .env 反推。
+        # 不带这两个文件的话 dsh-key-broker / dsh-egress / dsh-ingress 不在本次 Compose
+        # 文档里，ps 会把它们当孤儿容器直接忽略，看起来像是"旁路服务没起来"。
+        $statusFileArgs = @('-f','docker-compose.yml')
+        if ((Get-ComposeEnvValue '.env' 'DSH_MODEL_BROKER' 'off') -eq 'on' -and (Test-Path -LiteralPath 'docker-compose.keys.yml' -PathType Leaf)) {
+            $statusFileArgs += @('-f','docker-compose.keys.yml')
+        }
+        if ((Get-ComposeEnvValue '.env' 'DSH_EGRESS_MODE' 'open') -eq 'allowlist' -and (Test-Path -LiteralPath 'docker-compose.isolated.yml' -PathType Leaf)) {
+            $statusFileArgs += @('-f','docker-compose.isolated.yml')
+        }
+        docker compose @statusFileArgs ps
+    }
 }
 if ($DshAction -in @('install','configure')) { Start-Sleep -Seconds 3; Start-Process 'http://127.0.0.1:3080' }
+if ($DshAction -in @('install','configure')) {
+    $rootPasswordState = if (Test-Path -LiteralPath $rootHashFile) { '已设置（容器内 dsh-root run / sudo <命令> 可用，连续错误会锁定）' } else { '未设置（容器内任意特权命令关闭；apt 与 DSH 更新不受影响）' }
+    Write-Host "运行账户：dsh (UID 1000)，容器已 cap_drop ALL + no-new-privileges" -ForegroundColor Green
+    Write-Host "容器 root 密码：$rootPasswordState" -ForegroundColor Green
+    if ($modelBroker -eq 'on') {
+        Write-Host "模型密钥代理：开（dsh-key-broker；真实密钥只在 data\broker\keys.json 与该容器内）" -ForegroundColor Green
+        foreach ($name in Get-BrokerUpstreamNames $brokerConfigFile) {
+            Write-Host "  - ${name}: base_url = $ModelBrokerBase/u/$name/v1，api key 填占位串 $ModelBrokerPlaceholderKey" -ForegroundColor Green
+        }
+        Write-Host '边界（请如实理解）：它保护的只是「密钥字面值不外泄」，不保护额度，也不保护数据。' -ForegroundColor Yellow
+        Write-Host '  被提示注入的 Agent 拿着占位密钥照样能用你的额度发请求，只是拿不到密钥本身。' -ForegroundColor Yellow
+        Write-Host '  所以每个上游都该配 requestsPerMinute / dailyRequestBudget，并把出站模式切到 allowlist。' -ForegroundColor Yellow
+    } else {
+        Write-Host '模型密钥代理：关（密钥若写进容器内的配置或环境，容器里的 Agent 一条 cat 就能读到）' -ForegroundColor Green
+    }
+    if ($egressMode -eq 'allowlist') {
+        Write-Host '出站模式：allowlist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）' -ForegroundColor Green
+        if ($egressAllowed) {
+            Write-Host "白名单来源：内置白名单 + 自定义 $(@($egressAllowed -split ',' | Where-Object { $_ }).Count) 条（DSH_EGRESS_ALLOWED_HOSTS）" -ForegroundColor Green
+        } else {
+            Write-Host '白名单来源：代理内置白名单（Debian / npm / PyPI / GitHub / uv）' -ForegroundColor Green
+        }
+    } else {
+        Write-Host '出站模式：open（容器可直接访问任意外网；被注入的 Agent 也可以把数据 POST 出去）' -ForegroundColor Green
+    }
+}
 Write-Host "完成：$DshAction`n工程目录：$(Get-Location)`n管理：.\dsh.bat [start|update|stop|restart|logs|status|shell|remove]" -ForegroundColor Green

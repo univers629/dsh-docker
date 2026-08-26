@@ -1,0 +1,135 @@
+# 出站隔离模式（DSH_EGRESS_MODE=allowlist）叠加文件。
+#
+# 这一层要解决的问题是：DSH 容器里的 Agent 以 danger-full-access 运行，一旦被提示
+# 注入，它可以往任意地址发任意请求——把窃取到的数据 POST 出去，或者绕过 key broker
+# 直接连模型厂商。所以隔离模式把 dsh 容器从「能直接出网」变成「只有一条受控出路」：
+#
+#   * dsh 只挂 dsh-internal（internal: true，没有默认网关）→ 直连外网必然失败；
+#   * 出网统一交给 dsh-egress 正向代理，按域名白名单放行；
+#   * 模型请求走 dsh-key-broker，真实密钥不在 dsh 容器里；
+#   * dsh 自己不再发布端口（internal 网络上的 -p 会被 Docker 静默忽略），宿主
+#     3080 由 dsh-ingress 这个独立 Nginx 容器发布并四层转发到 dsh:3080。
+#
+# 启用方式（安装器会自动叠加）：
+#   docker compose -f docker-compose.yml -f docker-compose.keys.yml \
+#     -f docker-compose.isolated.yml up -d
+#
+# !reset / !override 是 Compose 的合并控制标签：前者把基文件里的值清空，后者整段
+# 替换而不是合并。没有它们的话 ports 与 networks 只会被追加，隔离就不成立。
+services:
+  dsh:
+    # 端口交给 dsh-ingress 发布。internal 网络上的容器本来也发布不出去。
+    ports: !reset []
+    # 只留 internal 网络：撤掉 default（出网）和 dsh-private（DPanel 侧）。
+    #
+    # 额外挂一个 dsh-app 别名：dsh-ingress 在 dsh-private 上占用了 `dsh` 这个名字，
+    # 而 Docker 内嵌 DNS 会把查询方自己的 alias 也算进结果，于是 ingress 解析 `dsh`
+    # 会解析到它自己并自连。ingress 的上游因此写成 dsh-app:3080。
+    networks: !override
+      dsh-internal:
+        aliases:
+          - dsh-app
+    environment:
+      # 三套大小写都要给：不同工具只认其中一种（curl 认小写，很多 Go/Java 工具认
+      # 大写，某些库两种都读）。
+      HTTP_PROXY: "http://dsh-egress:3128"
+      HTTPS_PROXY: "http://dsh-egress:3128"
+      ALL_PROXY: "http://dsh-egress:3128"
+      http_proxy: "http://dsh-egress:3128"
+      https_proxy: "http://dsh-egress:3128"
+      all_proxy: "http://dsh-egress:3128"
+      # 回环和旁路服务必须排除：Nginx→3081、restart/config 这些内部路由一旦被推到
+      # 代理上，会被代理以「IP 字面量 / localhost」为由全部拒掉。
+      NO_PROXY: "localhost,127.0.0.1,::1,dsh,dsh-key-broker,dsh-egress,dsh-ingress"
+      no_proxy: "localhost,127.0.0.1,::1,dsh,dsh-key-broker,dsh-egress,dsh-ingress"
+      # Node 24 的 --use-env-proxy：undici/fetch 默认不看代理环境变量，DSH 本体和
+      # Agent 的 fetch 需要这个开关才会走代理。
+      NODE_USE_ENV_PROXY: "1"
+      # entrypoint 用它渲染 apt.conf / pip.conf / npmrc / git 的代理配置：这些工具
+      # 的环境变量支持都不完整，apt 更是在特权代理里被清过环境。
+      DSH_EGRESS_PROXY_URL: "http://dsh-egress:3128"
+
+  # 出站白名单正向代理：容器里唯一的出网通道。
+  dsh-egress:
+    image: "${DSH_IMAGE:-dsh:local}"
+    container_name: dsh-egress
+    hostname: dsh-egress
+    # 非 root、零能力、只读根文件系统：它只需要两个 socket，不需要写任何文件。
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    entrypoint: ["node", "/usr/local/lib/dsh/dsh-egress-proxy.mjs"]
+    environment:
+      DSH_EGRESS_PORT: "3128"
+      DSH_EGRESS_BIND: "0.0.0.0"
+      # 留空表示用内置白名单（Debian/npm/PyPI/GitHub/uv 生态）。要放行别的域名就在
+      # .env 里写 DSH_EGRESS_ALLOWED_HOSTS，逗号分隔，支持 *.example.com。
+      DSH_EGRESS_ALLOWED_HOSTS: "${DSH_EGRESS_ALLOWED_HOSTS:-}"
+      DSH_EGRESS_ALLOWED_PORTS: "${DSH_EGRESS_ALLOWED_PORTS:-}"
+      DSH_EGRESS_MAX_SOCKETS: "${DSH_EGRESS_MAX_SOCKETS:-256}"
+      # 解析结果的公网校验（DNS rebinding 防护）默认开着。只有白名单里确实是内网
+      # 镜像源时才需要在 .env 里关掉，关掉就等于放弃这层防护。
+      DSH_EGRESS_ALLOW_PRIVATE_UPSTREAM: "${DSH_EGRESS_ALLOW_PRIVATE_UPSTREAM:-0}"
+      NODE_OPTIONS: "--max-old-space-size=192"
+    networks:
+      # default 提供出网，dsh-internal 让隔离后的 dsh 能找到它。不发布任何宿主端口。
+      - default
+      - dsh-internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3128/healthz').then((response) => process.exit(response.status === 204 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # 宿主入口：把 3080 发布出来并四层转发给 dsh:3080。
+  dsh-ingress:
+    image: "${DSH_IMAGE:-dsh:local}"
+    container_name: dsh-ingress
+    hostname: dsh-ingress
+    # 3080 是非特权端口，所以 Nginx 整个进程组都可以跑在 UID 1000 上，不需要 root
+    # 主进程去 setuid。配置里的 `user dsh;` 因此只会留下一条可忽略的 warn。
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    command: ["nginx", "-c", "/usr/local/share/dsh/ingress.conf"]
+    entrypoint: []
+    ports:
+      # 与基文件一致：默认只绑回环，VPS 上由 DSH_BIND_HOST 决定。
+      - "${DSH_BIND_HOST:-127.0.0.1}:3080:3080"
+    networks:
+      default: {}
+      dsh-internal: {}
+      dsh-private:
+        # DPanel 等外部反代把上游写成 http://dsh:3080。隔离模式下 dsh 容器不在这张
+        # 网上了，所以让 ingress 在 dsh-private 上顶替 `dsh` 这个名字，外部配置不用改。
+        aliases:
+          - dsh
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    depends_on:
+      dsh:
+        condition: service_started
+    healthcheck:
+      # 探整条链路而不是只探本地监听：dsh 容器里的 Nginx 有一个无条件 204 的
+      # /healthz（不过 Basic Auth），所以这一条同时证明 ingress 活着、转发通、
+      # 而且 dsh 侧的入口也在。只探本地 3080 的话上游挂了依然会显示健康。
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/healthz').then((response) => process.exit(response.status === 204 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

@@ -1,0 +1,90 @@
+#!/bin/sh
+# /usr/local/bin/sudo 的兼容包装。
+#
+# 这个容器里没有装 setuid sudo：cap_drop: ALL 加 no-new-privileges 会让它彻底
+# 失效，装上反而只是多一个提权面。为了让习惯 sudo 的调用方仍然能用，这里把命令
+# 转交给以 root 运行的特权代理：白名单内的 apt 操作按策略放行，其它命令一律
+# 需要容器 root 密码。
+set -eu
+
+if [ "$#" -eq 0 ]; then
+  echo '[sudo] 用法：sudo <命令> [参数...]' >&2
+  exit 2
+fi
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -n|--non-interactive|-E|--preserve-env|-H|--set-home|-k|--reset-timestamp|-S|--stdin|-b|--background)
+      shift
+      ;;
+    --preserve-env=*)
+      shift
+      ;;
+    -u|--user)
+      [ "$#" -ge 2 ] || { echo '[sudo] -u 缺少用户名' >&2; exit 2; }
+      case "$2" in
+        root|0) ;;
+        *) echo "[sudo] 这个容器只支持切换到 root，收到：$2" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    -u*)
+      case "${1#-u}" in
+        root|0) ;;
+        *) echo "[sudo] 这个容器只支持切换到 root，收到：${1#-u}" >&2; exit 2 ;;
+      esac
+      shift
+      ;;
+    -i|-s|--login|--shell)
+      echo '[sudo] 容器内不提供交互式 root shell；请在宿主机使用 docker exec -u 0 -it dsh bash，' >&2
+      echo '       或用 dsh-root run <命令> 执行单条特权命令（需要容器 root 密码）。' >&2
+      exit 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "[sudo] 不支持的选项：$1" >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ "$#" -eq 0 ]; then
+  echo '[sudo] 缺少要执行的命令' >&2
+  exit 2
+fi
+
+case "$1" in
+  *=*)
+    echo '[sudo] 不支持在命令前设置环境变量' >&2
+    exit 2
+    ;;
+esac
+
+if [ "$(id -u)" = 0 ]; then
+  # root 直接执行，并使用不含包装脚本的 PATH，避免 apt 包装再次绕回来。
+  PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+  export PATH
+  case "$1" in
+    apt|apt-get|apt-cache|apt-mark) command_name=$1; shift; exec "/usr/bin/$command_name" "$@" ;;
+    *) exec "$@" ;;
+  esac
+fi
+
+case "$1" in
+  apt|apt-get|apt-cache|apt-mark)
+    exec /usr/local/bin/dsh-root "$@"
+    ;;
+  update-dsh|/usr/local/bin/update-dsh)
+    shift
+    exec /usr/local/bin/dsh-root update-dsh "$@"
+    ;;
+  *)
+    exec /usr/local/bin/dsh-root run "$@"
+    ;;
+esac

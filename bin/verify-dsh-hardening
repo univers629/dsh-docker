@@ -1,0 +1,678 @@
+#!/usr/bin/env python3
+"""容器内加固自检：把“已经生效”的隔离状态打印出来，而不是只相信配置文件。
+
+安装器在容器启动后调用它；用户随时可以重跑：
+
+    docker exec dsh /usr/local/bin/verify-dsh-hardening
+
+检查项覆盖公开逃逸手法真正依赖的前提：特权能力（SYS_ADMIN/SYS_MODULE/
+SYS_PTRACE/MKNOD 等）、no_new_privs、Docker socket、/proc 与 cgroup 的挂载状态，
+以及 DSH 是否确实以非 root 账户运行。
+
+在这之上还核验旁路服务真正生效的那几个前提：真实模型密钥的配置没有挂进这个容器、
+密钥代理可达且环境里没有密钥形态的变量、隔离模式下直连被挡而经代理放行、以及
+user namespace 的真实映射。这些项在默认部署（DSH_MODEL_BROKER=off +
+DSH_EGRESS_MODE=open）下并不适用，一律报 skip 而不是 fail：安装器靠退出码判断成败，
+把一台配置正确的机器判成失败比漏报更糟。
+"""
+import json
+import os
+import pwd
+import re
+import socket
+import stat
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+RUN_USER = os.environ.get("DSH_RUN_USER", "dsh")
+PID_FILE = os.environ.get("DSH_PID_FILE", "/run/dsh.pid")
+SOCKET_PATH = os.environ.get("DSH_PRIVILEGED_SOCKET", "/run/dsh-priv/helper.sock")
+
+# 旁路服务相关的判定输入。这些值都来自容器配置（compose 的 environment），所以
+# docker exec 进来的这个进程能直接读到；entrypoint 自己导出的变量（例如
+# DSH_USERNS_REMAP）读不到，因此下面的 namespace 检查自己去看 /proc/self/uid_map。
+BROKER_MOUNT = "/etc/dsh-broker"
+APT_PROXY_CONF = "/etc/apt/apt.conf.d/00-dsh-proxy"
+MODEL_BROKER = os.environ.get("DSH_MODEL_BROKER", "off").strip().lower()
+MODEL_BROKER_BASE = os.environ.get("DSH_MODEL_BROKER_BASE", "http://dsh-key-broker:8080").strip()
+EGRESS_MODE = os.environ.get("DSH_EGRESS_MODE", "open").strip().lower()
+EGRESS_PROXY_URL = os.environ.get("DSH_EGRESS_PROXY_URL", "").strip()
+# 只按名字形态匹配，永远不看值。*_TOKEN 会把 GITHUB_TOKEN 这类也算进来，这是有意的：
+# 启用密钥代理之后，容器里本来就不该再留任何长期凭据形态的环境变量。
+MODEL_KEY_PATTERN = re.compile(r"(?:^|_)(?:API_?KEY|TOKEN)$")
+# 直连探测目标：不在任何默认白名单里的公网地址。刻意用 IP 字面量而不是域名——
+# internal 网络里连 DNS 都出不去，用域名会把「解析失败」和「路由不通」混成一件事。
+DIRECT_PROBE = ("1.1.1.1", 443)
+DIRECT_PROBE_TIMEOUT = 3.0
+BROKER_PROBE_TIMEOUT = 5.0
+PROXY_PROBE_TIMEOUT = 8.0
+# 默认白名单里的 Debian 镜像：apt 本来就要用它，它的可达性和加固状态直接相关。
+ALLOWLISTED_PROBE_URL = "http://deb.debian.org/"
+
+# 启动链：这些路径在容器可写层里，删掉或改坏之后 docker restart 是救不回来的——必须
+# 重建容器。真实发生过一次“让 Agent 自己摧毁容器”的尝试，正是删掉了
+# /usr/local/bin/entrypoint.sh，之后 tini 反复报
+# `exec /usr/local/bin/entrypoint.sh failed: No such file or directory`。
+# 所以它们必须对运行 DSH 的非特权账户完全不可写。
+BOOT_CHAIN_PATHS = (
+    "/usr/local/bin/entrypoint.sh",
+    "/usr/local/bin/dsh-supervisor",
+    "/usr/local/bin/dsh-root",
+    "/usr/local/bin/apt",
+    "/usr/local/lib/dsh/dsh-privileged-helper.mjs",
+    "/usr/local/lib/dsh/dsh-privileged-policy.mjs",
+    "/usr/local/share/dsh/nginx.conf",
+    "/sbin/docker-init",
+    "/app/dsh",
+)
+
+# 卸载保护的探针包。策略层是按名字拒绝的，请求根本进不到 apt，所以这次探测不会
+# 动系统，连模拟都不会真的跑起来。
+PROTECTED_PROBE_PACKAGE = "nginx"
+
+# 必须以 root 运行、且必须与 DSH 的 UID 分离的常驻进程。cmdline 里的识别串。
+BOOT_CHAIN_PROCESS_MARKERS = (
+    "/usr/local/bin/dsh-supervisor",
+    "nginx: master process",
+    "dsh-privileged-helper.mjs",
+)
+
+SETPRIV = "/usr/bin/setpriv"
+CAPABILITIES = {
+    0: "CAP_CHOWN",
+    1: "CAP_DAC_OVERRIDE",
+    2: "CAP_DAC_READ_SEARCH",
+    3: "CAP_FOWNER",
+    4: "CAP_FSETID",
+    5: "CAP_KILL",
+    6: "CAP_SETGID",
+    7: "CAP_SETUID",
+    8: "CAP_SETPCAP",
+    9: "CAP_LINUX_IMMUTABLE",
+    10: "CAP_NET_BIND_SERVICE",
+    11: "CAP_NET_BROADCAST",
+    12: "CAP_NET_ADMIN",
+    13: "CAP_NET_RAW",
+    14: "CAP_IPC_LOCK",
+    15: "CAP_IPC_OWNER",
+    16: "CAP_SYS_MODULE",
+    17: "CAP_SYS_RAWIO",
+    18: "CAP_SYS_CHROOT",
+    19: "CAP_SYS_PTRACE",
+    20: "CAP_SYS_PACCT",
+    21: "CAP_SYS_ADMIN",
+    22: "CAP_SYS_BOOT",
+    23: "CAP_SYS_NICE",
+    24: "CAP_SYS_RESOURCE",
+    25: "CAP_SYS_TIME",
+    26: "CAP_SYS_TTY_CONFIG",
+    27: "CAP_MKNOD",
+    28: "CAP_LEASE",
+    29: "CAP_AUDIT_WRITE",
+    30: "CAP_AUDIT_CONTROL",
+    31: "CAP_SETFCAP",
+    32: "CAP_MAC_OVERRIDE",
+    33: "CAP_MAC_ADMIN",
+    34: "CAP_SYSLOG",
+    35: "CAP_WAKE_ALARM",
+    36: "CAP_BLOCK_SUSPEND",
+    37: "CAP_AUDIT_READ",
+    38: "CAP_PERFMON",
+    39: "CAP_BPF",
+    40: "CAP_CHECKPOINT_RESTORE",
+}
+
+# 这些能力是公开逃逸链的入口：挂载宿主文件系统、加载内核模块、写宿主设备、
+# ptrace 其它容器进程、伪造设备节点、改宿主网络或 eBPF。任何一项出现就算失败。
+FORBIDDEN_CAPABILITIES = {
+    2,
+    8,
+    9,
+    12,
+    13,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    25,
+    26,
+    27,
+    30,
+    31,
+    32,
+    33,
+    34,
+    36,
+    37,
+    38,
+    39,
+    40,
+}
+
+results = []
+
+
+def record(name, ok, detail, fatal=True, state=None):
+    # ok / 失败 之外还有 skip 与 warn 两种「不算失败」的结论：新增的旁路服务检查在
+    # 默认部署下根本不适用，报 fail 只会让安装器把一台配置正确的机器判成失败。
+    results.append(
+        {
+            "name": name,
+            "ok": ok,
+            "detail": detail,
+            "fatal": fatal,
+            "state": state or ("ok" if ok else "失败"),
+        }
+    )
+
+
+def record_skip(name, detail):
+    """不适用的检查：默认部署也要给出结论，但不能影响退出码。"""
+    record(name, True, detail, fatal=False, state="skip")
+
+
+def record_warn(name, detail):
+    """如实报告但不判失败：宿主级的加固开关不是这个项目能替用户决定的。"""
+    record(name, True, detail, fatal=False, state="warn")
+
+
+def proc_status(pid):
+    fields = {}
+    with open(f"/proc/{pid}/status", encoding="utf-8") as handle:
+        for line in handle:
+            key, _, value = line.partition(":")
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def capability_names(mask):
+    return sorted(CAPABILITIES.get(bit, f"CAP_UNKNOWN_{bit}") for bit in range(64) if mask >> bit & 1)
+
+
+def check_runtime_identity():
+    try:
+        expected = pwd.getpwnam(RUN_USER)
+    except KeyError:
+        record("run-user", False, f"镜像里没有运行账户 {RUN_USER}")
+        return
+    record("run-user", True, f"{RUN_USER} 存在（{expected.pw_uid}:{expected.pw_gid}）")
+
+    try:
+        pid = int(open(PID_FILE, encoding="utf-8").readline().strip())
+        fields = proc_status(pid)
+        uid = int(fields["Uid"].split()[0])
+        gid = int(fields["Gid"].split()[0])
+    except Exception as error:  # noqa: BLE001 - 报告即可，不需要区分异常类型
+        record("dsh-process-user", False, f"无法读取 DSH 主进程身份：{error}")
+        return
+    ok = uid == expected.pw_uid and gid == expected.pw_gid
+    record(
+        "dsh-process-user",
+        ok,
+        f"DSH 主进程 UID:GID = {uid}:{gid}（期望 {expected.pw_uid}:{expected.pw_gid}）",
+    )
+
+
+def check_pid1():
+    fields = proc_status(1)
+    uid = int(fields["Uid"].split()[0])
+    record("supervisor-user", uid == 0, f"PID 1 UID = {uid}（Supervisor 需要 root）")
+    no_new_privs = fields.get("NoNewPrivs", "0")
+    record(
+        "no-new-privileges",
+        no_new_privs == "1",
+        f"NoNewPrivs = {no_new_privs}（setuid 程序无法提权）",
+    )
+    effective = int(fields["CapEff"], 16)
+    bounding = int(fields["CapBnd"], 16)
+    forbidden = sorted(
+        CAPABILITIES.get(bit, f"CAP_UNKNOWN_{bit}")
+        for bit in FORBIDDEN_CAPABILITIES
+        if (effective | bounding) >> bit & 1
+    )
+    record(
+        "capabilities",
+        not forbidden,
+        "保留能力：" + (", ".join(capability_names(bounding)) or "无")
+        + ("；越权能力：" + ", ".join(forbidden) if forbidden else ""),
+    )
+
+
+def check_privilege_broker():
+    try:
+        info = os.stat(SOCKET_PATH)
+    except OSError as error:
+        record("privilege-broker", False, f"特权代理套接字不可用：{error}")
+        return
+    mode = stat.S_IMODE(info.st_mode)
+    ok = stat.S_ISSOCK(info.st_mode) and info.st_uid == 0 and mode == 0o660
+    record(
+        "privilege-broker",
+        ok,
+        f"{SOCKET_PATH} 属主 {info.st_uid}:{info.st_gid}，权限 {mode:04o}（期望 0:非零 0660）",
+    )
+
+
+def run_account():
+    """运行 DSH 的非特权账户的 uid/gid。"""
+    entry = pwd.getpwnam(RUN_USER)
+    return entry.pw_uid, entry.pw_gid
+
+
+def check_boot_chain():
+    """启动链文件必须是 root 独占写。"""
+    # 这里刻意用属主与权限位判定，而不是 os.access：docker exec 默认就是容器 root，
+    # root 带着 DAC_OVERRIDE，os.access 会一律报可写，结论就随调用身份漂移了。
+    # 看 stat 则无论以谁的身份跑都得到同一个答案。
+    try:
+        run_uid, run_gid = run_account()
+    except KeyError:
+        record("boot-chain-immutable", False, f"镜像里没有运行账户 {RUN_USER}")
+        return
+    problems = []
+    for path in BOOT_CHAIN_PATHS:
+        try:
+            info = os.lstat(path)
+        except OSError as error:
+            problems.append(f"{path}（无法读取：{error.strerror}）")
+            continue
+        mode = stat.S_IMODE(info.st_mode)
+        if info.st_uid == run_uid:
+            problems.append(f"{path}（属主是 {RUN_USER}）")
+        elif info.st_uid != 0:
+            problems.append(f"{path}（属主 UID {info.st_uid} 不是 root）")
+        if mode & stat.S_IWOTH:
+            problems.append(f"{path}（other 可写，{mode:04o}）")
+        elif mode & stat.S_IWGRP and info.st_gid == run_gid:
+            problems.append(f"{path}（{RUN_USER} 组可写，{mode:04o}）")
+    record(
+        "boot-chain-immutable",
+        not problems,
+        f"{len(BOOT_CHAIN_PATHS)} 个启动链路径均为 root 独占写，{RUN_USER} 删不掉也改不了"
+        if not problems
+        else f"可被 {RUN_USER} 改写的启动链路径：" + "，".join(problems),
+    )
+
+
+def check_signal_isolation():
+    """root 侧常驻进程不能与 DSH 同 UID。"""
+    # 内核给每个 PID 命名空间的 child reaper 打了 SIGNAL_UNKILLABLE，所以容器内
+    # kill -9 1 一定无效，这一层是白送的、不用检。真正要确认的是 Supervisor、
+    # Nginx 主进程和特权代理不与 DSH 同 UID——同 UID 就意味着一条 kill -9 能把它们
+    # 全部带走，Supervisor 一死 tini 就退出，容器随之停止。
+    try:
+        run_uid, _ = run_account()
+    except KeyError:
+        record("signal-isolation", False, f"镜像里没有运行账户 {RUN_USER}")
+        return
+    found = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as handle:
+                cmdline = handle.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+            uid = int(proc_status(entry)["Uid"].split()[0])
+        except (OSError, KeyError, ValueError):
+            continue
+        for marker in BOOT_CHAIN_PROCESS_MARKERS:
+            if marker in cmdline:
+                found.setdefault(marker, []).append((int(entry), uid))
+    missing = [marker for marker in BOOT_CHAIN_PROCESS_MARKERS if marker not in found]
+    shared = [
+        f"{marker} (pid {pid})"
+        for marker, items in found.items()
+        for pid, uid in items
+        if uid == run_uid
+    ]
+    detail = f"{len(found)}/{len(BOOT_CHAIN_PROCESS_MARKERS)} 个 root 侧常驻进程与 {RUN_USER} 的 UID 分离"
+    if missing:
+        detail += "；未找到：" + ", ".join(missing)
+    if shared:
+        detail = f"以下进程与 {RUN_USER} 同 UID，可被直接 kill：" + ", ".join(shared)
+    record("signal-isolation", not shared and not missing, detail)
+
+
+def check_apt_removal_guard():
+    """免密 apt 不能变成一条命令的自毁开关。"""
+    # 免密 apt 是刻意保留的便利，代价是 remove/purge 也在白名单里：一条
+    # `apt-get purge -y nginx` 就能把反向代理从容器可写层里抹掉，已经在跑的进程靠
+    # 已删除的 inode 继续活着，容器一直报 healthy，直到下一次重启才发现起不来。
+    # 策略层必须在请求进入 apt 之前就拒掉它，退出码 126。
+    #
+    # root 直接执行真实 apt、不经过特权代理，所以以 root 跑自检时要先降权到运行账户，
+    # 否则测的就不是这条链路。-s 只是模拟，无论如何都不会改动系统。
+    argv = ["apt-get", "remove", "-s", PROTECTED_PROBE_PACKAGE]
+    if os.geteuid() == 0:
+        try:
+            run_uid, run_gid = run_account()
+        except KeyError:
+            record("apt-removal-guard", False, f"镜像里没有运行账户 {RUN_USER}")
+            return
+        if not os.path.exists(SETPRIV):
+            record_skip("apt-removal-guard", f"缺少 {SETPRIV}，无法降权到 {RUN_USER} 复现这条链路")
+            return
+        argv = [SETPRIV, "--reuid", str(run_uid), "--regid", str(run_gid), "--init-groups", "--", *argv]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        record("apt-removal-guard", False, f"无法执行 apt 探测：{error}")
+        return
+    lines = [line for line in (result.stdout + result.stderr).splitlines() if line.strip()]
+    reason = lines[-1][:120] if lines else ""
+    record(
+        "apt-removal-guard",
+        result.returncode == 126,
+        f"apt-get remove -s {PROTECTED_PROBE_PACKAGE} 退出码 {result.returncode}"
+        f"（期望 126=被策略拒绝）：{reason}",
+    )
+
+def check_root_password():
+    # 以非 root 身份跑自检时读不到 /etc/shadow 正是期望状态（口令哈希无法离线爆破），
+    # 把它算成失败会误导人，所以这里直接报 skip。
+    if os.geteuid() != 0:
+        record_skip("root-password", "当前不是 root：读不到 /etc/shadow 正是期望状态，本项不适用")
+        return
+    entry = ""
+    try:
+        with open("/etc/shadow", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("root:"):
+                    entry = line.split(":")[1]
+                    break
+    except OSError as error:
+        record("root-password", False, f"无法读取 /etc/shadow：{error}", fatal=False)
+        return
+    if entry.startswith("$6$"):
+        record("root-password", True, "容器 root 密码已设置（sha512crypt），dsh-root run 可用", fatal=False)
+    else:
+        record(
+            "root-password",
+            True,
+            "容器 root 密码未设置：dsh-root run 保持关闭，只放行 apt 与 DSH 更新",
+            fatal=False,
+        )
+
+
+def check_docker_socket():
+    exposed = [path for path in ("/var/run/docker.sock", "/run/docker.sock") if os.path.exists(path)]
+    record("docker-socket", not exposed, "未挂载 Docker socket" if not exposed else f"暴露了 {exposed}")
+
+
+def check_masked_paths():
+    unsafe = [
+        path
+        for path in ("/proc/sysrq-trigger", "/proc/sys/kernel/core_pattern", "/proc/sys/kernel/modprobe")
+        if os.access(path, os.W_OK)
+    ]
+    record(
+        "proc-write-guard",
+        not unsafe,
+        "/proc 关键写入点不可写" if not unsafe else f"可写：{unsafe}",
+    )
+
+
+def check_mounts():
+    cgroup_rw = []
+    host_mounts = []
+    with open("/proc/mounts", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            target, filesystem, options = parts[1], parts[2], parts[3].split(",")
+            if target.startswith("/sys/fs/cgroup") and "ro" not in options:
+                cgroup_rw.append(target)
+            if filesystem in {"proc", "sysfs"} and target not in {"/proc", "/sys"} and "ro" not in options:
+                host_mounts.append(target)
+    record("cgroup-readonly", not cgroup_rw, "cgroup 只读挂载" if not cgroup_rw else f"可写：{cgroup_rw}")
+    record(
+        "nested-kernel-mounts",
+        not host_mounts,
+        "没有额外的可写 proc/sysfs 挂载" if not host_mounts else f"可疑挂载：{host_mounts}",
+    )
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def direct_opener():
+    """内部端点必须绕开代理：隔离模式下容器环境里带着 HTTP_PROXY，而 broker 就在
+    internal 网络上，走代理只会被出站白名单以「非白名单主机」为由拒掉。"""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def probe_http(url, timeout, opener):
+    """返回 (状态码, 错误描述)。HTTPError 也算「连上了」，所以要单独接住。"""
+    try:
+        with opener.open(url, timeout=timeout) as response:
+            return response.status, ""
+    except urllib.error.HTTPError as error:
+        return error.code, ""
+    except Exception as error:  # noqa: BLE001 - 报告即可，不需要区分异常类型
+        return None, f"{error.__class__.__name__}: {error}"
+
+
+def model_key_names(names):
+    return sorted(name for name in names if MODEL_KEY_PATTERN.search(name))
+
+
+def check_broker_mount():
+    """真实模型密钥的配置绝不能出现在这个容器里。
+
+    镜像里建了 /etc/dsh-broker 这个挂载点，所以「存在但为空」才是正常状态；里面真有
+    文件才说明有人把 keys.json 挂进了 DSH 容器——那等于把密钥交给一个能执行任意命令
+    的 Agent，一条 cat 就读走了，密钥代理这层设计也就白做了。
+    """
+    if not os.path.exists(BROKER_MOUNT):
+        record("broker-keys-not-mounted", True, f"{BROKER_MOUNT} 不存在：真实模型密钥没有挂进 DSH 容器")
+        return
+    if not os.path.isdir(BROKER_MOUNT):
+        record("broker-keys-not-mounted", False, f"{BROKER_MOUNT} 是个文件：密钥配置被挂进了 DSH 容器")
+        return
+    try:
+        entries = sorted(os.listdir(BROKER_MOUNT))
+    except OSError as error:
+        record("broker-keys-not-mounted", False, f"{BROKER_MOUNT} 存在但无法枚举：{error}")
+        return
+    record(
+        "broker-keys-not-mounted",
+        not entries,
+        f"{BROKER_MOUNT} 存在但为空（镜像里的挂载点，密钥没有挂进来）"
+        if not entries
+        else f"{BROKER_MOUNT} 里挂进了 {entries}：真实密钥只应存在于 dsh-key-broker 容器",
+    )
+
+
+def check_model_broker():
+    if MODEL_BROKER != "on":
+        record_skip("model-broker", f"DSH_MODEL_BROKER={MODEL_BROKER or 'off'}：未启用模型密钥代理，本项不适用")
+        record_skip("model-key-env", "未启用模型密钥代理：不要求容器环境里没有密钥形态的变量")
+        record_skip("model-key-env-dsh", "未启用模型密钥代理：不检查 DSH 主进程的环境")
+        return
+
+    healthz = MODEL_BROKER_BASE.rstrip("/") + "/healthz"
+    status, error = probe_http(healthz, BROKER_PROBE_TIMEOUT, direct_opener())
+    record(
+        "model-broker",
+        status == 204,
+        f"{healthz} 返回 {status if status is not None else error}（期望 204）",
+    )
+
+    # 只看变量名，永不读取或打印变量值：这个自检本身不能变成新的泄漏面。
+    leaked = model_key_names(os.environ)
+    record(
+        "model-key-env",
+        not leaked,
+        "容器配置注入的环境里没有 *_API_KEY / *_TOKEN 形态的变量（只看名字）"
+        if not leaked
+        else "容器配置注入了密钥形态的变量（只列名字）：" + ", ".join(leaked),
+    )
+    check_dsh_process_env()
+
+
+def check_dsh_process_env():
+    """扫描 DSH 主进程的环境。
+
+    读别的进程的 /proc/<pid>/environ 需要 PTRACE_MODE_READ，而 cap_drop: ALL 之后连
+    容器 root 都没有 CAP_SYS_PTRACE——所以这里的 Permission denied 本身就是加固生效的
+    结果，只能报 skip，不能算失败。以 UID 1000 跑这个脚本时同 UID 可读，会给出真结论。
+    PID 1 不能拿来替代：init: true 之后 PID 1 是 tini，看不到 entrypoint 导出的变量。
+    """
+    try:
+        pid = int(read_text(PID_FILE).splitlines()[0].strip())
+    except (IndexError, ValueError):
+        record_skip("model-key-env-dsh", f"无法从 {PID_FILE} 读到 DSH 主进程 PID")
+        return
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as handle:
+            raw = handle.read()
+    except PermissionError:
+        record_skip(
+            "model-key-env-dsh",
+            f"读不到 /proc/{pid}/environ（缺 CAP_SYS_PTRACE，这正是 cap_drop: ALL 的结果）；"
+            "要看真结论请用 docker exec -u dsh dsh /usr/local/bin/verify-dsh-hardening",
+        )
+        return
+    except OSError as error:
+        record_skip("model-key-env-dsh", f"读不到 /proc/{pid}/environ：{error}")
+        return
+    names = [entry.split(b"=", 1)[0].decode("utf-8", "replace") for entry in raw.split(b"\0") if entry]
+    leaked = model_key_names(names)
+    record(
+        "model-key-env-dsh",
+        not leaked,
+        f"DSH 主进程（PID {pid}）环境里没有 *_API_KEY / *_TOKEN 形态的变量（只看名字）"
+        if not leaked
+        else f"DSH 主进程（PID {pid}）环境里有密钥形态的变量（只列名字）：" + ", ".join(leaked),
+    )
+
+
+def check_egress():
+    if EGRESS_MODE != "allowlist":
+        record_skip(
+            "egress-direct-blocked",
+            f"DSH_EGRESS_MODE={EGRESS_MODE or 'open'}：未启用出站白名单，容器可以直接出网，本项不适用",
+        )
+        record_skip("egress-proxy-allowed", "未启用出站白名单：没有 dsh-egress 可探")
+        # open 模式下这份文件必须已经被 entrypoint 回收掉，否则 apt 会一直去连一个
+        # 不存在的代理——这是真故障，所以它是 open 模式下唯一可能报失败的出站项。
+        if "dsh-egress" in read_text(APT_PROXY_CONF):
+            record(
+                "egress-apt-proxy",
+                False,
+                f"open 模式下仍残留指向 dsh-egress 的 {APT_PROXY_CONF}：apt 会连一个已经不存在的代理",
+            )
+        else:
+            record_skip(
+                "egress-apt-proxy",
+                f"未启用出站白名单：{APT_PROXY_CONF} 没有指向 dsh-egress，符合预期",
+            )
+        return
+
+    # 1) 直连白名单外的公网地址必须失败：dsh 只挂 internal 网络，没有默认网关。
+    #    超时给 3 秒，自检不能被一条注定失败的连接拖成分钟级。
+    try:
+        with socket.create_connection(DIRECT_PROBE, timeout=DIRECT_PROBE_TIMEOUT):
+            record(
+                "egress-direct-blocked",
+                False,
+                f"直连 {DIRECT_PROBE[0]}:{DIRECT_PROBE[1]} 成功：容器仍然可以绕开 dsh-egress 出网",
+            )
+    except OSError as error:
+        record(
+            "egress-direct-blocked",
+            True,
+            f"直连 {DIRECT_PROBE[0]}:{DIRECT_PROBE[1]} 失败（{error.__class__.__name__}: {error}）：出网只剩代理一条路",
+        )
+
+    # 2) 经代理访问白名单内域名必须成功，否则隔离模式等于把容器彻底断网。
+    proxy_url = EGRESS_PROXY_URL or "http://dsh-egress:3128"
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    )
+    status, error = probe_http(ALLOWLISTED_PROBE_URL, PROXY_PROBE_TIMEOUT, opener)
+    record(
+        "egress-proxy-allowed",
+        status is not None and status < 400,
+        f"经 {proxy_url} 访问 {ALLOWLISTED_PROBE_URL} 返回 {status if status is not None else error}",
+    )
+
+    # 3) apt 经特权代理以 root 运行时环境被白名单清过，代理只能从配置文件里读。
+    body = read_text(APT_PROXY_CONF)
+    record(
+        "egress-apt-proxy",
+        "dsh-egress" in body,
+        f"{APT_PROXY_CONF} 指向 dsh-egress"
+        if "dsh-egress" in body
+        else f"{APT_PROXY_CONF} 缺失或没有指向 dsh-egress：apt 会绕过代理，然后因为没有网关而失败",
+    )
+
+
+def check_user_namespace():
+    """如实报告 /proc/self/uid_map。
+
+    默认部署没有 userns-remap：那是 Docker 的默认形态，也不是这个项目能替用户决定的，
+    所以报 warn 而不是 fail——否则每一台默认安装的机器自检都是红的，真正的失败项反而
+    会被淹掉。
+    """
+    raw = read_text("/proc/self/uid_map")
+    if not raw.strip():
+        record_warn("user-namespace", "读不到 /proc/self/uid_map，无法判断 userns-remap 状态")
+        return
+    rows = [line.split() for line in raw.splitlines() if line.strip()]
+    if rows == [["0", "0", "4294967295"]]:
+        record_warn(
+            "user-namespace",
+            "uid_map 是恒等映射（0 0 4294967295）：未启用 userns-remap，容器 root 就是宿主 root 的"
+            "同一个 UID，内核漏洞逃逸后即为宿主 root；启用 userns-remap 可把它降级为普通 subuid",
+        )
+        return
+    ranges = "；".join(f"容器 {row[0]} → 宿主 {row[1]}（{row[2]} 个 UID）" for row in rows if len(row) >= 3)
+    record("user-namespace", True, f"已启用 userns-remap：{ranges}")
+
+
+def main():
+    check_runtime_identity()
+    check_pid1()
+    check_privilege_broker()
+    check_boot_chain()
+    check_signal_isolation()
+    check_apt_removal_guard()
+    check_root_password()
+    check_docker_socket()
+    check_masked_paths()
+    check_mounts()
+    # 旁路服务与 namespace：默认部署（broker off + egress open）下这几项报 skip 或
+    # warn，退出码不变，安装器的成败判定仍然只看真正的加固失败。
+    check_broker_mount()
+    check_model_broker()
+    check_egress()
+    check_user_namespace()
+
+    if "--json" in sys.argv[1:]:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+    else:
+        for item in results:
+            print(f"[{item['state']}] {item['name']}: {item['detail']}")
+
+    failures = [item["name"] for item in results if item["fatal"] and not item["ok"]]
+    if failures:
+        print("[错误] 容器加固自检未通过：" + ", ".join(failures), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

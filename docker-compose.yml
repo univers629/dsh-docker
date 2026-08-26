@@ -6,6 +6,9 @@ services:
     image: "${DSH_IMAGE:-dsh:local}"
     container_name: dsh
     hostname: dsh
+    # PID 1 仍是 root：它要对齐挂载目录属主、写 /etc/shadow、以 root 运行特权代理，
+    # 并让 Nginx 主进程降权。DSH 本体、Agent 会话和 Nginx worker 都跑在 UID 1000
+    # 的 dsh 账户上，能力集只保留下面 cap_add 里那几项。
     user: "0:0"
     restart: unless-stopped
     ports:
@@ -15,13 +18,16 @@ services:
     networks:
       - default
       - dsh-private
+      # 内部网络（无外网网关）：密钥代理和出站代理都挂在这里，所以隔离模式下
+      # 把 dsh 的 default/dsh-private 撤掉之后，它仍然能找到这两个旁路服务。
+      - dsh-internal
     environment:
       DSH_HOME: /data/dsh
       DSH_AGENTS_HOME: /data/agents
       DSH_PERMISSION_MODE: "${DSH_PERMISSION_MODE:-danger-full-access}"
       DSH_HOST_ACCESS: "${DSH_HOST_ACCESS:-mounted-paths-only}"
       DSH_WRITABLE_PATHS: "${DSH_WRITABLE_PATHS:-/data/dsh,/data/home,/data/mcp,/data/agents,/workspace}"
-      DSH_SYSTEM_PACKAGES_PERSISTENT: "true"
+      DSH_SYSTEM_PACKAGES_PERSISTENT: "false"
       DSH_SYSTEM_OS: "${DSH_SYSTEM_OS:-}"
       DSH_SYSTEM_RELEASE: "${DSH_SYSTEM_RELEASE:-}"
       DSH_SYSTEM_ARCH: "${DSH_SYSTEM_ARCH:-}"
@@ -29,8 +35,17 @@ services:
       DSH_SYSTEM_ABI: "${DSH_SYSTEM_ABI:-}"
       DSH_SYSTEM_LIBC: "${DSH_SYSTEM_LIBC:-}"
       DSH_ACCESS_MODE: "${DSH_ACCESS_MODE:-local}"
+      # 特权代理的策略：nopasswd 让 Agent 可以自己装 Debian 包，password 则要求
+      # 每次 apt 都提供容器 root 密码。dsh-root run 无论如何都要密码。
+      DSH_PRIVILEGED_APT: "${DSH_PRIVILEGED_APT:-nopasswd}"
+      DSH_PRIVILEGED_UPDATE: "${DSH_PRIVILEGED_UPDATE:-nopasswd}"
       DSH_WEB_PORT: "3081"
       DSH_TRUSTED_HOSTS: "${DSH_TRUSTED_HOSTS:-}"
+      # 模型密钥代理：on 表示真实模型密钥只存在于 dsh-key-broker 容器，DSH 这边
+      # 只填占位密钥和下面这个 base。容器内不存在真实密钥这个字符串。
+      DSH_MODEL_BROKER: "${DSH_MODEL_BROKER:-off}"
+      DSH_MODEL_BROKER_BASE: "${DSH_MODEL_BROKER_BASE:-http://dsh-key-broker:8080}"
+      DSH_EGRESS_MODE: "${DSH_EGRESS_MODE:-open}"
       NODE_PATH: "/app/dsh/node_modules:/data/dsh/profiles/node_modules"
     volumes:
       - ./data/dsh:/data/dsh
@@ -38,10 +53,29 @@ services:
       - ./data/mcp:/data/mcp
       - ./data/home:/data/home
       - ./data/auth:/opt/dsh-auth:ro
+      # root 口令哈希挂在 /root 下（0700 root:root）：非 root 的 dsh 账户既进不去
+      # 这个目录也读不到哈希，只能通过带失败锁定的特权代理校验密码。
+      - ./data/secret:/root/dsh-secret:ro
       - ./workspace:/workspace
     init: true
+    # 逃逸面收敛：不特权、不挂 Docker socket、不共享宿主 namespace，保留 Docker
+    # 默认 seccomp/AppArmor 配置，并禁止通过 setuid 程序提权。
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # 仅保留“降权启动 + apt/dpkg 安装”真正需要的能力：切换属主与权限位、
+    # 让 Nginx 主进程和 apt 切换到别的 UID、以及向降权后的子进程发信号。
+    # SYS_ADMIN、SYS_MODULE、SYS_PTRACE、MKNOD、NET_ADMIN、NET_RAW 都不在其中。
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - FSETID
+      - SETGID
+      - SETUID
+      - KILL
+    pids_limit: 4096
     healthcheck:
       # Nginx 的 /healthz 是无条件 204，单探它无法发现 DSH 崩溃；DSH 自己的
       # 回环端口才是真正的存活信号。
@@ -52,6 +86,11 @@ services:
       start_period: 60s
 
 networks:
+  # internal: true 表示这个网络没有默认网关，挂在上面的容器无法直接出网。
+  # 它只用于 dsh 与 dsh-key-broker / dsh-egress / dsh-ingress 之间的东西向流量。
+  dsh-internal:
+    name: "${DSH_INTERNAL_NETWORK:-dsh-internal}"
+    internal: true
   dsh-private:
     # Set DSH_DOCKER_NETWORK=dpanel-local and
     # DSH_DOCKER_NETWORK_EXTERNAL=true on a VPS where DPanel is attached to

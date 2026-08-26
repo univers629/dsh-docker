@@ -3,7 +3,7 @@ set -eu
 
 DSH_PID_FILE=${DSH_PID_FILE:-/run/dsh.pid}
 DSH_SUPERVISOR_PID_FILE=${DSH_SUPERVISOR_PID_FILE:-/run/dsh-supervisor.pid}
-DSH_RESTART_REQUEST_FILE=${DSH_RESTART_REQUEST_FILE:-/run/dsh.restart}
+DSH_RESTART_REQUEST_FILE=${DSH_RESTART_REQUEST_FILE:-/run/dsh-state/restart}
 
 usage() {
   echo 'usage: restart-dsh check | request [delay-seconds]' >&2

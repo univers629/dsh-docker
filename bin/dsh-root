@@ -1,0 +1,193 @@
+#!/usr/bin/env node
+// DSH 特权代理的客户端。
+//
+// 以 dsh 账户运行的进程用它把需要 root 的动作交给 /run/dsh-priv/helper.sock 上的
+// 代理执行，输出和退出码原样透传。
+//
+//   dsh-root apt-get install -y ripgrep     # 默认无需密码，白名单内的 apt 操作
+//   dsh-root update-dsh [版本]              # 容器内 DSH 更新器
+//   dsh-root run <命令> [参数...]           # 任意 root 命令，需要容器 root 密码
+//
+// 密码来源依次为 --password-file、DSH_ROOT_PASSWORD、当前终端 /dev/tty。
+import fs from 'node:fs'
+import net from 'node:net'
+import tty from 'node:tty'
+
+const SOCKET_PATH = process.env.DSH_PRIVILEGED_SOCKET ?? '/run/dsh-priv/helper.sock'
+const APT_COMMANDS = new Set(['apt', 'apt-get', 'apt-cache', 'apt-mark'])
+
+function usage(stream = process.stderr) {
+  stream.write(
+    [
+      '用法：',
+      '  dsh-root apt-get install -y <包名...>',
+      '  dsh-root apt <子命令> [参数...]',
+      '  dsh-root update-dsh [版本]',
+      '  dsh-root run <命令> [参数...]        # 需要容器 root 密码',
+      '',
+      '选项：',
+      '  --password-file <路径>   从文件第一行读取容器 root 密码',
+      '  -h, --help               显示本帮助',
+      '',
+    ].join('\n'),
+  )
+}
+
+function readPasswordFromTty() {
+  let fd
+  try {
+    fd = fs.openSync('/dev/tty', 'r+')
+  } catch {
+    return null
+  }
+  const input = new tty.ReadStream(fd)
+  const output = new tty.WriteStream(fd)
+  output.write('容器 root 密码：')
+  input.setRawMode(true)
+  input.resume()
+  let password = ''
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      input.setRawMode(false)
+      input.pause()
+      output.write('\n')
+      input.destroy()
+      resolve(value)
+    }
+    input.on('data', (chunk) => {
+      for (const byte of chunk) {
+        if (byte === 0x03) {
+          finish(null)
+          return
+        }
+        if (byte === 0x0d || byte === 0x0a) {
+          finish(password)
+          return
+        }
+        if (byte === 0x7f || byte === 0x08) {
+          password = password.slice(0, -1)
+          continue
+        }
+        password += String.fromCharCode(byte)
+      }
+    })
+  })
+}
+
+async function resolvePassword(passwordFile) {
+  if (passwordFile) {
+    return fs.readFileSync(passwordFile, 'utf8').split('\n')[0]
+  }
+  if (process.env.DSH_ROOT_PASSWORD) {
+    return process.env.DSH_ROOT_PASSWORD
+  }
+  return readPasswordFromTty()
+}
+
+function parseArguments(argv) {
+  const request = { passwordFile: '' }
+  const rest = []
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]
+    if (argument === '--password-file') {
+      request.passwordFile = argv[index + 1] ?? ''
+      if (!request.passwordFile) throw new Error('--password-file 缺少路径')
+      index += 1
+      continue
+    }
+    if (argument.startsWith('--password-file=')) {
+      request.passwordFile = argument.slice('--password-file='.length)
+      continue
+    }
+    if (argument === '-h' || argument === '--help') {
+      usage(process.stdout)
+      process.exit(0)
+    }
+    rest.push(...argv.slice(index))
+    break
+  }
+  if (rest.length === 0) {
+    usage()
+    process.exit(2)
+  }
+
+  const [command, ...args] = rest
+  if (APT_COMMANDS.has(command)) {
+    request.payload = { action: 'apt', command, args }
+    request.needsPassword = (process.env.DSH_PRIVILEGED_APT ?? 'nopasswd') === 'password'
+  } else if (command === 'update-dsh') {
+    if (args.length > 1) throw new Error('update-dsh 最多接受一个版本参数')
+    request.payload = { action: 'update-dsh', version: args[0] ?? 'latest' }
+    request.needsPassword = (process.env.DSH_PRIVILEGED_UPDATE ?? 'nopasswd') === 'password'
+  } else if (command === 'run') {
+    if (args.length === 0) throw new Error('run 需要一个命令')
+    request.payload = { action: 'run', args }
+    request.needsPassword = true
+  } else {
+    throw new Error(`不支持的特权动作：${command}`)
+  }
+  return request
+}
+
+function submit(payload) {
+  return new Promise((resolve) => {
+    const socket = net.connect(SOCKET_PATH)
+    let buffer = ''
+    let exitCode = 1
+    socket.on('error', (error) => {
+      process.stderr.write(`[dsh-root] 无法连接特权代理 ${SOCKET_PATH}：${error.message}\n`)
+      resolve(70)
+    })
+    socket.on('connect', () => socket.write(`${JSON.stringify(payload)}\n`))
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8')
+      let newline = buffer.indexOf('\n')
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline)
+        buffer = buffer.slice(newline + 1)
+        newline = buffer.indexOf('\n')
+        if (!line) continue
+        let frame
+        try {
+          frame = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (frame.t === 'o') process.stdout.write(Buffer.from(frame.d, 'base64'))
+        else if (frame.t === 'e') process.stderr.write(Buffer.from(frame.d, 'base64'))
+        else if (frame.t === 'x') exitCode = frame.signal ? 128 : frame.code
+        else if (frame.t === 'err') {
+          process.stderr.write(`[dsh-root] ${frame.message}\n`)
+          exitCode = frame.code ?? 1
+        }
+      }
+    })
+    socket.on('close', () => resolve(exitCode))
+  })
+}
+
+async function main() {
+  let request
+  try {
+    request = parseArguments(process.argv.slice(2))
+  } catch (error) {
+    process.stderr.write(`[dsh-root] ${error.message}\n`)
+    usage()
+    process.exit(2)
+  }
+
+  if (request.needsPassword) {
+    const password = await resolvePassword(request.passwordFile)
+    if (!password) {
+      process.stderr.write(
+        '[dsh-root] 这个动作需要容器 root 密码：请在交互终端里运行，或提供 DSH_ROOT_PASSWORD/--password-file。\n',
+      )
+      process.exit(125)
+    }
+    request.payload.password = password
+  }
+
+  process.exit(await submit(request.payload))
+}
+
+main()

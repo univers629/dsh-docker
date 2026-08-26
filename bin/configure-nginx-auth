@@ -13,6 +13,8 @@ case "${DSH_ACCESS_MODE:-local}" in
     fi
     cp "$auth_file" "$runtime_auth_file"
     chmod 600 "$runtime_auth_file"
+    # Nginx worker 以非特权的 dsh 账户运行，必须由它自己能读这份运行时副本。
+    chown "${DSH_RUN_USER:-dsh}" "$runtime_auth_file" 2>/dev/null || true
     {
       printf '%s\n' 'auth_basic "DeepSeek Harness";'
       printf 'auth_basic_user_file %s;\n' "$runtime_auth_file"
