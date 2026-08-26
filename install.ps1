@@ -16,8 +16,10 @@ param(
     [string[]]$ModelBaseUrl = @(),
     [string[]]$ModelApi = @(),
     [string[]]$ModelHeader = @(),
+    [string[]]$ModelId = @(),
     [string]$ModelKeysFile = '',
     [switch]$NoModelBroker,
+    [switch]$NoModelSettingsSeed,
     [ValidateSet('','open','allowlist')]
     [string]$Egress = '',
     [string[]]$EgressAllow = @(),
@@ -45,8 +47,11 @@ $ModelBrokerPlaceholderKey = 'dsh-broker-placeholder'
 if (-not $ModelKeysFile -and $env:DSH_MODEL_KEYS_FILE) { $ModelKeysFile = $env:DSH_MODEL_KEYS_FILE }
 # 收集到的上游先留在内存里，写盘之后立刻清空（和 $rootPassword 一样的处理）。
 $BrokerUpstreams = New-Object System.Collections.ArrayList
-# 上游名 → API 形态。摘要要靠它决定 base_url 末尾带不带 /v1。
+# 上游名 → API 形态。写 DSH 模型配置时要靠它决定自定义路由的 wire 协议。
 $BrokerProfiles = @{}
+# 上游名 → 要写进 DSH settings.yaml 的模型 id（逗号分隔）。内置目录里的上游可以留空：
+# 那种情况下沿用 DSH 自带的整份模型清单。
+$BrokerModels = @{}
 $composeFileArgs = @('-f','docker-compose.yml')
 
 # ---------------------------------------------------------------------------
@@ -57,14 +62,29 @@ $composeFileArgs = @('-f','docker-compose.yml')
 # 只写 data\broker\keys.json（只被 broker 容器只读挂载），.env 里只留开关和地址。
 # ---------------------------------------------------------------------------
 
-# 内置 base_url 只是省掉最常见三家的手输。其它上游必须显式给 -ModelBaseUrl：
+# 内置 base_url 只是省掉常见上游的手输。其它上游必须显式给 -ModelBaseUrl：
 # 猜错 base_url 等于把密钥发到一个我们没验证过的域名，宁可报错退出。
+#
+# 这些值抄的是 DSH 内置模型目录（pi-ai catalog）里同名 provider 的 base_url，版本段
+# （/v1、/v1beta 等）必须留在这里：DSH 侧填的是 <代理>/u/<上游名>，客户端 SDK 只会往后
+# 接 /chat/completions、/responses、/v1/messages、/models/... 这类相对路径。名字与目录
+# 对上还有一个好处：写 settings.yaml 时能直接沿用目录里的整份模型清单。
 function Get-ModelDefaultBaseUrl {
     param([string]$Name)
     switch ($Name) {
         'deepseek' { return 'https://api.deepseek.com' }
-        'openai' { return 'https://api.openai.com' }
+        'openai' { return 'https://api.openai.com/v1' }
         'anthropic' { return 'https://api.anthropic.com' }
+        'google' { return 'https://generativelanguage.googleapis.com/v1beta' }
+        'nvidia' { return 'https://integrate.api.nvidia.com/v1' }
+        'openrouter' { return 'https://openrouter.ai/api/v1' }
+        'groq' { return 'https://api.groq.com/openai/v1' }
+        'xai' { return 'https://api.x.ai/v1' }
+        'moonshotai' { return 'https://api.moonshot.ai/v1' }
+        'together' { return 'https://api.together.ai/v1' }
+        'cerebras' { return 'https://api.cerebras.ai/v1' }
+        'mistral' { return 'https://api.mistral.ai' }
+        'zai' { return 'https://api.z.ai/api/coding/paas/v4' }
     }
     return ''
 }
@@ -114,7 +134,7 @@ function Get-BrokerProfilePath {
         'chat' { return @('/v1/chat/completions','/chat/completions','/v1/models','/models') }
         'responses' { return @('/v1/responses','/responses','/v1/models','/models') }
         'messages' { return @('/v1/messages','/messages','/v1/models','/models') }
-        'gemini' { return @('/v1beta/models') }
+        'gemini' { return @('/models','/v1beta/models') }
         default { return @() }
     }
 }
@@ -124,14 +144,6 @@ function Get-BrokerProfileHeader {
     param([string]$Profile)
     if ($Profile -eq 'messages') { return [ordered]@{ 'anthropic-version' = '2023-06-01' } }
     return [ordered]@{}
-}
-
-# WebUI 里该填哪个 base_url：OpenAI 系客户端自己会补 /chat/completions 或 /responses，
-# 所以代理侧要留出 /v1；Anthropic 与 Gemini 的路径自带版本号，不能再多一层。
-function Get-BrokerProfileUrlSuffix {
-    param([string]$Profile)
-    if ($Profile -in @('messages','gemini')) { return '' }
-    return '/v1'
 }
 
 # 没显式选形态时按上游名猜一个。猜错也只是路径前缀宽一点，不会写错认证头。
@@ -184,6 +196,20 @@ function Test-ModelSpecFormat {
         if ($spec -notmatch '^[^=]+=[^=]+=.+$') { throw '-ModelHeader 需要 NAME=HEADER=VALUE 格式。' }
         Format-BrokerHeader ($spec -replace '^[^=]+=','') | Out-Null
     }
+    foreach ($spec in @($script:ModelId)) {
+        if ($spec -notmatch '^[^=]+=.+$') { throw '-ModelId 需要 NAME=ID 格式（多个 id 用逗号分隔）。' }
+    }
+}
+
+# 同一个上游可以给多条 -ModelId，也可以在一条里用逗号分隔，最后合成一条逗号分隔串。
+function Get-ModelIdOverride {
+    param([string]$Name)
+    $ids = @()
+    foreach ($spec in @($script:ModelId)) {
+        if (($spec -replace '=.*$','').ToLowerInvariant() -ne $Name) { continue }
+        $ids += ($spec -replace '^[^=]+=','')
+    }
+    return ($ids -join ',')
 }
 
 function Get-ModelApiOverride {
@@ -209,27 +235,27 @@ function Get-ModelHeaderOverrides {
 
 # -ModelApi / -ModelHeader 挂在一个没给密钥的上游名上时静默丢掉最难查，所以点出来。
 function Show-UnmatchedModelSpecWarning {
-    foreach ($spec in @(@($script:ModelApi) + @($script:ModelHeader))) {
+    foreach ($spec in @(@($script:ModelApi) + @($script:ModelHeader) + @($script:ModelId))) {
         if (-not $spec) { continue }
         $specName = ($spec -replace '=.*$','').ToLowerInvariant()
         if (@($BrokerUpstreams | Where-Object { $_.name -eq $specName }).Count -gt 0) { continue }
-        Write-Host "[警告] 没有名为 $specName 的上游，对应的 -ModelApi / -ModelHeader 不会生效。" -ForegroundColor Yellow
+        Write-Host "[警告] 没有名为 $specName 的上游，对应的 -ModelApi / -ModelHeader / -ModelId 不会生效。" -ForegroundColor Yellow
     }
 }
 
-# 摘要要告诉人 WebUI 里到底填什么，而这取决于上游的 API 形态。内存里没有这个上游时
-# （例如选了「保留现有配置」，名字是从 keys.json 里捞的）退回 /v1，那是最常见的形态。
-function Get-BrokerUpstreamUrlSuffix {
+# 上游的 API 形态：内存里没有这个上游时（例如选了「保留现有配置」，名字是从 keys.json
+# 里捞的）退回 any——那只影响端点收窄的宽窄，不影响认证头写对写错。
+function Get-BrokerUpstreamProfile {
     param([string]$Name)
-    if ($BrokerProfiles.ContainsKey($Name)) { return (Get-BrokerProfileUrlSuffix $BrokerProfiles[$Name]) }
-    return '/v1'
+    if ($BrokerProfiles.ContainsKey($Name)) { return $BrokerProfiles[$Name] }
+    return 'any'
 }
 
 function Add-BrokerUpstream {
     param(
         [string]$Name, [string]$BaseUrl, [string]$Key,
         [int]$RequestsPerMinute = 0, [int]$DailyRequestBudget = 0,
-        [string]$ApiProfile = '', [string[]]$ExtraHeader = @()
+        [string]$ApiProfile = '', [string[]]$ExtraHeader = @(), [string]$ModelIds = ''
     )
     $normalized = $Name.ToLowerInvariant()
     if ($normalized -notmatch '^[a-z0-9_-]{1,32}$') { throw "上游名字只允许小写字母、数字、下划线和短横线，且不超过 32 个字符：$normalized" }
@@ -255,8 +281,10 @@ function Add-BrokerUpstream {
         $headers[($pair -replace '=.*$','')] = ($pair -replace '^[^=]+=','')
     }
     if ($headers.Count -gt 0) { $entry['extraHeaders'] = $headers }
-    # profile 本身不写进 keys.json（那不是 broker 的字段），只留在内存里供摘要用。
+    # profile 与模型 id 都不是 broker 的字段，不写进 keys.json，只留在内存里供
+    # "写 DSH 模型配置"这一步用。
     $BrokerProfiles[$normalized] = $ApiProfile
+    $BrokerModels[$normalized] = $ModelIds
     # 可选字段能省就省：把 broker 的默认值抄一份进 keys.json，只会在 broker 改默认值之后
     # 变成静默的行为分叉，也让人更难看出哪些限制是自己真的设过的。
     if ($RequestsPerMinute -gt 0) { $entry['requestsPerMinute'] = $RequestsPerMinute }
@@ -279,6 +307,52 @@ function Protect-BrokerConfigFile {
         Set-Acl -LiteralPath $Path -AclObject $acl
     } catch {
         Write-Host "[警告] 无法收紧 $Path 的 ACL：$($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+# 把"该在 DSH 里怎么填"从摘要变成实际配置。口径与 install.sh 的 seed_dsh_model_settings
+# 完全一致：写 data\dsh\settings.yaml 的 llm-pi-ai.providers 与 agent-default-model，
+# 以及 data\dsh\.credentials.yaml 的 refs（只放占位串）。合并交给镜像里的 node——
+# 那里才有 yaml 库（改 YAML 要保住用户已有的注释和配置）和 DSH 内置模型目录。
+function Invoke-DshModelSettingsSeed {
+    param([string]$Image, [string]$BrokerConfig, [bool]$Enabled)
+    if ($NoModelSettingsSeed) {
+        Write-Host '==> 已跳过写入 DSH 模型配置（-NoModelSettingsSeed）：供应商与模型请在 WebUI 里自己加。' -ForegroundColor Yellow
+        return
+    }
+    if (-not $Enabled) { return }
+    $names = @(Get-BrokerUpstreamNames $BrokerConfig)
+    if ($names.Count -eq 0) { return }
+    if (-not $Image) {
+        Write-Host '[警告] 不知道该用哪个镜像来写 DSH 模型配置，已跳过。' -ForegroundColor Yellow
+        return
+    }
+    $dshHomeDir = Join-Path (Get-Location) 'data\dsh'
+    New-Item -ItemType Directory -Path $dshHomeDir -Force | Out-Null
+    $upstreams = @()
+    foreach ($name in $names) {
+        $models = @()
+        if ($BrokerModels.ContainsKey($name)) {
+            $models = @(($BrokerModels[$name] -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        }
+        $upstreams += [ordered]@{ name = $name; shape = (Get-BrokerUpstreamProfile $name); models = $models }
+    }
+    $payload = [ordered]@{
+        brokerBase = $ModelBrokerBase
+        placeholder = $ModelBrokerPlaceholderKey
+        upstreams = $upstreams
+    } | ConvertTo-Json -Depth 6 -Compress
+    Write-Host '==> 正在把模型供应商写进 DSH 配置（data\dsh\settings.yaml）：' -ForegroundColor Yellow
+    $seedScriptDir = Join-Path (Get-Location) 'bin'
+    $previousOutputEncoding = $OutputEncoding
+    $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    try {
+        $payload | docker run --rm -i -v "${seedScriptDir}:/dsh-seed:ro" -v "${dshHomeDir}:/seed-home" `
+            --entrypoint node $Image /dsh-seed/seed-dsh-model-settings.mjs --home /seed-home
+    } finally { $OutputEncoding = $previousOutputEncoding }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '[警告] 没能替 DSH 写模型配置。WebUI 的「设置 → 模型」里可以自己加：' -ForegroundColor Yellow
+        Write-Host "       base_url = $ModelBrokerBase/u/<上游名>，API 密钥填占位串 $ModelBrokerPlaceholderKey。" -ForegroundColor Yellow
     }
 }
 
@@ -419,9 +493,17 @@ function Read-BrokerUpstreams {
                 catch { Write-Host $_.Exception.Message -ForegroundColor Red }
             }
         }
+        # 模型 id 决定 WebUI 的模型下拉里能选到什么。内置目录里的上游不用填：安装器
+        # 会沿用 DSH 自带的那份清单；目录里没有的网关，DSH 无从知道它有哪些模型。
+        Write-Host ''
+        Write-Host "$upstreamName 要在 DSH 里启用哪些模型："
+        Write-Host '    deepseek、openai、anthropic、google、nvidia 这类 DSH 内置目录里的上游可以直接回车，'
+        Write-Host '    安装器会沿用目录里的整份模型清单；自建网关请至少填一个模型 id。'
+        $upstreamModels = Ask-Optional '模型 id（多个用逗号分隔）'
+        if (-not $upstreamModels) { $upstreamModels = Get-ModelIdOverride $upstreamName }
         Add-BrokerUpstream -Name $upstreamName -BaseUrl $upstreamBase -Key $upstreamKey `
             -RequestsPerMinute $upstreamRpm -DailyRequestBudget $upstreamDaily `
-            -ApiProfile $upstreamProfile -ExtraHeader $upstreamHeaders
+            -ApiProfile $upstreamProfile -ExtraHeader $upstreamHeaders -ModelIds $upstreamModels
         $upstreamKey = $null
         $addMoreUpstreams = Ask-YesNo '再添加一个上游' $false
     }
@@ -1204,7 +1286,8 @@ if ($DshAction -in @('install','configure')) {
             $upstreamName = ($spec -replace '=.*$','').ToLowerInvariant()
             Add-BrokerUpstream -Name $upstreamName -Key ($spec -replace '^[^=]+=','') `
                 -BaseUrl (Resolve-UpstreamBaseUrl -Name $upstreamName -Explicit '' -Overrides $baseUrlOverrides) `
-                -ApiProfile (Get-ModelApiOverride $upstreamName) -ExtraHeader (Get-ModelHeaderOverrides $upstreamName)
+                -ApiProfile (Get-ModelApiOverride $upstreamName) -ExtraHeader (Get-ModelHeaderOverrides $upstreamName) `
+                -ModelIds (Get-ModelIdOverride $upstreamName)
             $modelBroker = 'on'
         }
         if (@($ModelKey).Count -gt 0) { Show-UnmatchedModelSpecWarning }
@@ -1334,6 +1417,7 @@ switch ($DshAction) {
             Write-Host '==> 容器 root 密码已用 sha512crypt 哈希保存到 data\secret\root.hash，未写入 .env。' -ForegroundColor Yellow
         }
         Write-BrokerConfig $brokerConfigFile
+        Invoke-DshModelSettingsSeed -Image $imageRef -BrokerConfig $brokerConfigFile -Enabled ($modelBroker -eq 'on')
         $pendingEnvFile = Join-Path (Get-Location) ('.env.pending.' + $PID + '.' + [guid]::NewGuid().ToString('N'))
         try {
             if (Test-Path -LiteralPath $envFile) { Copy-Item -LiteralPath $envFile -Destination $pendingEnvFile }
@@ -1386,7 +1470,8 @@ switch ($DshAction) {
             $keyUpstreamName = ($spec -replace '=.*$','').ToLowerInvariant()
             Add-BrokerUpstream -Name $keyUpstreamName -Key ($spec -replace '^[^=]+=','') `
                 -BaseUrl (Resolve-UpstreamBaseUrl -Name $keyUpstreamName -Explicit '' -Overrides $keyBaseOverrides) `
-                -ApiProfile (Get-ModelApiOverride $keyUpstreamName) -ExtraHeader (Get-ModelHeaderOverrides $keyUpstreamName)
+                -ApiProfile (Get-ModelApiOverride $keyUpstreamName) -ExtraHeader (Get-ModelHeaderOverrides $keyUpstreamName) `
+                -ModelIds (Get-ModelIdOverride $keyUpstreamName)
         }
         if (@($ModelKey).Count -gt 0) { Show-UnmatchedModelSpecWarning }
         if ($BrokerUpstreams.Count -eq 0 -and -not $ModelKeysFile) {
@@ -1409,10 +1494,9 @@ switch ($DshAction) {
         & .\dsh.bat start
         if ($LASTEXITCODE -ne 0) { throw '启动失败。密钥已写入 data\broker\keys.json，修好后可以重试。' }
         Assert-ModelBroker
-        Write-Host '==> 密钥代理已就绪，在 DSH 的模型设置里这样填：' -ForegroundColor Green
-        foreach ($name in Get-BrokerUpstreamNames $brokerConfigFile) {
-            Write-Host "      - ${name}: base_url = $ModelBrokerBase/u/$name/v1，api key 填占位串 $ModelBrokerPlaceholderKey" -ForegroundColor Green
-        }
+        Invoke-DshModelSettingsSeed -Image (Get-ComposeEnvValue $envFile 'DSH_IMAGE' '') -BrokerConfig $brokerConfigFile -Enabled $true
+        Write-Host '==> 密钥代理已就绪。DSH 的 settings.yaml 与 .credentials.yaml 都是热加载的，' -ForegroundColor Green
+        Write-Host '    刷新一下 WebUI 就能在「设置 → 模型」里看到这些供应商，密钥框里是占位串。' -ForegroundColor Green
         Write-Host '    容器内那份 skill 文档上的 DSH_MODEL_BROKER 仍显示安装时的值，要等下次重建容器才会刷新——那只是说明文字，不影响代理生效。' -ForegroundColor Yellow
     }
     'update' { & .\dsh.bat update }
@@ -1442,7 +1526,12 @@ if ($DshAction -in @('install','configure')) {
     if ($modelBroker -eq 'on') {
         Write-Host "模型密钥代理：开（dsh-key-broker；真实密钥只在 data\broker\keys.json 与该容器内）" -ForegroundColor Green
         foreach ($name in Get-BrokerUpstreamNames $brokerConfigFile) {
-            Write-Host "  - ${name}: base_url = $ModelBrokerBase/u/$name$(Get-BrokerUpstreamUrlSuffix $name)，api key 填占位串 $ModelBrokerPlaceholderKey" -ForegroundColor Green
+            Write-Host "  - ${name}: DSH 侧 base_url = $ModelBrokerBase/u/$name，密钥是占位串 $ModelBrokerPlaceholderKey" -ForegroundColor Green
+        }
+        if ($NoModelSettingsSeed) {
+            Write-Host '模型设置：未写入（-NoModelSettingsSeed），请在 WebUI 的「设置 → 模型」里自己加供应商' -ForegroundColor Yellow
+        } else {
+            Write-Host '模型设置：已写进 data\dsh\settings.yaml，WebUI 的「设置 → 模型」里可直接选模型' -ForegroundColor Green
         }
         Write-Host '作用范围：只保证密钥字面值不进入 dsh 容器，不限制额度消耗，也不阻止数据外发。' -ForegroundColor Yellow
         Write-Host '  容器里的 Agent 用占位密钥仍可发起请求，因此建议为每个上游设置' -ForegroundColor Yellow

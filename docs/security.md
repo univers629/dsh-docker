@@ -41,14 +41,14 @@
 
 ## 自检
 
-`./dsh.sh verify` 在容器内运行 `verify-dsh-hardening`，共 22 项，覆盖运行 UID、能力集、`no-new-privileges`、特权代理 socket、启动链文件是否 root 独占写（`boot-chain-immutable`）、Supervisor / Nginx 主进程 / 特权代理与 `dsh` 的 UID 分离（`signal-isolation`）、apt 卸载保护是否生效（`apt-removal-guard`）、root 密码状态，以及 `/proc`、`/sys` 与 cgroup 的挂载情况。任一项不合格即以非零码退出。
+`./dsh.sh verify` 在容器内运行 `verify-dsh-hardening`，共 23 项，覆盖运行 UID、能力集、`no-new-privileges`、特权代理 socket、启动链文件是否 root 独占写（`boot-chain-immutable`）、Supervisor / Nginx 主进程 / 特权代理与 `dsh` 的 UID 分离（`signal-isolation`）、apt 卸载保护是否生效（`apt-removal-guard`）、root 密码状态，以及 `/proc`、`/sys` 与 cgroup 的挂载情况。任一项不合格即以非零码退出。
 
 ## 模型密钥代理
 
 `.env` 中 `DSH_MODEL_BROKER=on` 时，安装器叠加 `docker-compose.keys.yml`，额外运行独立容器 `dsh-key-broker`。
 
 - 真实密钥只存在于宿主的 `data/broker/keys.json`（0600，`data/` 已在 `.gitignore` 中）与该容器的内存中。该文件以只读方式挂到 broker 的 `/etc/dsh-broker`，不挂进 DSH 容器；两个容器之间只有 HTTP，没有共享卷。
-- DSH 侧 base_url 配成 `http://dsh-key-broker:8080/u/<上游名>/v1`，api key 填任意占位串，容器内不存在真实密钥字面值。
+- DSH 侧 base_url 配成 `http://dsh-key-broker:8080/u/<上游名>`，api key 填任意占位串，容器内不存在真实密钥字面值。版本段（`/v1`、`/v1beta`）属于 `keys.json` 里的上游地址，客户端 SDK 只往后接相对路径，两边都写会变成 `/v1/v1/responses`。安装器按这个格式自己写进 DSH 配置，见下文「写进 DSH 的模型配置」。
 - 代理会剥掉客户端送来的全部认证材料（`authorization`、`api-key`、`x-api-key`、`x-goog-api-key`、`cookie` 等）后再注入真实密钥，因此在容器内伪造或覆盖认证头无效。
 - 上游主机固定由 `keys.json` 的 `baseUrl` 决定，客户端只能选择上游名与被允许的路径。`baseUrl` 必须是 https，不允许内嵌凭据，也不允许指向环回、私网或链路本地地址。
 - 路径前缀白名单：默认只放行常见的 OpenAI / Anthropic / Gemini 兼容端点（`/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models` 等），账号管理与文件上传类接口不放行。路径先归一化再判定，`%2e%2e` 之类的穿越写法返回 400。
@@ -65,13 +65,15 @@
 
 `--model-api NAME=PROFILE`（PowerShell：`-ModelApi`）决定认证头与放行的端点，未指定时按上游名推断：
 
-| PROFILE | 认证头 | 放行端点 | 客户端 base_url 结尾 |
+| PROFILE | 认证头 | 放行端点 | 写进 DSH 的协议 |
 | --- | --- | --- | --- |
-| `any`（默认） | `authorization: Bearer {key}` | broker 默认前缀集合（chat/completions、responses、embeddings、models 等） | `/v1` |
-| `responses` | `authorization: Bearer {key}` | 只有 `/v1/responses` 与 `/v1/models`（含去掉 `/v1` 的同名变体） | `/v1` |
-| `chat` | `authorization: Bearer {key}` | 只有 `/v1/chat/completions` 与 `/v1/models`（含去掉 `/v1` 的同名变体） | `/v1` |
-| `messages` | `x-api-key: {key}` | 只有 `/v1/messages` 与 `/v1/models`（含去掉 `/v1` 的同名变体），自动带 `anthropic-version` | 无 |
-| `gemini` | `x-goog-api-key: {key}` | 只有 `/v1beta/models` | 无 |
+| `any`（默认） | `authorization: Bearer {key}` | broker 默认前缀集合（chat/completions、responses、embeddings、models 等） | `openai-completions` |
+| `responses` | `authorization: Bearer {key}` | 只有 `/v1/responses` 与 `/v1/models`（含去掉 `/v1` 的同名变体） | `openai-responses` |
+| `chat` | `authorization: Bearer {key}` | 只有 `/v1/chat/completions` 与 `/v1/models`（含去掉 `/v1` 的同名变体） | `openai-completions` |
+| `messages` | `x-api-key: {key}` | 只有 `/v1/messages` 与 `/v1/models`（含去掉 `/v1` 的同名变体），自动带 `anthropic-version` | `anthropic-messages` |
+| `gemini` | `x-goog-api-key: {key}` | 只有 `/models` 与 `/v1beta/models` | 仅内置目录路由 |
+
+最后一列是安装器写进 DSH 配置时声明的协议。DSH 的自定义路由只支持前三种，Gemini 协议只存在于内置目录路由上，因此要用 Gemini 模型时上游名必须取 `google`。
 
 `--model-header NAME=HEADER=VALUE`（PowerShell：`-ModelHeader`，可重复）写入 `extraHeaders`，用于上游要求的固定请求头，例如 Codex 那套 `originator` / `version` 与自定义 `User-Agent`：
 
@@ -111,7 +113,25 @@
 }
 ```
 
-`requestsPerMinute` 与 `dailyRequestBudget` 缺省或为 `0` 表示不限，此时代理只防密钥外泄、不提供额度保护，建议显式设置（例如 `requestsPerMinute: 60`，每日配额按实际用量设定，撞到 429 再调高）。`maxRequestBytes` 缺省为 8 MiB。`headerName` 与 `headerTemplate` 默认是 `authorization` 与 `Bearer {key}`，只有使用其他认证头的上游需要显式设置。`allowedPathPrefixes` 缺省为 broker 内置的前缀集合，显式给出即为只放行这些前缀。客户端侧的 `base_url` 是 `http://dsh-key-broker:8080/u/<上游名>` 加上表中的结尾，api key 填占位串 `dsh-broker-placeholder`。
+`requestsPerMinute` 与 `dailyRequestBudget` 缺省或为 `0` 表示不限，此时代理只防密钥外泄、不提供额度保护，建议显式设置（例如 `requestsPerMinute: 60`，每日配额按实际用量设定，撞到 429 再调高）。`maxRequestBytes` 缺省为 8 MiB。`headerName` 与 `headerTemplate` 默认是 `authorization` 与 `Bearer {key}`，只有使用其他认证头的上游需要显式设置。`allowedPathPrefixes` 缺省为 broker 内置的前缀集合，显式给出即为只放行这些前缀。客户端侧的 `base_url` 是 `http://dsh-key-broker:8080/u/<上游名>`，不带版本段，api key 填占位串 `dsh-broker-placeholder`。
+
+### 写进 DSH 的模型配置
+
+密钥搬进代理之后，DSH 侧需要的只是「指向代理的 base_url」和「一个占位密钥」，两样都不是秘密。安装器直接按 DSH 官方格式写好，不需要在 WebUI 里手抄：
+
+| 文件 | 写入内容 |
+| --- | --- |
+| `data/dsh/settings.yaml` | `llm-pi-ai.providers.<上游名>` 的 `baseURL` / `apiKeyEnv`，必要时补 `api` 与 `models`；`agent-default-model`（仅在还没设过时） |
+| `data/dsh/.credentials.yaml` | `refs.<上游名大写>_API_KEY` = 占位串 `dsh-broker-placeholder`（0600） |
+
+- 凭据引用名与 WebUI 自己派生的一致（上游名大写、非字母数字换成下划线、加 `_API_KEY`），所以之后在页面上改密钥改的是同一个引用。
+- 两份文件 DSH 都在热加载，写完刷新页面即可，不重启容器。
+- 上游名命中 DSH 内置模型目录（`deepseek`、`openai`、`anthropic`、`google`、`nvidia`、`openrouter`、`groq`、`xai`、`moonshotai` 等）时，协议和整份模型清单由目录提供，安装器只写 `baseURL` 与 `apiKeyEnv`，WebUI 里立刻有一整排可选模型。
+- 目录里没有的自建网关必须显式给模型 id：向导会问，非交互用 `--model-id NAME=ID[,ID]`（PowerShell：`-ModelId`）。少了它 DSH 会拒绝整个 `llm-pi-ai` 命名空间，结果是所有供应商一起消失，所以安装器在写入前先用 DSH 自己的校验函数过一遍，不通过就一个字都不写，并在输出里说明原因。
+- `baseURL` 与 `apiKeyEnv` 每次重新配置都按当前部署重写（改了地址不重写就会绕开代理）；`api`、`models`、`agent-default-model` 和已经有值的凭据引用只在缺失时补，不覆盖用户在 WebUI 里的选择。
+- `--no-model-settings-seed`（PowerShell：`-NoModelSettingsSeed`）关闭这一步，供应商与模型改为在 WebUI 里自行添加。
+
+合并动作在镜像里的 node 中执行（那里才有 yaml 库、DSH 内置模型目录和校验函数），配置经 stdin 传入，因此模型密钥和上游清单都不会出现在 `ps` 里。
 
 ### 补填密钥
 

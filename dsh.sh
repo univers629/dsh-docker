@@ -216,8 +216,9 @@ case "$ACTION" in
       # 服务的定义，所以别让用户去手写 JSON 或重装——安装器有专门的动作干这件事。
       echo "启用方法：在这个目录里运行 ./install.sh model-key，按提示填上游名字、base_url 和密钥。"
       echo "它只写 data/broker/keys.json（0600）、翻 .env 里的开关、再新增 dsh-key-broker 容器，"
-      echo "不会重建 dsh，容器里 apt 装过的东西不会丢。之后把 DSH 模型设置里的 base_url 改成"
-      echo "http://dsh-key-broker:8080/u/<上游名字>/v1，api key 填任意占位串即可。"
+      echo "不会重建 dsh，容器里 apt 装过的东西不会丢。它还会把供应商按 DSH 官方格式写进"
+      echo "data/dsh/settings.yaml（base_url = http://dsh-key-broker:8080/u/<上游名字>，密钥是占位串），"
+      echo "settings.yaml 是热加载的，刷新 WebUI 就能在「设置 → 模型」里选模型。"
       exit 0
     fi
     require_sidecar dsh-key-broker

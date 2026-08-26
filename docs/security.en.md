@@ -41,14 +41,14 @@ Only removal is restricted: installing, reinstalling, and querying these package
 
 ## Self-check
 
-`./dsh.sh verify` runs `verify-dsh-hardening` inside the container: 22 checks covering the run UID, capability set, `no-new-privileges`, the privileged-helper socket, root-only write access to the boot chain (`boot-chain-immutable`), UID separation between the Supervisor / Nginx master / privileged helper and `dsh` (`signal-isolation`), whether the apt removal guard is in force (`apt-removal-guard`), root-password state, and the `/proc`, `/sys`, and cgroup mounts. Any failing check exits non-zero.
+`./dsh.sh verify` runs `verify-dsh-hardening` inside the container: 23 checks covering the run UID, capability set, `no-new-privileges`, the privileged-helper socket, root-only write access to the boot chain (`boot-chain-immutable`), UID separation between the Supervisor / Nginx master / privileged helper and `dsh` (`signal-isolation`), whether the apt removal guard is in force (`apt-removal-guard`), root-password state, and the `/proc`, `/sys`, and cgroup mounts. Any failing check exits non-zero.
 
 ## Model key broker
 
 When `DSH_MODEL_BROKER=on` in `.env`, the installer overlays `docker-compose.keys.yml` and runs the separate `dsh-key-broker` container.
 
 - Real keys exist only in `data/broker/keys.json` on the host (0600; `data/` is in `.gitignore`) and in that container's memory. The file is mounted read-only at `/etc/dsh-broker` in the broker and is never mounted into the DSH container; the two containers share nothing but HTTP.
-- DSH is configured with base_url `http://dsh-key-broker:8080/u/<upstream>/v1` and any placeholder api key, so the real key literal does not exist inside the container.
+- DSH is configured with base_url `http://dsh-key-broker:8080/u/<upstream>` and any placeholder api key, so the real key literal does not exist inside the container. The version segment (`/v1`, `/v1beta`) belongs to the upstream address in `keys.json`; client SDKs only append relative paths, so writing it on both sides produces `/v1/v1/responses`. The installer writes this configuration for you — see "Model settings written into DSH" below.
 - The broker strips every credential the client sends (`authorization`, `api-key`, `x-api-key`, `x-goog-api-key`, `cookie`, and so on) before injecting the real key, so forging or overriding auth headers inside the container has no effect.
 - The upstream host is fixed by `baseUrl` in `keys.json`; the client can only choose an upstream name and an allowed path. `baseUrl` must be https, must not embed credentials, and must not point at loopback, private, or link-local addresses.
 - Path prefix allow list: only common OpenAI / Anthropic / Gemini compatible endpoints (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/models`, and similar) are allowed; account management and file upload endpoints are not. Paths are normalized before the decision, and traversal forms such as `%2e%2e` return 400.
@@ -65,13 +65,15 @@ Interactive installs read each upstream key without echo and also ask for the AP
 
 `--model-api NAME=PROFILE` (PowerShell: `-ModelApi`) picks the auth header and the allowed endpoints; without it the profile is inferred from the upstream name:
 
-| PROFILE | Auth header | Allowed endpoints | base_url suffix |
+| PROFILE | Auth header | Allowed endpoints | Protocol written into DSH |
 | --- | --- | --- | --- |
-| `any` (default) | `authorization: Bearer {key}` | the broker's default prefix set (chat/completions, responses, embeddings, models, ...) | `/v1` |
-| `responses` | `authorization: Bearer {key}` | `/v1/responses` and `/v1/models` only (plus the variants without `/v1`) | `/v1` |
-| `chat` | `authorization: Bearer {key}` | `/v1/chat/completions` and `/v1/models` only (plus the variants without `/v1`) | `/v1` |
-| `messages` | `x-api-key: {key}` | `/v1/messages` and `/v1/models` only (plus the variants without `/v1`), with `anthropic-version` attached | none |
-| `gemini` | `x-goog-api-key: {key}` | `/v1beta/models` only | none |
+| `any` (default) | `authorization: Bearer {key}` | the broker's default prefix set (chat/completions, responses, embeddings, models, ...) | `openai-completions` |
+| `responses` | `authorization: Bearer {key}` | `/v1/responses` and `/v1/models` only (plus the variants without `/v1`) | `openai-responses` |
+| `chat` | `authorization: Bearer {key}` | `/v1/chat/completions` and `/v1/models` only (plus the variants without `/v1`) | `openai-completions` |
+| `messages` | `x-api-key: {key}` | `/v1/messages` and `/v1/models` only (plus the variants without `/v1`), with `anthropic-version` attached | `anthropic-messages` |
+| `gemini` | `x-goog-api-key: {key}` | `/models` and `/v1beta/models` only | built-in catalog routes only |
+
+The last column is the protocol the installer declares in the DSH configuration. Custom DSH routes support only the first three; the Gemini protocol exists only on built-in catalog routes, so an upstream that should serve Gemini models must be named `google`.
 
 `--model-header NAME=HEADER=VALUE` (PowerShell: `-ModelHeader`, repeatable) writes `extraHeaders` for upstreams that require fixed headers, such as the Codex `originator` / `version` pair and a custom `User-Agent`:
 
@@ -111,7 +113,25 @@ The broker applies these headers when forwarding, overriding any client header o
 }
 ```
 
-Omitting `requestsPerMinute` and `dailyRequestBudget` or setting them to `0` means unlimited, in which case the broker only prevents key exfiltration and provides no quota protection. Setting them explicitly is recommended (`requestsPerMinute: 60` is a reasonable start; size the daily budget from real usage and raise it after hitting 429). `maxRequestBytes` defaults to 8 MiB. `headerName` and `headerTemplate` default to `authorization` and `Bearer {key}`; only upstreams using a different auth header need them. `allowedPathPrefixes` defaults to the broker's built-in prefix set; setting it restricts forwarding to exactly those prefixes. On the client side, `base_url` is `http://dsh-key-broker:8080/u/<upstream>` plus the suffix from the table above, and the api key field takes the placeholder `dsh-broker-placeholder`.
+Omitting `requestsPerMinute` and `dailyRequestBudget` or setting them to `0` means unlimited, in which case the broker only prevents key exfiltration and provides no quota protection. Setting them explicitly is recommended (`requestsPerMinute: 60` is a reasonable start; size the daily budget from real usage and raise it after hitting 429). `maxRequestBytes` defaults to 8 MiB. `headerName` and `headerTemplate` default to `authorization` and `Bearer {key}`; only upstreams using a different auth header need them. `allowedPathPrefixes` defaults to the broker's built-in prefix set; setting it restricts forwarding to exactly those prefixes. On the client side, `base_url` is `http://dsh-key-broker:8080/u/<upstream>` with no version segment, and the api key field takes the placeholder `dsh-broker-placeholder`.
+
+### Model settings written into DSH
+
+Once the real keys live in the broker, all DSH needs is a base_url pointing at the broker and a placeholder key — neither is a secret. The installer writes both in DSH's own format, so nothing has to be retyped in the WebUI:
+
+| File | Contents |
+| --- | --- |
+| `data/dsh/settings.yaml` | `baseURL` / `apiKeyEnv` under `llm-pi-ai.providers.<upstream>`, plus `api` and `models` when needed, and `agent-default-model` when it is not set yet |
+| `data/dsh/.credentials.yaml` | `refs.<UPSTREAM>_API_KEY` = the placeholder `dsh-broker-placeholder` (0600) |
+
+- The credential reference name matches the one the WebUI derives itself (upstream name uppercased, non-alphanumerics to underscores, `_API_KEY` suffix), so editing the key in the UI later edits the same reference.
+- DSH hot-reloads both files, so a page refresh is enough; no container restart.
+- When the upstream name matches DSH's built-in model catalog (`deepseek`, `openai`, `anthropic`, `google`, `nvidia`, `openrouter`, `groq`, `xai`, `moonshotai`, and others), the catalog supplies the protocol and the full model list, so the installer writes only `baseURL` and `apiKeyEnv` and the WebUI immediately offers a full model dropdown.
+- A self-hosted gateway that is not in the catalog must declare its model ids: the wizard asks, and automation uses `--model-id NAME=ID[,ID]` (PowerShell: `-ModelId`). Without them DSH rejects the whole `llm-pi-ai` namespace and every provider disappears, so the installer validates the section with DSH's own checker first and writes nothing when it fails, printing the reason instead.
+- `baseURL` and `apiKeyEnv` are rewritten on every reconfigure to match the current deployment (a stale base_url would bypass the broker). `api`, `models`, `agent-default-model`, and credential references that already hold a value are only filled in when missing, never overwritten.
+- `--no-model-settings-seed` (PowerShell: `-NoModelSettingsSeed`) skips this step and leaves providers and models to be added in the WebUI.
+
+The merge runs in the image's node (that is where the yaml library, the built-in model catalog, and DSH's validator live) and receives its input on stdin, so neither the keys nor the upstream list appear in `ps`.
 
 ### Adding keys later
 

@@ -157,11 +157,12 @@ system layer.
 
 When DSH_MODEL_BROKER is on, the real model API keys are not in this container
 at all. They exist only on the host and inside the separate dsh-key-broker
-container. Configure a provider with base_url
-<DSH_MODEL_BROKER_BASE>/u/<upstream-name>/v1 and any placeholder string as the
-api key, for example dsh-broker-placeholder: the broker removes whatever
-credential the client sends and injects
-the real one. Finding no key is the design, not a misconfiguration. Do not
+container, and the provider entries are already configured with base_url
+<DSH_MODEL_BROKER_BASE>/u/<upstream-name> and a placeholder api key such as
+dsh-broker-placeholder: the broker removes whatever credential the client sends
+and injects the real one. The version segment belongs to the broker's own
+upstream address, so do not append /v1 to that base_url.
+Finding no key is the design, not a misconfiguration. Do not
 search files, environment variables, or settings for one, and do not ask the
 user to paste a key into the container. The broker also enforces a per-minute
 rate limit and a UTC daily request budget per upstream and forwards only GET
