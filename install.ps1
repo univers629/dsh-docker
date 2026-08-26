@@ -14,6 +14,8 @@ param(
     [switch]$NoRootPassword,
     [string[]]$ModelKey = @(),
     [string[]]$ModelBaseUrl = @(),
+    [string[]]$ModelApi = @(),
+    [string[]]$ModelHeader = @(),
     [string]$ModelKeysFile = '',
     [switch]$NoModelBroker,
     [ValidateSet('','open','allowlist')]
@@ -43,6 +45,8 @@ $ModelBrokerPlaceholderKey = 'dsh-broker-placeholder'
 if (-not $ModelKeysFile -and $env:DSH_MODEL_KEYS_FILE) { $ModelKeysFile = $env:DSH_MODEL_KEYS_FILE }
 # 收集到的上游先留在内存里，写盘之后立刻清空（和 $rootPassword 一样的处理）。
 $BrokerUpstreams = New-Object System.Collections.ArrayList
+# 上游名 → API 形态。摘要要靠它决定 base_url 末尾带不带 /v1。
+$BrokerProfiles = @{}
 $composeFileArgs = @('-f','docker-compose.yml')
 
 # ---------------------------------------------------------------------------
@@ -86,19 +90,173 @@ function Resolve-UpstreamBaseUrl {
     return $url
 }
 
+# API 形态（profile）→ 认证头与放行的路径前缀。口径必须和 install.sh 的
+# broker_profile_* 完全一致，否则两个平台会写出不同的 keys.json。
+function Get-BrokerProfileHeaderName {
+    param([string]$Profile)
+    switch ($Profile) {
+        'messages' { return 'x-api-key' }
+        'gemini' { return 'x-goog-api-key' }
+        default { return 'authorization' }
+    }
+}
+
+function Get-BrokerProfileHeaderTemplate {
+    param([string]$Profile)
+    if ($Profile -in @('messages','gemini')) { return '{key}' }
+    return 'Bearer {key}'
+}
+
+# 收窄到这个形态真正会用到的端点。代理本来就默认拒绝名单外的路径，选形态只是再紧一层。
+function Get-BrokerProfilePath {
+    param([string]$Profile)
+    switch ($Profile) {
+        'chat' { return @('/v1/chat/completions','/chat/completions','/v1/models','/models') }
+        'responses' { return @('/v1/responses','/responses','/v1/models','/models') }
+        'messages' { return @('/v1/messages','/messages','/v1/models','/models') }
+        'gemini' { return @('/v1beta/models') }
+        default { return @() }
+    }
+}
+
+# Anthropic 缺 anthropic-version 会被上游直接 400，所以这个头跟着形态一起给。
+function Get-BrokerProfileHeader {
+    param([string]$Profile)
+    if ($Profile -eq 'messages') { return [ordered]@{ 'anthropic-version' = '2023-06-01' } }
+    return [ordered]@{}
+}
+
+# WebUI 里该填哪个 base_url：OpenAI 系客户端自己会补 /chat/completions 或 /responses，
+# 所以代理侧要留出 /v1；Anthropic 与 Gemini 的路径自带版本号，不能再多一层。
+function Get-BrokerProfileUrlSuffix {
+    param([string]$Profile)
+    if ($Profile -in @('messages','gemini')) { return '' }
+    return '/v1'
+}
+
+# 没显式选形态时按上游名猜一个。猜错也只是路径前缀宽一点，不会写错认证头。
+function Get-BrokerDefaultProfile {
+    param([string]$Name)
+    switch ($Name) {
+        'anthropic' { return 'messages' }
+        'claude' { return 'messages' }
+        'gemini' { return 'gemini' }
+        'google' { return 'gemini' }
+        'googleai' { return 'gemini' }
+        default { return 'any' }
+    }
+}
+
+function Test-BrokerProfile {
+    param([string]$Profile)
+    if ($Profile -notin @('any','chat','responses','messages','gemini')) {
+        throw "未知的 API 形态：$Profile（可选 any、chat、responses、messages、gemini）"
+    }
+}
+
+# 认证头由 profile 决定，而客户端自带的认证材料会被 broker 剥掉。额外请求头因此不允许
+# 覆盖这些名字：那等于让一份配置悄悄绕过密钥注入。逐跳头也拦掉，转发时它们本来就会被丢。
+$BrokerForbiddenHeaders = @(
+    'authorization','proxy-authorization','api-key','x-api-key','x-goog-api-key','x-auth-token',
+    'cookie','set-cookie','host','forwarded','x-forwarded-for','x-forwarded-host','x-forwarded-proto',
+    'x-real-ip','content-length','connection','keep-alive','transfer-encoding','upgrade','te','trailer'
+)
+
+# 返回归一化后的 name=value；调用方自己决定是报错还是重问。
+function Format-BrokerHeader {
+    param([string]$Spec)
+    if ($Spec -notmatch '^[^=]+=.+$') { throw "请求头需要 name=value 格式，两边都不能为空：$Spec" }
+    $headerName = ($Spec -replace '=.*$','').ToLowerInvariant()
+    $headerValue = $Spec -replace '^[^=]+=',''
+    if ($headerName -notmatch '^[a-z0-9][a-z0-9-]*$') { throw "不是合法的 HTTP 头名：$headerName" }
+    if ($headerName -in $BrokerForbiddenHeaders) { throw "请求头 $headerName 由密钥代理自己管理，不能在这里覆盖。" }
+    return "$headerName=$headerValue"
+}
+
+# -ModelApi / -ModelHeader 的解析。参数校验单独做一遍，否则报错时机取决于上游出现的
+# 顺序，很难看懂；查询时按上游名小写匹配，和 keys.json 的命名规则一致。
+function Test-ModelSpecFormat {
+    foreach ($spec in @($script:ModelApi)) {
+        if ($spec -notmatch '^[^=]+=.+$') { throw '-ModelApi 需要 NAME=PROFILE 格式。' }
+        Test-BrokerProfile (($spec -replace '^[^=]+=','').ToLowerInvariant())
+    }
+    foreach ($spec in @($script:ModelHeader)) {
+        if ($spec -notmatch '^[^=]+=[^=]+=.+$') { throw '-ModelHeader 需要 NAME=HEADER=VALUE 格式。' }
+        Format-BrokerHeader ($spec -replace '^[^=]+=','') | Out-Null
+    }
+}
+
+function Get-ModelApiOverride {
+    param([string]$Name)
+    foreach ($spec in @($script:ModelApi)) {
+        if (($spec -replace '=.*$','').ToLowerInvariant() -eq $Name) {
+            return ($spec -replace '^[^=]+=','').ToLowerInvariant()
+        }
+    }
+    return ''
+}
+
+# 同一个上游可以给多条 -ModelHeader，逗号运算符保证只有一条时也返回数组。
+function Get-ModelHeaderOverrides {
+    param([string]$Name)
+    $pairs = @()
+    foreach ($spec in @($script:ModelHeader)) {
+        if (($spec -replace '=.*$','').ToLowerInvariant() -ne $Name) { continue }
+        $pairs += (Format-BrokerHeader ($spec -replace '^[^=]+=',''))
+    }
+    return ,$pairs
+}
+
+# -ModelApi / -ModelHeader 挂在一个没给密钥的上游名上时静默丢掉最难查，所以点出来。
+function Show-UnmatchedModelSpecWarning {
+    foreach ($spec in @(@($script:ModelApi) + @($script:ModelHeader))) {
+        if (-not $spec) { continue }
+        $specName = ($spec -replace '=.*$','').ToLowerInvariant()
+        if (@($BrokerUpstreams | Where-Object { $_.name -eq $specName }).Count -gt 0) { continue }
+        Write-Host "[警告] 没有名为 $specName 的上游，对应的 -ModelApi / -ModelHeader 不会生效。" -ForegroundColor Yellow
+    }
+}
+
+# 摘要要告诉人 WebUI 里到底填什么，而这取决于上游的 API 形态。内存里没有这个上游时
+# （例如选了「保留现有配置」，名字是从 keys.json 里捞的）退回 /v1，那是最常见的形态。
+function Get-BrokerUpstreamUrlSuffix {
+    param([string]$Name)
+    if ($BrokerProfiles.ContainsKey($Name)) { return (Get-BrokerProfileUrlSuffix $BrokerProfiles[$Name]) }
+    return '/v1'
+}
+
 function Add-BrokerUpstream {
-    param([string]$Name, [string]$BaseUrl, [string]$Key, [int]$RequestsPerMinute = 0, [int]$DailyRequestBudget = 0)
+    param(
+        [string]$Name, [string]$BaseUrl, [string]$Key,
+        [int]$RequestsPerMinute = 0, [int]$DailyRequestBudget = 0,
+        [string]$ApiProfile = '', [string[]]$ExtraHeader = @()
+    )
     $normalized = $Name.ToLowerInvariant()
     if ($normalized -notmatch '^[a-z0-9_-]{1,32}$') { throw "上游名字只允许小写字母、数字、下划线和短横线，且不超过 32 个字符：$normalized" }
     if (-not $Key) { throw "上游 $normalized 的密钥为空。" }
+    if (-not $ApiProfile) { $ApiProfile = Get-BrokerDefaultProfile $normalized }
+    Test-BrokerProfile $ApiProfile
     $entry = [ordered]@{ name = $normalized; baseUrl = $BaseUrl; key = $Key }
-    if ($normalized -eq 'anthropic') {
-        # Anthropic 不用 Authorization: Bearer，密钥走 x-api-key，而且缺 anthropic-version
-        # 会被上游直接 400。这两条不是默认值，必须显式写进配置。
-        $entry['headerName'] = 'x-api-key'
-        $entry['headerTemplate'] = '{key}'
-        $entry['extraHeaders'] = [ordered]@{ 'anthropic-version' = '2023-06-01' }
+    # 只有偏离 broker 默认值时才写出来：把默认值抄进配置只会在 broker 改默认值之后
+    # 变成静默的行为分叉。
+    $headerName = Get-BrokerProfileHeaderName $ApiProfile
+    $headerTemplate = Get-BrokerProfileHeaderTemplate $ApiProfile
+    if ($headerName -ne 'authorization' -or $headerTemplate -ne 'Bearer {key}') {
+        $entry['headerName'] = $headerName
+        $entry['headerTemplate'] = $headerTemplate
     }
+    $profilePaths = @(Get-BrokerProfilePath $ApiProfile)
+    if ($profilePaths.Count -gt 0) { $entry['allowedPathPrefixes'] = $profilePaths }
+    # 形态自带的头（例如 anthropic-version）在前，用户自己填的在后：同名时以用户的为准。
+    $headers = Get-BrokerProfileHeader $ApiProfile
+    foreach ($spec in @($ExtraHeader)) {
+        if (-not $spec) { continue }
+        $pair = Format-BrokerHeader $spec
+        $headers[($pair -replace '=.*$','')] = ($pair -replace '^[^=]+=','')
+    }
+    if ($headers.Count -gt 0) { $entry['extraHeaders'] = $headers }
+    # profile 本身不写进 keys.json（那不是 broker 的字段），只留在内存里供摘要用。
+    $BrokerProfiles[$normalized] = $ApiProfile
     # 可选字段能省就省：把 broker 的默认值抄一份进 keys.json，只会在 broker 改默认值之后
     # 变成静默的行为分叉，也让人更难看出哪些限制是自己真的设过的。
     if ($RequestsPerMinute -gt 0) { $entry['requestsPerMinute'] = $RequestsPerMinute }
@@ -202,6 +360,28 @@ function Read-BrokerUpstreams {
             try { Test-UpstreamBaseUrl $candidate; $upstreamBase = $candidate }
             catch { Write-Host $_.Exception.Message -ForegroundColor Red }
         }
+        # 形态决定注入哪个认证头、放行哪些端点，也决定 WebUI 里 base_url 要不要带 /v1。
+        # 默认值按上游名猜，绝大多数情况直接回车就对。
+        $upstreamProfile = Get-BrokerDefaultProfile $upstreamName
+        Write-Host ''
+        Write-Host "$upstreamName 走哪种 API："
+        Write-Host '1) OpenAI 兼容，不额外收窄端点（chat/completions、responses、embeddings 都放行）'
+        Write-Host '2) 只用 Responses（Codex 那类客户端）'
+        Write-Host '3) 只用 Chat Completions'
+        Write-Host '4) Anthropic Messages（认证头 x-api-key，自动带 anthropic-version）'
+        Write-Host '5) Gemini 原生（认证头 x-goog-api-key，端点 /v1beta/models）'
+        $profileDefault = switch ($upstreamProfile) { 'messages' { '4' } 'gemini' { '5' } default { '1' } }
+        $upstreamProfile = ''
+        while (-not $upstreamProfile) {
+            switch (Ask '请选择' $profileDefault) {
+                '1' { $upstreamProfile = 'any' }
+                '2' { $upstreamProfile = 'responses' }
+                '3' { $upstreamProfile = 'chat' }
+                '4' { $upstreamProfile = 'messages' }
+                '5' { $upstreamProfile = 'gemini' }
+                default { Write-Host '请输入 1 到 5。' -ForegroundColor Red }
+            }
+        }
         $upstreamKey = ''
         while (-not $upstreamKey) {
             $candidate = Ask-Secret "$upstreamName 的 API 密钥（不回显，留空 = 跳过）"
@@ -227,8 +407,21 @@ function Read-BrokerUpstreams {
             $candidate = Ask "$upstreamName 每日请求配额（0 = 不限）" '0'
             if ($candidate -match '^\d+$') { $upstreamDaily = [int]$candidate } else { Write-Host '请输入非负整数。' -ForegroundColor Red }
         }
+        # 有些上游（或客户端协议）要求固定的请求头，例如 Codex 那套 originator / version，
+        # 或者上游按 User-Agent 做识别。放在代理这一侧配，容器里改不了，客户端也不用管。
+        $upstreamHeaders = @()
+        if (Ask-YesNo "$upstreamName 需要固定请求头（originator、version、User-Agent 之类）" $false) {
+            Write-Host '一行一个 name=value，回车结束。示例：user-agent=codex_cli_rs/0.101.0'
+            while ($true) {
+                $candidate = Ask-Optional '请求头'
+                if (-not $candidate) { break }
+                try { $upstreamHeaders += (Format-BrokerHeader $candidate) }
+                catch { Write-Host $_.Exception.Message -ForegroundColor Red }
+            }
+        }
         Add-BrokerUpstream -Name $upstreamName -BaseUrl $upstreamBase -Key $upstreamKey `
-            -RequestsPerMinute $upstreamRpm -DailyRequestBudget $upstreamDaily
+            -RequestsPerMinute $upstreamRpm -DailyRequestBudget $upstreamDaily `
+            -ApiProfile $upstreamProfile -ExtraHeader $upstreamHeaders
         $upstreamKey = $null
         $addMoreUpstreams = Ask-YesNo '再添加一个上游' $false
     }
@@ -402,6 +595,16 @@ function Ask {
     param([string]$Message, [string]$Default)
     $answer = Read-Host "$Message [$Default]"
     if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
+    return $answer.Trim()
+}
+
+# 允许留空的提问：回车返回空串，用来收「可选值」和「填到不想填为止」的循环。
+# 与 Ask 的区别是空串是合法答案，所以不能回落到默认值。
+function Ask-Optional {
+    param([string]$Message, [string]$Default = '')
+    $hint = if ($Default) { "[当前 $Default，回车表示清空]" } else { '（可留空）' }
+    $answer = Read-Host "$Message$hint"
+    if ($null -eq $answer) { return '' }
     return $answer.Trim()
 }
 
@@ -986,6 +1189,7 @@ if ($DshAction -in @('install','configure')) {
         if ($spec -notmatch '^[^=]+=.+$') { throw '-ModelBaseUrl 需要 NAME=URL 格式。' }
         $baseUrlOverrides[($spec -replace '=.*$','').ToLowerInvariant()] = ($spec -replace '^[^=]+=','')
     }
+    Test-ModelSpecFormat
     if ($NoModelBroker) {
         $modelBroker = 'off'
         Clear-BrokerConfig $brokerConfigFile
@@ -999,9 +1203,11 @@ if ($DshAction -in @('install','configure')) {
             if ($spec -notmatch '^[^=]+=.+$') { throw '-ModelKey 需要 NAME=KEY 格式，且两边都不能为空。' }
             $upstreamName = ($spec -replace '=.*$','').ToLowerInvariant()
             Add-BrokerUpstream -Name $upstreamName -Key ($spec -replace '^[^=]+=','') `
-                -BaseUrl (Resolve-UpstreamBaseUrl -Name $upstreamName -Explicit '' -Overrides $baseUrlOverrides)
+                -BaseUrl (Resolve-UpstreamBaseUrl -Name $upstreamName -Explicit '' -Overrides $baseUrlOverrides) `
+                -ApiProfile (Get-ModelApiOverride $upstreamName) -ExtraHeader (Get-ModelHeaderOverrides $upstreamName)
             $modelBroker = 'on'
         }
+        if (@($ModelKey).Count -gt 0) { Show-UnmatchedModelSpecWarning }
         if (-not $interactive) {
             # 非交互的默认行为必须和以前完全一样：既没给密钥、盘上也没有配置，就保持 off，
             # 否则一条不带新参数的老安装命令会突然多起来一个容器。
@@ -1041,18 +1247,19 @@ if ($DshAction -in @('install','configure')) {
     # ---- 出站模式 ----
     if ($interactive -and -not $Egress) {
         Write-Host '容器出站网络：'
-        Write-Host '1) open（默认，容器可直接访问任意外网）'
-        Write-Host '2) allowlist（只放行白名单域名，其余全部拒绝）'
-        Write-Host '    选 2 之后会发生这些变化，请先确认能接受：'
-        Write-Host '    - dsh 容器不再直连外网，所有出站流量只能经过 dsh-egress 正向代理；'
-        Write-Host '    - 宿主的 3080 改由 dsh-ingress 容器发布（它在 dsh-private 网络上顶替 dsh 这个'
-        Write-Host '      名字，所以 DPanel 那边写的 http://dsh:3080 不用改）；'
-        Write-Host '    - 白名单以外的域名，apt / npm / pip / git 全都会拿到 403。'
+        Write-Host '1) open（默认）：容器可访问任意外网地址。'
+        Write-Host '2) allowlist：容器只能经 dsh-egress 代理出网，白名单外的域名返回 403。'
+        Write-Host '    内置白名单：Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，'
+        Write-Host '    足够 apt / pip / npm / git 正常工作；其他域名需要在下一问里补充。'
+        Write-Host '    影响范围：Agent 访问白名单外的网页、搜索接口、第三方下载站会被拒绝。'
+        Write-Host '    不受影响：模型请求（dsh-key-broker 独立出网）；宿主 3080 改由 dsh-ingress'
+        Write-Host '    发布，反向代理仍写 http://dsh:3080。'
         $egressDefault = if ($egressMode -eq 'allowlist') { '2' } else { '1' }
         $egressMode = switch (Ask '请选择' $egressDefault) { '2' {'allowlist'}; default {'open'} }
     }
     if ($egressMode -eq 'allowlist' -and $interactive -and $EgressAllow.Count -eq 0) {
-        Write-Host '    代理内置的白名单已经覆盖 Debian / npm / PyPI / GitHub / uv 这些源，留空就只用它。'
+        Write-Host '    填写的域名会追加在内置白名单之后（内置的软件源始终放行），留空表示只用内置白名单。'
+        Write-Host '    Agent 需要访问的网页或 API 域名也填在这里，例如 www.google.com,*.wikipedia.org。'
         $hint = if ($egressAllowed) { "[当前 $egressAllowed，回车表示清空]" } else { '（可留空）' }
         $egressAllowed = (Read-Host "额外放行的域名（逗号分隔，支持 *.example.com）$hint").Trim()
     }
@@ -1171,14 +1378,17 @@ switch ($DshAction) {
             if ($spec -notmatch '^[^=]+=.+$') { throw '-ModelBaseUrl 需要 NAME=URL 格式。' }
             $keyBaseOverrides[($spec -replace '=.*$','').ToLowerInvariant()] = ($spec -replace '^[^=]+=','')
         }
+        Test-ModelSpecFormat
         if ($ModelKeysFile) { Import-ModelKeysFile $ModelKeysFile $brokerConfigFile }
         foreach ($spec in @($ModelKey)) {
             # 报错文案里不能回显 spec：格式写错时它整体可能就是一段密钥。
             if ($spec -notmatch '^[^=]+=.+$') { throw '-ModelKey 需要 NAME=KEY 格式，且两边都不能为空。' }
             $keyUpstreamName = ($spec -replace '=.*$','').ToLowerInvariant()
             Add-BrokerUpstream -Name $keyUpstreamName -Key ($spec -replace '^[^=]+=','') `
-                -BaseUrl (Resolve-UpstreamBaseUrl -Name $keyUpstreamName -Explicit '' -Overrides $keyBaseOverrides)
+                -BaseUrl (Resolve-UpstreamBaseUrl -Name $keyUpstreamName -Explicit '' -Overrides $keyBaseOverrides) `
+                -ApiProfile (Get-ModelApiOverride $keyUpstreamName) -ExtraHeader (Get-ModelHeaderOverrides $keyUpstreamName)
         }
+        if (@($ModelKey).Count -gt 0) { Show-UnmatchedModelSpecWarning }
         if ($BrokerUpstreams.Count -eq 0 -and -not $ModelKeysFile) {
             if (-not $interactive) { throw '非交互模式下 model-key 需要 -ModelKey NAME=KEY 或 -ModelKeysFile PATH。' }
             Write-Host '补填模型 API 密钥：'
@@ -1232,23 +1442,23 @@ if ($DshAction -in @('install','configure')) {
     if ($modelBroker -eq 'on') {
         Write-Host "模型密钥代理：开（dsh-key-broker；真实密钥只在 data\broker\keys.json 与该容器内）" -ForegroundColor Green
         foreach ($name in Get-BrokerUpstreamNames $brokerConfigFile) {
-            Write-Host "  - ${name}: base_url = $ModelBrokerBase/u/$name/v1，api key 填占位串 $ModelBrokerPlaceholderKey" -ForegroundColor Green
+            Write-Host "  - ${name}: base_url = $ModelBrokerBase/u/$name$(Get-BrokerUpstreamUrlSuffix $name)，api key 填占位串 $ModelBrokerPlaceholderKey" -ForegroundColor Green
         }
-        Write-Host '边界（请如实理解）：它保护的只是「密钥字面值不外泄」，不保护额度，也不保护数据。' -ForegroundColor Yellow
-        Write-Host '  被提示注入的 Agent 拿着占位密钥照样能用你的额度发请求，只是拿不到密钥本身。' -ForegroundColor Yellow
-        Write-Host '  所以每个上游都该配 requestsPerMinute / dailyRequestBudget，并把出站模式切到 allowlist。' -ForegroundColor Yellow
+        Write-Host '作用范围：只保证密钥字面值不进入 dsh 容器，不限制额度消耗，也不阻止数据外发。' -ForegroundColor Yellow
+        Write-Host '  容器里的 Agent 用占位密钥仍可发起请求，因此建议为每个上游设置' -ForegroundColor Yellow
+        Write-Host '  requestsPerMinute / dailyRequestBudget，并按需启用 allowlist 出站模式。' -ForegroundColor Yellow
     } else {
         Write-Host '模型密钥代理：关（密钥若写进容器内的配置或环境，容器里的 Agent 一条 cat 就能读到）' -ForegroundColor Green
     }
     if ($egressMode -eq 'allowlist') {
         Write-Host '出站模式：allowlist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）' -ForegroundColor Green
         if ($egressAllowed) {
-            Write-Host "白名单来源：内置白名单 + 自定义 $(@($egressAllowed -split ',' | Where-Object { $_ }).Count) 条（DSH_EGRESS_ALLOWED_HOSTS）" -ForegroundColor Green
+            Write-Host "白名单：内置白名单 + 自定义 $(@($egressAllowed -split ',' | Where-Object { $_ }).Count) 条（DSH_EGRESS_ALLOWED_HOSTS）" -ForegroundColor Green
         } else {
-            Write-Host '白名单来源：代理内置白名单（Debian / npm / PyPI / GitHub / uv）' -ForegroundColor Green
+            Write-Host '白名单：仅内置白名单（Debian / npm / PyPI / GitHub / ghcr.io / nodejs.org / astral.sh）' -ForegroundColor Green
         }
     } else {
-        Write-Host '出站模式：open（容器可直接访问任意外网；被注入的 Agent 也可以把数据 POST 出去）' -ForegroundColor Green
+        Write-Host '出站模式：open（容器可访问任意外网地址，出站流量不做域名限制）' -ForegroundColor Green
     }
 }
 Write-Host "完成：$DshAction`n工程目录：$(Get-Location)`n管理：.\dsh.bat [start|update|stop|restart|logs|status|shell|remove]" -ForegroundColor Green

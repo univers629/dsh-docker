@@ -240,9 +240,9 @@ try {
   assert.deepEqual(brokerKeys.upstreams.map((entry) => entry.name), ['deepseek'])
   assert.equal(brokerKeys.upstreams[0].baseUrl, 'https://api.deepseek.com')
   assert.equal(brokerKeys.upstreams[0].key, deepseekKey)
-  // 摘要要给出容器内实际填法，并如实说明这层只保护密钥字面值。
+  // 摘要要给出容器内实际填法，并说明这层只保护密钥字面值、不限制额度。
   assert.match(broker.stdout, /base_url = http:\/\/dsh-key-broker:8080\/u\/deepseek\/v1/)
-  assert.match(broker.stdout, /不保护额度/)
+  assert.match(broker.stdout, /不限制额度消耗/)
 
   // 同名覆盖、异名保留：第二次只给 openai，deepseek 的密钥必须原样留着。
   const openaiKey = 'sk-test-installer-openai-key'

@@ -210,6 +210,34 @@ export function parseAllowList(value, fallback = DEFAULT_ALLOWED_HOSTS) {
   return allowList
 }
 
+// 白名单的取值模式：
+// - append（默认）：自定义域名追加在内置白名单之后，内置的源保持放行；
+// - replace：自定义域名整体顶替内置白名单，连 Debian / npm / PyPI 也要自己列。
+// 默认取 append 的理由：容器要靠内置的那几个源装依赖，如果填一条业务域名就把它们
+// 顶掉，apt / npm / pip 会立刻全部 403，而报错现场看不出是白名单被替换了。
+export const ALLOW_LIST_MODES = Object.freeze(['append', 'replace'])
+
+export function parseAllowListMode(value, fallback = 'append') {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+    return fallback
+  }
+  if (typeof value !== 'string') throw new EgressPolicyError('白名单模式必须是字符串')
+  const mode = value.trim().toLowerCase()
+  if (!ALLOW_LIST_MODES.includes(mode)) {
+    throw new EgressPolicyError(`白名单模式只支持 ${ALLOW_LIST_MODES.join(' / ')}，当前值：${value}`)
+  }
+  return mode
+}
+
+// 把「自定义域名 + 模式」解析成代理实际使用的白名单。空值在两种模式下都回落到
+// baseline，所以「不填」永远等于「只用内置白名单」。
+export function resolveAllowList(value, mode, baseline = DEFAULT_ALLOWED_HOSTS) {
+  const custom = parseAllowList(value, baseline)
+  if (parseAllowListMode(mode) === 'replace') return custom
+  // 交给 parseAllowList 做合并：它会顺手去重，内置项与自定义项重复也只留一条。
+  return parseAllowList([...Array.from(baseline ?? []), ...custom])
+}
+
 // 端口集合解析：接受数字、数组、Set 或 "80,443" 这样的字符串。
 export function parsePortSet(value, fallback = DEFAULT_FORWARD_PORTS) {
   let items

@@ -188,7 +188,8 @@ Debian 系统目录留在容器可写层，不使用 overlay 覆盖，因此同�
 
 真实密钥只写入宿主的 `data/broker/keys.json`（0600），以只读方式挂给 `dsh-key-broker`，不挂进 DSH 容器。DSH 的模型设置里 base_url 填 `http://dsh-key-broker:8080/u/<上游名>/v1`，api key 填任意占位串。
 
-- 安装时配置：向导逐个输入上游密钥（不回显），或用 `--model-keys-file` 指向一份 0600 的 `keys.json`。
+- 安装时配置：向导逐个输入上游密钥（不回显），并逐个询问 API 形态（OpenAI 兼容 / Responses / Chat Completions / Anthropic Messages / Gemini 原生）与固定请求头；也可以用 `--model-keys-file` 指向一份 0600 的 `keys.json`。
+- 非交互指定形态与请求头：`--model-api NAME=PROFILE`、`--model-header NAME=HEADER=VALUE`（可重复），例如 Codex 客户端需要的 `originator` / `version` / `User-Agent`。形态决定认证头、放行端点，以及 base_url 结尾要不要带 `/v1`，详见 [docs/security.md](docs/security.md)。
 - 装完后补填：`./install.sh model-key`（Windows：`.\install.ps1 -DshAction model-key`），只新增代理容器，不重建 `dsh`。
 - 查看状态：`./dsh.sh keys` 输出上游、配额、今日用量与放行/拒绝计数，不输出密钥。
 - 密钥不能改到 WebUI 里填：WebUI 运行在 DSH 容器内，填入的密钥就落在容器内，容器内的 Agent 可以直接读取文件。跳过密钥代理后 WebUI 直填仍然可用，代价是失去这一层保护。
@@ -198,7 +199,7 @@ Debian 系统目录留在容器可写层，不使用 overlay 覆盖，因此同�
 `.env` 中的 `DSH_EGRESS_MODE` 决定容器如何出网：
 
 - `open`（默认）：容器直连公网，配置简单，但被注入的 Agent 可以把数据发到任意地址。
-- `allowlist`：容器只接入无网关的内部网络，出网必须经过 `dsh-egress` 正向代理，按域名白名单放行；内置白名单覆盖 Debian、npm、PyPI、GitHub、GHCR 等 15 个域名，可用 `DSH_EGRESS_ALLOWED_HOSTS` 整体替换。
+- `allowlist`：容器只接入无网关的内部网络，出网必须经过 `dsh-egress` 正向代理，按域名白名单放行；内置白名单覆盖 Debian、npm、PyPI、GitHub、GHCR 等 15 个域名，`DSH_EGRESS_ALLOWED_HOSTS` 在其之上追加域名（写 `DSH_EGRESS_ALLOWED_HOSTS_MODE=replace` 才整体替换）。白名单外的域名一律 403，包括 Agent 要访问的网页与搜索接口。
 
 ## 镜像发布
 

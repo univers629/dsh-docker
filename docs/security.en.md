@@ -61,7 +61,30 @@ When `DSH_MODEL_BROKER=on` in `.env`, the installer overlays `docker-compose.key
 
 ### Configuration
 
-Interactive installs read each upstream key without echo. Automation uses `--model-keys-file` pointing at a 0600 `keys.json`; `--model-key NAME=KEY` exists only for pipelines that cannot be interactive, and a key on the command line reaches `ps`. Upstream addresses use `--model-base-url NAME=URL` (deepseek/openai/anthropic have built-in defaults), and `--no-model-broker` disables the broker and clears `data/broker/keys.json`. The file can also be edited directly: the broker reloads its configuration every 5 seconds, with no container restart.
+Interactive installs read each upstream key without echo and also ask for the API shape and any fixed request headers. Automation uses `--model-keys-file` pointing at a 0600 `keys.json`; `--model-key NAME=KEY` exists only for pipelines that cannot be interactive, and a key on the command line reaches `ps`. Upstream addresses use `--model-base-url NAME=URL` (deepseek/openai/anthropic have built-in defaults), and `--no-model-broker` disables the broker and clears `data/broker/keys.json`. The file can also be edited directly: the broker reloads its configuration every 5 seconds, with no container restart.
+
+`--model-api NAME=PROFILE` (PowerShell: `-ModelApi`) picks the auth header and the allowed endpoints; without it the profile is inferred from the upstream name:
+
+| PROFILE | Auth header | Allowed endpoints | base_url suffix |
+| --- | --- | --- | --- |
+| `any` (default) | `authorization: Bearer {key}` | the broker's default prefix set (chat/completions, responses, embeddings, models, ...) | `/v1` |
+| `responses` | `authorization: Bearer {key}` | `/v1/responses` and `/v1/models` only (plus the variants without `/v1`) | `/v1` |
+| `chat` | `authorization: Bearer {key}` | `/v1/chat/completions` and `/v1/models` only (plus the variants without `/v1`) | `/v1` |
+| `messages` | `x-api-key: {key}` | `/v1/messages` and `/v1/models` only (plus the variants without `/v1`), with `anthropic-version` attached | none |
+| `gemini` | `x-goog-api-key: {key}` | `/v1beta/models` only | none |
+
+`--model-header NAME=HEADER=VALUE` (PowerShell: `-ModelHeader`, repeatable) writes `extraHeaders` for upstreams that require fixed headers, such as the Codex `originator` / `version` pair and a custom `User-Agent`:
+
+```
+--model-key justwoker=sk-...
+--model-base-url justwoker=https://api.justwoker.icu
+--model-api justwoker=responses
+--model-header justwoker=originator=codex_cli_rs
+--model-header justwoker=version=0.101.0
+--model-header justwoker=user-agent=codex_cli_rs/0.101.0
+```
+
+The broker applies these headers when forwarding, overriding any client header of the same name, so container-side configuration cannot change them. Auth headers (`authorization`, `api-key`, `x-api-key`, `x-goog-api-key`, `cookie`, ...) and hop-by-hop headers are rejected by `--model-header`, since setting them would bypass key injection.
 
 ```json
 {
@@ -88,7 +111,7 @@ Interactive installs read each upstream key without echo. Automation uses `--mod
 }
 ```
 
-Omitting `requestsPerMinute` and `dailyRequestBudget` or setting them to `0` means unlimited, in which case the broker only prevents key exfiltration and provides no quota protection. Setting them explicitly is recommended (`requestsPerMinute: 60` is a reasonable start; size the daily budget from real usage and raise it after hitting 429). `maxRequestBytes` defaults to 8 MiB. `headerName` and `headerTemplate` default to `authorization` and `Bearer {key}`; only upstreams using a different auth header need them.
+Omitting `requestsPerMinute` and `dailyRequestBudget` or setting them to `0` means unlimited, in which case the broker only prevents key exfiltration and provides no quota protection. Setting them explicitly is recommended (`requestsPerMinute: 60` is a reasonable start; size the daily budget from real usage and raise it after hitting 429). `maxRequestBytes` defaults to 8 MiB. `headerName` and `headerTemplate` default to `authorization` and `Bearer {key}`; only upstreams using a different auth header need them. `allowedPathPrefixes` defaults to the broker's built-in prefix set; setting it restricts forwarding to exactly those prefixes. On the client side, `base_url` is `http://dsh-key-broker:8080/u/<upstream>` plus the suffix from the table above, and the api key field takes the placeholder `dsh-broker-placeholder`.
 
 ### Adding keys later
 
@@ -117,7 +140,8 @@ In this mode the dsh container joins only `dsh-internal` (`internal: true`, no d
 - The built-in allow list has 15 domains: `deb.debian.org`, `security.debian.org`, `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org`, `github.com`, `api.github.com`, `codeload.github.com`, `objects.githubusercontent.com`, `raw.githubusercontent.com`, `github-releases.githubusercontent.com`, `pkg-containers.githubusercontent.com`, `ghcr.io`, `astral.sh`, `nodejs.org`.
 - Forms that bypass domain matching are refused by default: IP literals (including `127.0.0.1`, `169.254.169.254`, 10/8, 172.16/12, 192.168/16, `::1`, `fd00::/8`), `localhost` and the `.internal`/`.local`/`.localdomain`/`.localhost` suffixes, integer or hexadecimal address forms (`2130706433`, `0x7f000001`), URLs with credentials, non-http(s) schemes, and CONNECT to any port other than 443. Hop-by-hop headers are stripped on forward, and the proxy does not intercept TLS, so the in-container certificate chain is unchanged.
 - DNS rebinding protection: resolution results are validated before connecting and only public unicast addresses are allowed. Loopback, private, link-local (including the cloud metadata address `169.254.169.254`), CGNAT, and IPv4-mapped private addresses return 403. `DSH_EGRESS_ALLOW_PRIVATE_UPSTREAM=1` disables the check; it should only be disabled when the allow list genuinely contains an on-network mirror, because with it off one controlled allow-listed domain turns the proxy into a path to the host and the local network.
-- Allowing more domains: set `DSH_EGRESS_ALLOWED_HOSTS` in the host `.env` (comma separated, supporting leftmost single-label wildcards such as `*.example.com`, which does not match the bare domain) and restart the stack, or use `--egress open|allowlist` and `--egress-allow HOSTS` at install time. The value replaces the built-in list entirely, so still-needed domains must be listed. The list cannot be modified from inside the container.
+- Allowing more domains: set `DSH_EGRESS_ALLOWED_HOSTS` in the host `.env` (comma separated, supporting leftmost single-label wildcards such as `*.example.com`, which does not match the bare domain) and restart the stack, or use `--egress open|allowlist` and `--egress-allow HOSTS` at install time. Values are appended to the built-in list so the built-in package sources keep working; `DSH_EGRESS_ALLOWED_HOSTS_MODE=replace` swaps the list out instead, in which case every still-needed domain must be listed. The list cannot be modified from inside the container.
+- Scope: anything outside the list returns 403 for apt, pip, npm, git, and for any web page or search API the agent tries to fetch, so required domains must be listed explicitly. Model requests do not go through `dsh-egress`; `dsh-key-broker` reaches upstreams directly and is unaffected.
 - The ingress does L4 forwarding: `dsh-ingress` uses the Nginx `stream` module, so it does not parse HTTP, rewrite Host, or add `X-Forwarded-*`; Basic Auth, same-origin, and credential boundaries stay with the Nginx inside the dsh container. Its `proxy_pass` uses a variable form so every new connection resolves through Docker's embedded DNS and follows the dsh container across restarts.
 - The upstream is `dsh-app:3080` rather than `dsh:3080` because `dsh-ingress` holds the network alias `dsh` on `dsh-private` (so reverse proxies configured with `http://dsh:3080` need no change), and Docker's embedded DNS includes the querying container's own aliases in the answer, which makes the ingress resolve `dsh` to itself and fail to connect. `docker-compose.isolated.yml` therefore gives the dsh service a dedicated `dsh-app` alias on `dsh-internal`.
 - Package managers inside the container: in isolated mode `bin/entrypoint.sh` writes `/etc/apt/apt.conf.d/00-dsh-proxy`, `/etc/pip.conf`, the npm globalconfig, and `git config --system http.proxy`, and sets `NODE_USE_ENV_PROXY=1` (Node 24's `--use-env-proxy`; undici/fetch ignores proxy environment variables by default). These files are required because these tools support proxy environment variables incompletely and apt additionally runs with a scrubbed environment inside the privileged helper. Only files carrying the `dsh-docker managed` marker are rewritten or removed, user-authored configuration is preserved with a notice, and the managed files are deleted when switching back to open mode.

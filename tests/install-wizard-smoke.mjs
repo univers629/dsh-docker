@@ -7,9 +7,10 @@ import { spawnSync } from 'node:child_process'
 import { parseBrokerConfig } from '../bin/dsh-key-broker-policy.mjs'
 
 const read = async (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
-const [compose, dockerfile, entrypoint, authConfig, nginx, installSh, installPs1, envExample, dshSh, dshBat, readmeZh, readmeEn] = await Promise.all([
+const [compose, dockerfile, entrypoint, authConfig, nginx, installSh, installPs1, envExample, dshSh, dshBat, readmeZh, readmeEn, isolatedCompose] = await Promise.all([
   'docker-compose.yml', 'Dockerfile', 'bin/entrypoint.sh', 'bin/configure-nginx-auth', 'nginx/dsh-nginx.conf',
   'install.sh', 'install.ps1', '.env.example', 'dsh.sh', 'dsh.bat', 'README.md', 'README.en.md',
+  'docker-compose.isolated.yml',
 ].map(read))
 
 assert.match(compose, /DSH_ACCESS_MODE: "\$\{DSH_ACCESS_MODE:-local\}"/)
@@ -190,6 +191,8 @@ assert.match(dshBat, /set "DSH_BIND_HOST="/)
 for (const [shellFlag, powershellParameter] of [
   ['--model-key', '$ModelKey'],
   ['--model-base-url', '$ModelBaseUrl'],
+  ['--model-api', '$ModelApi'],
+  ['--model-header', '$ModelHeader'],
   ['--model-keys-file', '$ModelKeysFile'],
   ['--no-model-broker', '$NoModelBroker'],
   ['--egress', '$Egress'],
@@ -201,6 +204,37 @@ for (const [shellFlag, powershellParameter] of [
 }
 assert.match(installPs1, /\[string\[\]\]\$ModelKey = @\(\)/)
 assert.match(installPs1, /\[string\[\]\]\$ModelBaseUrl = @\(\)/)
+assert.match(installPs1, /\[string\[\]\]\$ModelApi = @\(\)/)
+assert.match(installPs1, /\[string\[\]\]\$ModelHeader = @\(\)/)
+// 向导里的可选输入必须有对应的助手函数：少了它，"固定请求头"那一问会在运行时炸。
+assert.match(installPs1, /^function Ask-Optional \{$/m)
+assert.match(installSh, /^prompt_optional\(\) \{$/m)
+// API 形态的问答两边必须给出同一组选项，否则"装的时候选一种、补填时选另一种"。
+for (const option of [
+  '1) OpenAI 兼容，不额外收窄端点（chat/completions、responses、embeddings 都放行）',
+  '2) 只用 Responses（Codex 那类客户端）',
+  '3) 只用 Chat Completions',
+  '4) Anthropic Messages（认证头 x-api-key，自动带 anthropic-version）',
+  '5) Gemini 原生（认证头 x-goog-api-key，端点 /v1beta/models）',
+  '一行一个 name=value，回车结束。示例：user-agent=codex_cli_rs/0.101.0',
+]) {
+  assert.ok(installSh.includes(option), `install.sh 缺少形态问答：${option}`)
+  assert.ok(installPs1.includes(option), `install.ps1 缺少形态问答：${option}`)
+}
+// 出站模式的说明也必须逐字一致：这是用户唯一能看到的策略说明。
+for (const line of [
+  '1) open（默认）：容器可访问任意外网地址。',
+  '2) allowlist：容器只能经 dsh-egress 代理出网，白名单外的域名返回 403。',
+  '    内置白名单：Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，',
+  '    足够 apt / pip / npm / git 正常工作；其他域名需要在下一问里补充。',
+  '    影响范围：Agent 访问白名单外的网页、搜索接口、第三方下载站会被拒绝。',
+  '    填写的域名会追加在内置白名单之后（内置的软件源始终放行），留空表示只用内置白名单。',
+]) {
+  assert.ok(installSh.includes(line), `install.sh 缺少出站模式说明：${line}`)
+  assert.ok(installPs1.includes(line), `install.ps1 缺少出站模式说明：${line}`)
+}
+// 追加语义是策略层的默认值，compose 必须把开关透出来，否则 .env 里写了也不生效。
+assert.match(isolatedCompose, /DSH_EGRESS_ALLOWED_HOSTS_MODE: "\$\{DSH_EGRESS_ALLOWED_HOSTS_MODE:-append\}"/)
 assert.match(installPs1, /\[string\]\$ModelKeysFile = ''/)
 assert.match(installPs1, /\[switch\]\$NoModelBroker/)
 assert.match(installPs1, /\[ValidateSet\('',\s*'open',\s*'allowlist'\)\]/)
@@ -437,6 +471,67 @@ try {
   // 非交互又没给密钥来源时必须直接报参数错误，而不是静默什么都不做。
   const lateWithoutKey = runInstaller('model-key', 'broker', [], { MOCK_DOCKER_CONTAINER_EXISTS: '1' })
   assert.equal(lateWithoutKey.status, 2, 'non-interactive model-key needs --model-key or --model-keys-file')
+
+  // Codex 那类客户端要的是「只放行 /v1/responses + 固定 originator/version/User-Agent」，
+  // 而这些必须只出现在 broker 一侧：dsh 容器里改不了，客户端也不用管。
+  const codexKey = 'sk-test-wizard-smoke-codex-key'
+  await prepareProject('profile')
+  const profiled = runInstaller('model-key', 'profile', [
+    '--model-key', `justwoker=${codexKey}`,
+    '--model-base-url', 'justwoker=https://api.justwoker.icu',
+    '--model-api', 'justwoker=responses',
+    '--model-header', 'justwoker=user-agent=codex_cli_rs/0.101.0',
+    '--model-header', 'justwoker=originator=codex_cli_rs',
+    '--model-header', 'justwoker=version=0.101.0',
+  ], { MOCK_DOCKER_CONTAINER_EXISTS: '1' })
+  assert.equal(profiled.status, 0, `${profiled.stdout}\n${profiled.stderr}`)
+  const profiledPath = join(sandbox, 'profile', 'data', 'broker', 'keys.json')
+  const profiledParsed = parseBrokerConfig(await readFile(profiledPath, 'utf8'))
+  const justwoker = profiledParsed.upstreams.get('justwoker')
+  assert.ok(justwoker, 'the justwoker upstream must exist')
+  assert.equal(justwoker.headerValue, `Bearer ${codexKey}`)
+  assert.ok(justwoker.allowedPathPrefixes.includes('/v1/responses'), 'responses profile must allow /v1/responses')
+  assert.ok(!justwoker.allowedPathPrefixes.includes('/v1/chat/completions'), 'responses profile must not allow chat completions')
+  assert.equal(justwoker.extraHeaders['user-agent'], 'codex_cli_rs/0.101.0')
+  assert.equal(justwoker.extraHeaders.originator, 'codex_cli_rs')
+  assert.equal(justwoker.extraHeaders.version, '0.101.0')
+
+  // Anthropic 形态的默认值不能被新参数改掉：认证头是 x-api-key，且自带 anthropic-version。
+  const anthropicKey = 'sk-ant-test-wizard-smoke-key'
+  const anthropic = runInstaller('model-key', 'profile', ['--model-key', `anthropic=${anthropicKey}`], { MOCK_DOCKER_CONTAINER_EXISTS: '1' })
+  assert.equal(anthropic.status, 0, `${anthropic.stdout}\n${anthropic.stderr}`)
+  const anthropicParsed = parseBrokerConfig(await readFile(profiledPath, 'utf8'))
+  const anthropicUpstream = anthropicParsed.upstreams.get('anthropic')
+  assert.equal(anthropicUpstream.headerName, 'x-api-key')
+  assert.equal(anthropicUpstream.headerValue, anthropicKey)
+  assert.equal(anthropicUpstream.extraHeaders['anthropic-version'], '2023-06-01')
+
+  // 挂在不存在的上游名上的 --model-api 必须出警告，而不是静默丢掉。
+  const orphan = runInstaller('model-key', 'profile', [
+    '--model-key', `justwoker=${codexKey}`,
+    '--model-base-url', 'justwoker=https://api.justwoker.icu',
+    '--model-api', 'nosuch=chat',
+  ], { MOCK_DOCKER_CONTAINER_EXISTS: '1' })
+  assert.equal(orphan.status, 0, `${orphan.stdout}\n${orphan.stderr}`)
+  assert.match(orphan.stderr, /没有名为 nosuch 的上游/)
+
+  // 形态写错要在动到配置之前就退出，退出码 2 = 参数错误。
+  const badProfile = runInstaller('model-key', 'profile', [
+    '--model-key', `justwoker=${codexKey}`,
+    '--model-base-url', 'justwoker=https://api.justwoker.icu',
+    '--model-api', 'justwoker=grpc',
+  ], { MOCK_DOCKER_CONTAINER_EXISTS: '1' })
+  assert.equal(badProfile.status, 2, 'an unknown --model-api profile must fail with an argument error')
+  assert.match(badProfile.stderr, /未知的 API 形态/)
+
+  // 认证头不允许被 --model-header 覆盖：那等于绕过密钥注入。
+  const badHeader = runInstaller('model-key', 'profile', [
+    '--model-key', `justwoker=${codexKey}`,
+    '--model-base-url', 'justwoker=https://api.justwoker.icu',
+    '--model-header', 'justwoker=authorization=Bearer leaked',
+  ], { MOCK_DOCKER_CONTAINER_EXISTS: '1' })
+  assert.equal(badHeader.status, 2, '--model-header must refuse to override the auth header')
+  assert.match(badHeader.stderr, /由密钥代理自己管理/)
 
   await prepareProject('egress')
   const isolated = runInstall('egress', ['--egress', 'allowlist', '--egress-allow', 'mirror.example.com'])

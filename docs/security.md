@@ -61,7 +61,30 @@
 
 ### 配置方式
 
-交互安装按提示逐个输入上游密钥（不回显）。自动化用 `--model-keys-file` 指向一份 0600 的 `keys.json`；`--model-key NAME=KEY` 仅供无法交互的流水线使用，写在命令行的密钥会进入 `ps`。上游地址用 `--model-base-url NAME=URL`（deepseek/openai/anthropic 有内置默认值），`--no-model-broker` 关闭代理并清空 `data/broker/keys.json`。也可以直接编辑该文件，broker 每 5 秒重载配置，无需重启容器。
+交互安装按提示逐个输入上游密钥（不回显），并逐个询问 API 形态与固定请求头。自动化用 `--model-keys-file` 指向一份 0600 的 `keys.json`；`--model-key NAME=KEY` 仅供无法交互的流水线使用，写在命令行的密钥会进入 `ps`。上游地址用 `--model-base-url NAME=URL`（deepseek/openai/anthropic 有内置默认值），`--no-model-broker` 关闭代理并清空 `data/broker/keys.json`。也可以直接编辑该文件，broker 每 5 秒重载配置，无需重启容器。
+
+`--model-api NAME=PROFILE`（PowerShell：`-ModelApi`）决定认证头与放行的端点，未指定时按上游名推断：
+
+| PROFILE | 认证头 | 放行端点 | 客户端 base_url 结尾 |
+| --- | --- | --- | --- |
+| `any`（默认） | `authorization: Bearer {key}` | broker 默认前缀集合（chat/completions、responses、embeddings、models 等） | `/v1` |
+| `responses` | `authorization: Bearer {key}` | 只有 `/v1/responses` 与 `/v1/models`（含去掉 `/v1` 的同名变体） | `/v1` |
+| `chat` | `authorization: Bearer {key}` | 只有 `/v1/chat/completions` 与 `/v1/models`（含去掉 `/v1` 的同名变体） | `/v1` |
+| `messages` | `x-api-key: {key}` | 只有 `/v1/messages` 与 `/v1/models`（含去掉 `/v1` 的同名变体），自动带 `anthropic-version` | 无 |
+| `gemini` | `x-goog-api-key: {key}` | 只有 `/v1beta/models` | 无 |
+
+`--model-header NAME=HEADER=VALUE`（PowerShell：`-ModelHeader`，可重复）写入 `extraHeaders`，用于上游要求的固定请求头，例如 Codex 那套 `originator` / `version` 与自定义 `User-Agent`：
+
+```
+--model-key justwoker=sk-...
+--model-base-url justwoker=https://api.justwoker.icu
+--model-api justwoker=responses
+--model-header justwoker=originator=codex_cli_rs
+--model-header justwoker=version=0.101.0
+--model-header justwoker=user-agent=codex_cli_rs/0.101.0
+```
+
+这些头由 broker 在转发时覆盖客户端同名头，所以容器里的配置改不动它们。认证类头（`authorization`、`api-key`、`x-api-key`、`x-goog-api-key`、`cookie` 等）与逐跳头不允许通过 `--model-header` 设置，否则等于绕过密钥注入。
 
 ```json
 {
@@ -88,7 +111,7 @@
 }
 ```
 
-`requestsPerMinute` 与 `dailyRequestBudget` 缺省或为 `0` 表示不限，此时代理只防密钥外泄、不提供额度保护，建议显式设置（例如 `requestsPerMinute: 60`，每日配额按实际用量设定，撞到 429 再调高）。`maxRequestBytes` 缺省为 8 MiB。`headerName` 与 `headerTemplate` 默认是 `authorization` 与 `Bearer {key}`，只有使用其他认证头的上游需要显式设置。
+`requestsPerMinute` 与 `dailyRequestBudget` 缺省或为 `0` 表示不限，此时代理只防密钥外泄、不提供额度保护，建议显式设置（例如 `requestsPerMinute: 60`，每日配额按实际用量设定，撞到 429 再调高）。`maxRequestBytes` 缺省为 8 MiB。`headerName` 与 `headerTemplate` 默认是 `authorization` 与 `Bearer {key}`，只有使用其他认证头的上游需要显式设置。`allowedPathPrefixes` 缺省为 broker 内置的前缀集合，显式给出即为只放行这些前缀。客户端侧的 `base_url` 是 `http://dsh-key-broker:8080/u/<上游名>` 加上表中的结尾，api key 填占位串 `dsh-broker-placeholder`。
 
 ### 补填密钥
 
@@ -117,7 +140,8 @@
 - 内置白名单 15 个域名：`deb.debian.org`、`security.debian.org`、`registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`、`github.com`、`api.github.com`、`codeload.github.com`、`objects.githubusercontent.com`、`raw.githubusercontent.com`、`github-releases.githubusercontent.com`、`pkg-containers.githubusercontent.com`、`ghcr.io`、`astral.sh`、`nodejs.org`。
 - 默认拒绝绕过域名判定的写法：IP 字面量（含 `127.0.0.1`、`169.254.169.254`、10/8、172.16/12、192.168/16、`::1`、`fd00::/8`）、`localhost` 与 `.internal`/`.local`/`.localdomain`/`.localhost` 后缀、整数或十六进制形式的地址（`2130706433`、`0x7f000001`）、带凭据的 URL、非 http(s) scheme，以及 CONNECT 到 443 以外的端口。逐跳头在转发时剥除；代理不做 TLS 中间人，容器内证书链保持原样。
 - DNS rebinding 防护：建连之前校验 DNS 解析结果，只允许公网单播地址，解析到环回、私网、链路本地（含云 metadata 的 `169.254.169.254`）、CGNAT 或 IPv4 映射的私网地址返回 403。可用 `DSH_EGRESS_ALLOW_PRIVATE_UPSTREAM=1` 关闭，仅在白名单中确实包含同网段内网镜像源时才应关闭，关闭后一个受控的白名单域名即可让代理成为访问宿主与内网的通道。
-- 放行新域名：在宿主的 `.env` 写 `DSH_EGRESS_ALLOWED_HOSTS`（逗号分隔，支持 `*.example.com` 形式的最左一级通配，不匹配裸域名），然后重启容器；安装时可用 `--egress open|allowlist` 与 `--egress-allow HOSTS` 指定。它整体替换内置白名单，仍需要的域名要写全。容器内无法修改白名单。
+- 放行新域名：在宿主的 `.env` 写 `DSH_EGRESS_ALLOWED_HOSTS`（逗号分隔，支持 `*.example.com` 形式的最左一级通配，不匹配裸域名），然后重启容器；安装时可用 `--egress open|allowlist` 与 `--egress-allow HOSTS` 指定。默认追加在内置白名单之后，内置软件源保持放行；写 `DSH_EGRESS_ALLOWED_HOSTS_MODE=replace` 才整体替换，此时仍需要的域名要写全。容器内无法修改白名单。
+- 影响范围：白名单外的域名对 apt / pip / npm / git 与 Agent 的网页抓取、搜索接口一律返回 403，需要哪些域名就显式列出。模型请求不经过 `dsh-egress`，由 `dsh-key-broker` 直接出网，因此不受白名单限制。
 - 入口使用四层转发：`dsh-ingress` 用 Nginx `stream` 模块做 TCP 转发，不解析 HTTP、不改 Host、不加 `X-Forwarded-*`，Basic Auth 与同源、凭据边界仍由 dsh 容器内的 Nginx 负责。其 `proxy_pass` 使用变量形式，每条新连接都走 Docker 内嵌 DNS，因此 dsh 容器重启换 IP 后自动跟上。
 - 上游写 `dsh-app:3080` 而不是 `dsh:3080`：`dsh-ingress` 在 `dsh-private` 网络上持有 network alias `dsh`（使把上游写成 `http://dsh:3080` 的反代无需改配置），而 Docker 内嵌 DNS 会把查询方自身的 alias 计入解析结果，导致 ingress 解析 `dsh` 时指向自己并自连失败。`docker-compose.isolated.yml` 因此给 dsh 服务在 `dsh-internal` 上另挂专用别名 `dsh-app`。
 - 容器内的包管理器配置：`bin/entrypoint.sh` 在隔离模式下写 `/etc/apt/apt.conf.d/00-dsh-proxy`、`/etc/pip.conf`、npm 的 globalconfig 和 `git config --system http.proxy`，并设置 `NODE_USE_ENV_PROXY=1`（Node 24 的 `--use-env-proxy`；undici/fetch 默认不读代理环境变量）。这些文件是必需的：这些工具对代理环境变量的支持不完整，apt 在特权代理中还会被清理环境。只有带 `dsh-docker managed` 标记的文件会被改写或回收，用户自建配置会被保留并提示；切回 open 模式时这些文件会被删除。

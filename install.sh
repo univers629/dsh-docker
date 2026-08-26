@@ -27,6 +27,8 @@ PENDING_IMAGE_SOURCE=""
 PENDING_ENV_FILE=""
 MODEL_KEY_SPECS=()
 MODEL_BASE_URL_SPECS=()
+MODEL_API_SPECS=()
+MODEL_HEADER_SPECS=()
 MODEL_KEYS_FILE="${DSH_MODEL_KEYS_FILE:-}"
 NO_MODEL_BROKER=false
 EGRESS_MODE_OVERRIDE=""
@@ -42,6 +44,11 @@ BROKER_BASE_URLS=()
 BROKER_KEYS=()
 BROKER_RPM=()
 BROKER_DAILY=()
+# API 形态（profile）决定注入哪个认证头、放行哪些路径前缀；额外请求头按 name=value 存，
+# 多条之间用 US(0x1f) 分隔——值里可能出现空格、逗号和等号，只有控制符是安全的分隔符。
+BROKER_PROFILES=()
+BROKER_HEADERS=()
+BROKER_HEADER_RS=$'\x1f'
 
 DEFAULT_PREBUILT_IMAGE="${DSH_PREBUILT_IMAGE:-ghcr.io/univers629/dsh-docker:latest}"
 DEFAULT_LOCAL_IMAGE="dsh:local"
@@ -68,6 +75,8 @@ usage() {
   --no-root-password              不设置容器 root 密码（容器内任意特权命令保持关闭）
   --model-key NAME=KEY            模型上游密钥（可重复；命令行参数会进 ps，仅供自动化）
   --model-base-url NAME=URL       上游 base_url（可重复；deepseek/openai/anthropic 有内置默认）
+  --model-api NAME=PROFILE        上游 API 形态：any（默认）、chat、responses、messages、gemini
+  --model-header NAME=H=V         给某个上游固定一个请求头（可重复，例如 originator、user-agent）
   --model-keys-file PATH          导入一份完整的 keys.json（也可用 DSH_MODEL_KEYS_FILE）
   --no-model-broker               关闭模型密钥代理，并清空 data/broker/keys.json
   --egress open|allowlist         容器出站模式（allowlist 只放行白名单域名）
@@ -148,6 +157,18 @@ while [ "$#" -gt 0 ]; do
       MODEL_BASE_URL_SPECS+=("$1")
       ;;
     --model-base-url=*) MODEL_BASE_URL_SPECS+=("${1#*=}") ;;
+    --model-api)
+      [ "$#" -ge 2 ] || { echo "[错误] --model-api 缺少值。" >&2; exit 2; }
+      shift
+      MODEL_API_SPECS+=("$1")
+      ;;
+    --model-api=*) MODEL_API_SPECS+=("${1#*=}") ;;
+    --model-header)
+      [ "$#" -ge 2 ] || { echo "[错误] --model-header 缺少值。" >&2; exit 2; }
+      shift
+      MODEL_HEADER_SPECS+=("$1")
+      ;;
+    --model-header=*) MODEL_HEADER_SPECS+=("${1#*=}") ;;
     --model-keys-file)
       [ "$#" -ge 2 ] || { echo "[错误] --model-keys-file 缺少值。" >&2; exit 2; }
       shift
@@ -806,10 +827,103 @@ resolve_upstream_base_url() {
   printf '%s' "$url"
 }
 
+# API 形态（profile）→ 认证头与放行的路径前缀。上游千差万别，但认证方式和端点形态其实
+# 只有几种，让人在向导里选一次比让他手写 keys.json 的 headerName/allowedPathPrefixes 现实。
+# any 表示不写 allowedPathPrefixes，沿用 broker 内置的兼容端点集合。
+broker_profile_header_name() {
+  case "$1" in
+    messages) printf '%s' 'x-api-key' ;;
+    gemini) printf '%s' 'x-goog-api-key' ;;
+    *) printf '%s' 'authorization' ;;
+  esac
+}
+
+broker_profile_header_template() {
+  case "$1" in
+    messages|gemini) printf '%s' '{key}' ;;
+    *) printf '%s' 'Bearer {key}' ;;
+  esac
+}
+
+# 收窄到这个形态真正会用到的端点。代理本来就默认拒绝名单外的路径，选形态只是再紧一层：
+# 拿到占位密钥的 Agent 连"换个端点试试"都做不到。
+broker_profile_paths() {
+  case "$1" in
+    chat) printf '%s' '/v1/chat/completions /chat/completions /v1/models /models' ;;
+    responses) printf '%s' '/v1/responses /responses /v1/models /models' ;;
+    messages) printf '%s' '/v1/messages /messages /v1/models /models' ;;
+    gemini) printf '%s' '/v1beta/models' ;;
+    *) printf '%s' '' ;;
+  esac
+}
+
+# Anthropic 缺 anthropic-version 会被上游直接 400，所以这个头跟着形态一起给。
+broker_profile_headers() {
+  case "$1" in
+    messages) printf '%s' 'anthropic-version=2023-06-01' ;;
+    *) printf '%s' '' ;;
+  esac
+}
+
+# WebUI 里该填哪个 base_url：OpenAI 系客户端自己会补 /chat/completions 或 /responses，
+# 所以代理侧要留出 /v1；Anthropic 与 Gemini 的路径自带版本号，不能再多一层。
+broker_profile_url_suffix() {
+  case "$1" in
+    messages|gemini) printf '%s' '' ;;
+    *) printf '%s' '/v1' ;;
+  esac
+}
+
+# 没显式选形态时按上游名猜一个。猜错也只是路径前缀宽一点，不会写错认证头。
+broker_default_profile() {
+  case "$1" in
+    anthropic|claude) printf '%s' 'messages' ;;
+    gemini|google|googleai) printf '%s' 'gemini' ;;
+    *) printf '%s' 'any' ;;
+  esac
+}
+
+validate_broker_profile() {
+  case "$1" in
+    any|chat|responses|messages|gemini) ;;
+    *) echo "[错误] 未知的 API 形态：$1（可选 any、chat、responses、messages、gemini）" >&2; return 1 ;;
+  esac
+}
+
+# 认证头由 profile 决定，而客户端自带的认证材料会被 broker 剥掉。额外请求头因此不允许
+# 覆盖这些名字：那等于让一份配置悄悄绕过密钥注入。逐跳头也拦掉，转发时它们本来就会被丢。
+BROKER_FORBIDDEN_HEADERS="authorization proxy-authorization api-key x-api-key x-goog-api-key x-auth-token cookie set-cookie host forwarded x-forwarded-for x-forwarded-host x-forwarded-proto x-real-ip content-length connection keep-alive transfer-encoding upgrade te trailer"
+
+# 成功时把归一化后的 name=value 打到 stdout，失败时只在 stderr 说原因。
+validate_broker_header() {
+  local spec="$1" name value forbidden
+  case "$spec" in
+    ?*=?*) ;;
+    *) echo "[错误] 请求头需要 name=value 格式，两边都不能为空：$spec" >&2; return 1 ;;
+  esac
+  name="$(printf '%s' "${spec%%=*}" | tr '[:upper:]' '[:lower:]')"
+  value="${spec#*=}"
+  case "$name" in
+    ''|[!a-z0-9]*|*[!a-z0-9-]*)
+      echo "[错误] 不是合法的 HTTP 头名：$name" >&2
+      return 1
+      ;;
+  esac
+  for forbidden in $BROKER_FORBIDDEN_HEADERS; do
+    if [ "$name" = "$forbidden" ]; then
+      echo "[错误] 请求头 $name 由密钥代理自己管理，不能在这里覆盖。" >&2
+      return 1
+    fi
+  done
+  printf '%s=%s' "$name" "$value"
+}
+
 add_broker_upstream() {
-  local name="$1" base="$2" key="$3" rpm="${4:-0}" daily="${5:-0}" resolved index
+  local name="$1" base="$2" key="$3" rpm="${4:-0}" daily="${5:-0}" profile="${6:-}" headers="${7:-}" resolved index
   name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
   validate_upstream_name "$name" || return 1
+  [ -n "$profile" ] || profile="$(broker_default_profile "$name")"
+  validate_broker_profile "$profile" || return 1
   if [ -z "$key" ]; then
     echo "[错误] 上游 $name 的密钥为空。" >&2
     return 1
@@ -825,6 +939,8 @@ add_broker_upstream() {
       BROKER_KEYS[$index]="$key"
       BROKER_RPM[$index]="$rpm"
       BROKER_DAILY[$index]="$daily"
+      BROKER_PROFILES[$index]="$profile"
+      BROKER_HEADERS[$index]="$headers"
       return 0
     fi
     index=$((index + 1))
@@ -834,6 +950,22 @@ add_broker_upstream() {
   BROKER_KEYS+=("$key")
   BROKER_RPM+=("$rpm")
   BROKER_DAILY+=("$daily")
+  BROKER_PROFILES+=("$profile")
+  BROKER_HEADERS+=("$headers")
+}
+
+# 摘要要告诉人 WebUI 里到底填什么，而这取决于上游的 API 形态。内存里没有这个上游时
+# （例如选了"保留现有配置"，名字是从 keys.json 里捞的）退回 /v1，那是最常见的形态。
+broker_upstream_url_suffix() {
+  local wanted="$1" index=0
+  while [ "$index" -lt "${#BROKER_NAMES[@]}" ]; do
+    if [ "${BROKER_NAMES[$index]}" = "$wanted" ]; then
+      broker_profile_url_suffix "${BROKER_PROFILES[$index]}"
+      return 0
+    fi
+    index=$((index + 1))
+  done
+  printf '%s' '/v1'
 }
 
 # 上游名字不是秘密，可以进摘要和日志；密钥永远不进。
@@ -853,7 +985,7 @@ broker_upstream_names() {
 # 可选字段能省就省：把 broker 的默认值抄一份进 keys.json，只会在 broker 改默认值之后
 # 变成静默的行为分叉，也让人更难看出哪些限制是自己真的设过的。
 broker_upstreams_json() {
-  local index=0 body="" entry name newline
+  local index=0 body="" entry name newline profile header_name header_template paths prefix extras extra pairs
   newline=$'\n'
   while [ "$index" -lt "${#BROKER_NAMES[@]}" ]; do
     name="${BROKER_NAMES[$index]}"
@@ -861,13 +993,32 @@ broker_upstreams_json() {
       "$(json_string "$name")" \
       "$(json_string "${BROKER_BASE_URLS[$index]}")" \
       "$(json_string "${BROKER_KEYS[$index]}")")"
-    case "$name" in
-      anthropic)
-        # Anthropic 不用 Authorization: Bearer，密钥走 x-api-key，而且缺 anthropic-version
-        # 会被上游直接 400。这两条不是默认值，必须显式写进配置。
-        entry="$entry, \"headerName\": \"x-api-key\", \"headerTemplate\": \"{key}\", \"extraHeaders\": {\"anthropic-version\": \"2023-06-01\"}"
-        ;;
-    esac
+    profile="${BROKER_PROFILES[$index]}"
+    header_name="$(broker_profile_header_name "$profile")"
+    header_template="$(broker_profile_header_template "$profile")"
+    # 只有偏离 broker 默认值时才写出来：把默认值抄进配置只会在 broker 改默认值之后
+    # 变成静默的行为分叉。
+    if [ "$header_name" != authorization ] || [ "$header_template" != 'Bearer {key}' ]; then
+      entry="$entry, \"headerName\": $(json_string "$header_name"), \"headerTemplate\": $(json_string "$header_template")"
+    fi
+    paths=""
+    for prefix in $(broker_profile_paths "$profile"); do
+      paths="${paths:+$paths, }$(json_string "$prefix")"
+    done
+    [ -z "$paths" ] || entry="$entry, \"allowedPathPrefixes\": [$paths]"
+    # 形态自带的头（例如 anthropic-version）在前，用户自己填的在后：同名时以用户的为准。
+    extras=""
+    pairs="$(broker_profile_headers "$profile")"
+    [ -z "${BROKER_HEADERS[$index]}" ] || pairs="${pairs:+$pairs$BROKER_HEADER_RS}${BROKER_HEADERS[$index]}"
+    while [ -n "$pairs" ]; do
+      case "$pairs" in
+        *"$BROKER_HEADER_RS"*) extra="${pairs%%"$BROKER_HEADER_RS"*}"; pairs="${pairs#*"$BROKER_HEADER_RS"}" ;;
+        *) extra="$pairs"; pairs="" ;;
+      esac
+      [ -n "$extra" ] || continue
+      extras="${extras:+$extras, }$(json_string "${extra%%=*}"): $(json_string "${extra#*=}")"
+    done
+    [ -z "$extras" ] || entry="$entry, \"extraHeaders\": {$extras}"
     [ "${BROKER_RPM[$index]}" = 0 ] || entry="$entry, \"requestsPerMinute\": ${BROKER_RPM[$index]}"
     [ "${BROKER_DAILY[$index]}" = 0 ] || entry="$entry, \"dailyRequestBudget\": ${BROKER_DAILY[$index]}"
     entry="$entry}"
@@ -1001,19 +1152,68 @@ validate_model_base_url_specs() {
       *) echo "[错误] --model-base-url 需要 NAME=URL 格式。" >&2; exit 2 ;;
     esac
   done
+  for spec in ${MODEL_API_SPECS[@]+"${MODEL_API_SPECS[@]}"}; do
+    case "$spec" in
+      ?*=?*) ;;
+      *) echo "[错误] --model-api 需要 NAME=PROFILE 格式。" >&2; exit 2 ;;
+    esac
+    validate_broker_profile "${spec#*=}" || exit 2
+  done
+  for spec in ${MODEL_HEADER_SPECS[@]+"${MODEL_HEADER_SPECS[@]}"}; do
+    case "$spec" in
+      ?*=?*=?*) ;;
+      *) echo "[错误] --model-header 需要 NAME=HEADER=VALUE 格式。" >&2; exit 2 ;;
+    esac
+    validate_broker_header "${spec#*=}" > /dev/null || exit 2
+  done
+}
+
+model_api_override() {
+  local wanted spec
+  wanted="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  for spec in ${MODEL_API_SPECS[@]+"${MODEL_API_SPECS[@]}"}; do
+    if [ "$(printf '%s' "${spec%%=*}" | tr '[:upper:]' '[:lower:]')" = "$wanted" ]; then
+      printf '%s' "${spec#*=}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 同一个上游可以给多条 --model-header，拼成 RS 分隔串交给 add_broker_upstream。
+model_header_overrides() {
+  local wanted spec pair out=""
+  wanted="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  for spec in ${MODEL_HEADER_SPECS[@]+"${MODEL_HEADER_SPECS[@]}"}; do
+    [ "$(printf '%s' "${spec%%=*}" | tr '[:upper:]' '[:lower:]')" = "$wanted" ] || continue
+    pair="$(validate_broker_header "${spec#*=}")" || return 1
+    out="${out:+$out$BROKER_HEADER_RS}$pair"
+  done
+  printf '%s' "$out"
 }
 
 # 把 --model-key 收集进上游数组。安装向导和 model-key 动作共用，保证两条路径下
 # "命令行给了密钥"的行为完全一致。
 apply_model_key_specs() {
-  local spec
+  local spec name profile headers
   for spec in ${MODEL_KEY_SPECS[@]+"${MODEL_KEY_SPECS[@]}"}; do
     # 报错文案里不能回显 spec：格式写错时它整体可能就是一段密钥。
     case "$spec" in
       ?*=?*) ;;
       *) echo "[错误] --model-key 需要 NAME=KEY 格式，且两边都不能为空。" >&2; exit 2 ;;
     esac
-    add_broker_upstream "${spec%%=*}" "" "${spec#*=}" 0 0 || exit 2
+    name="$(printf '%s' "${spec%%=*}" | tr '[:upper:]' '[:lower:]')"
+    profile="$(model_api_override "$name" || true)"
+    headers="$(model_header_overrides "$name")" || exit 2
+    add_broker_upstream "$name" "" "${spec#*=}" 0 0 "$profile" "$headers" || exit 2
+  done
+  # --model-api / --model-header 挂在一个没给密钥的上游名上时静默丢掉最难查，所以点出来。
+  for spec in ${MODEL_API_SPECS[@]+"${MODEL_API_SPECS[@]}"} ${MODEL_HEADER_SPECS[@]+"${MODEL_HEADER_SPECS[@]}"}; do
+    name="$(printf '%s' "${spec%%=*}" | tr '[:upper:]' '[:lower:]')"
+    case " $(broker_upstream_names) " in
+      *" $name "*) ;;
+      *) echo "[警告] 没有名为 $name 的上游，对应的 --model-api / --model-header 不会生效。" >&2 ;;
+    esac
   done
 }
 
@@ -1025,7 +1225,7 @@ apply_model_key_specs() {
 #   - 还没填过任何上游 → 什么都不收集，调用方按"不启用"处理；
 #   - 已经填过 → 只是不再加下一个，前面填好的保留。
 prompt_broker_upstreams() {
-  local name base key confirm rpm daily
+  local name base key confirm rpm daily profile choice headers pair
   while :; do
     while :; do
       prompt "上游名字（小写字母、数字、下划线、短横线）" deepseek
@@ -1037,6 +1237,32 @@ prompt_broker_upstreams() {
       prompt "$name 的 base_url" "$base"
       base="$PROMPT_RESULT"
       validate_upstream_base_url "$base" && break
+    done
+    # 形态决定注入哪个认证头、放行哪些端点，也决定 WebUI 里 base_url 要不要带 /v1。
+    # 默认值按上游名猜，绝大多数情况直接回车就对。
+    profile="$(broker_default_profile "$name")"
+    echo > /dev/tty
+    echo "$name 走哪种 API：" > /dev/tty
+    echo "1) OpenAI 兼容，不额外收窄端点（chat/completions、responses、embeddings 都放行）" > /dev/tty
+    echo "2) 只用 Responses（Codex 那类客户端）" > /dev/tty
+    echo "3) 只用 Chat Completions" > /dev/tty
+    echo "4) Anthropic Messages（认证头 x-api-key，自动带 anthropic-version）" > /dev/tty
+    echo "5) Gemini 原生（认证头 x-goog-api-key，端点 /v1beta/models）" > /dev/tty
+    case "$profile" in
+      messages) choice=4 ;;
+      gemini) choice=5 ;;
+      *) choice=1 ;;
+    esac
+    while :; do
+      prompt "请选择" "$choice"
+      case "$PROMPT_RESULT" in
+        1) profile=any; break ;;
+        2) profile=responses; break ;;
+        3) profile=chat; break ;;
+        4) profile=messages; break ;;
+        5) profile=gemini; break ;;
+        *) echo "请输入 1 到 5。" > /dev/tty ;;
+      esac
     done
     while :; do
       prompt_secret "$name 的 API 密钥（不回显，留空 = 跳过）"
@@ -1065,7 +1291,20 @@ prompt_broker_upstreams() {
       daily="$PROMPT_RESULT"
       case "$daily" in ''|*[!0-9]*) echo "请输入非负整数。" > /dev/tty ;; *) break ;; esac
     done
-    add_broker_upstream "$name" "$base" "$key" "$rpm" "$daily" || continue
+    # 有些上游（或客户端协议）要求固定的请求头，例如 Codex 那套 originator / version，
+    # 或者上游按 User-Agent 做识别。放在代理这一侧配，容器里改不了，客户端也不用管。
+    headers=""
+    prompt_yes_no "$name 需要固定请求头（originator、version、User-Agent 之类）" n
+    if [ "$PROMPT_RESULT" = true ]; then
+      echo "一行一个 name=value，回车结束。示例：user-agent=codex_cli_rs/0.101.0" > /dev/tty
+      while :; do
+        prompt_optional "请求头"
+        [ -n "$PROMPT_RESULT" ] || break
+        pair="$(validate_broker_header "$PROMPT_RESULT")" || continue
+        headers="${headers:+$headers$BROKER_HEADER_RS}$pair"
+      done
+    fi
+    add_broker_upstream "$name" "$base" "$key" "$rpm" "$daily" "$profile" "$headers" || continue
     key=""
     prompt_yes_no "再添加一个上游" n
     [ "$PROMPT_RESULT" = true ] || break
@@ -1161,13 +1400,13 @@ configure_egress_mode() {
     case "$PENDING_EGRESS_MODE" in allowlist) default_route=2 ;; *) default_route=1 ;; esac
     echo
     echo "容器出站网络："
-    echo "1) open（默认，容器可直接访问任意外网）"
-    echo "2) allowlist（只放行白名单域名，其余全部拒绝）"
-    echo "    选 2 之后会发生这些变化，请先确认能接受："
-    echo "    - dsh 容器不再直连外网，所有出站流量只能经过 dsh-egress 正向代理；"
-    echo "    - 宿主的 3080 改由 dsh-ingress 容器发布（它在 dsh-private 网络上顶替 dsh 这个"
-    echo "      名字，所以 DPanel 那边写的 http://dsh:3080 不用改）；"
-    echo "    - 白名单以外的域名，apt / npm / pip / git 全都会拿到 403。"
+    echo "1) open（默认）：容器可访问任意外网地址。"
+    echo "2) allowlist：容器只能经 dsh-egress 代理出网，白名单外的域名返回 403。"
+    echo "    内置白名单：Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，"
+    echo "    足够 apt / pip / npm / git 正常工作；其他域名需要在下一问里补充。"
+    echo "    影响范围：Agent 访问白名单外的网页、搜索接口、第三方下载站会被拒绝。"
+    echo "    不受影响：模型请求（dsh-key-broker 独立出网）；宿主 3080 改由 dsh-ingress"
+    echo "    发布，反向代理仍写 http://dsh:3080。"
     prompt "请选择" "$default_route"
     case "$PROMPT_RESULT" in
       1) PENDING_EGRESS_MODE=open ;;
@@ -1177,7 +1416,8 @@ configure_egress_mode() {
   fi
   PENDING_EGRESS_ALLOWED_HOSTS="${EGRESS_ALLOW_OVERRIDE:-$(get_compose_env DSH_EGRESS_ALLOWED_HOSTS '')}"
   if [ "$PENDING_EGRESS_MODE" = allowlist ] && [ "$INTERACTIVE" = true ] && [ -z "$EGRESS_ALLOW_OVERRIDE" ]; then
-    echo "    代理内置的白名单已经覆盖 Debian / npm / PyPI / GitHub / uv 这些源，留空就只用它。"
+    echo "    填写的域名会追加在内置白名单之后（内置的软件源始终放行），留空表示只用内置白名单。"
+    echo "    Agent 需要访问的网页或 API 域名也填在这里，例如 www.google.com,*.wikipedia.org。"
     prompt_optional "额外放行的域名（逗号分隔，支持 *.example.com）" "$PENDING_EGRESS_ALLOWED_HOSTS"
     PENDING_EGRESS_ALLOWED_HOSTS="$PROMPT_RESULT"
   fi
@@ -1659,23 +1899,23 @@ print_config_summary() {
   if [ "$PENDING_MODEL_BROKER" = on ]; then
     echo "    模型密钥代理: 开（dsh-key-broker；真实密钥只在 data/broker/keys.json 与该容器内）"
     for upstream_name in $(broker_upstream_names); do
-      echo "      - $upstream_name: base_url = $MODEL_BROKER_BASE/u/$upstream_name/v1，api key 填占位串 $MODEL_BROKER_PLACEHOLDER_KEY"
+      echo "      - $upstream_name: base_url = $MODEL_BROKER_BASE/u/$upstream_name$(broker_upstream_url_suffix "$upstream_name")，api key 填占位串 $MODEL_BROKER_PLACEHOLDER_KEY"
     done
-    echo "    边界（请如实理解）: 它保护的只是「密钥字面值不外泄」，不保护额度，也不保护数据。"
-    echo "      被提示注入的 Agent 拿着占位密钥照样能用你的额度发请求，只是拿不到密钥本身。"
-    echo "      所以每个上游都该配 requestsPerMinute / dailyRequestBudget，并把出站模式切到 allowlist。"
+    echo "    作用范围: 只保证密钥字面值不进入 dsh 容器，不限制额度消耗，也不阻止数据外发。"
+    echo "      容器里的 Agent 用占位密钥仍可发起请求，因此建议为每个上游设置"
+    echo "      requestsPerMinute / dailyRequestBudget，并按需启用 allowlist 出站模式。"
   else
     echo "    模型密钥代理: 关（密钥若写进容器内的配置或环境，容器里的 Agent 一条 cat 就能读到）"
   fi
   if [ "$PENDING_EGRESS_MODE" = allowlist ]; then
     echo "    出站模式: allowlist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）"
     if [ -n "$PENDING_EGRESS_ALLOWED_HOSTS" ]; then
-      echo "    白名单来源: 内置白名单 + 自定义 $(printf '%s' "$PENDING_EGRESS_ALLOWED_HOSTS" | awk -F, '{ print NF }') 条（DSH_EGRESS_ALLOWED_HOSTS）"
+      echo "    白名单: 内置白名单 + 自定义 $(printf '%s' "$PENDING_EGRESS_ALLOWED_HOSTS" | awk -F, '{ print NF }') 条（DSH_EGRESS_ALLOWED_HOSTS）"
     else
-      echo "    白名单来源: 代理内置白名单（Debian / npm / PyPI / GitHub / uv）"
+      echo "    白名单: 仅内置白名单（Debian / npm / PyPI / GitHub / ghcr.io / nodejs.org / astral.sh）"
     fi
   else
-    echo "    出站模式: open（容器可直接访问任意外网；被注入的 Agent 也可以把数据 POST 出去）"
+    echo "    出站模式: open（容器可访问任意外网地址，出站流量不做域名限制）"
   fi
 }
 
@@ -1735,7 +1975,7 @@ add_model_key() {
   echo
   echo "==> 密钥代理已就绪，在 DSH 的模型设置里这样填："
   for upstream_name in $(broker_upstream_names); do
-    echo "      - $upstream_name: base_url = $MODEL_BROKER_BASE/u/$upstream_name/v1，api key 填占位串 $MODEL_BROKER_PLACEHOLDER_KEY"
+    echo "      - $upstream_name: base_url = $MODEL_BROKER_BASE/u/$upstream_name$(broker_upstream_url_suffix "$upstream_name")，api key 填占位串 $MODEL_BROKER_PLACEHOLDER_KEY"
   done
   echo "    容器内那份 skill 文档上的 DSH_MODEL_BROKER 仍显示安装时的值，要等下次重建容器"
   echo "    才会刷新——那只是说明文字，不影响代理生效。"
