@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { parseBrokerConfig } from '../bin/dsh-key-broker-policy.mjs'
 
 const read = async (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
 const [compose, dockerfile, entrypoint, authConfig, nginx, installSh, installPs1, envExample, dshSh, dshBat, readmeZh, readmeEn] = await Promise.all([
@@ -72,10 +77,13 @@ assert.match(authConfig, /DSH_ACCESS_MODE:-local/)
 assert.match(authConfig, /basic\)/)
 assert.match(authConfig, /\/opt\/dsh-auth\/htpasswd/)
 assert.match(authConfig, /\/tmp\/dsh-htpasswd/)
-assert.doesNotMatch(authConfig, /chown|node:node/)
+assert.doesNotMatch(authConfig, /node:node/)
+// Nginx workers run as the unprivileged dsh account, so the runtime htpasswd
+// copy must be handed to that account instead of staying root-only.
+assert.match(authConfig, /chown "\$\{DSH_RUN_USER:-dsh\}" "\$runtime_auth_file"/)
 assert.match(authConfig, /auth_basic off/)
 assert.match(nginx, /include \/tmp\/dsh-auth\.conf/)
-assert.match(nginx, /^user root;$/m)
+assert.match(nginx, /^user dsh;$/m)
 assert.match(nginx, /location = \/healthz/)
 assert.match(nginx, /healthz \{\s+auth_basic off/s)
 
@@ -112,7 +120,16 @@ assert.match(installPs1, /function Test-DshContainer/)
 assert.match(installPs1, /docker container inspect dsh/)
 assert.ok(installPs1.indexOf('Test-DshContainer))') < installPs1.indexOf('docker compose build dsh'), 'Windows must reject an existing container before building')
 assert.match(installPs1, /Invoke-ComposeWithEnvFile/)
-assert.match(installPs1, /Assert-DshRoot/)
+assert.match(installPs1, /Assert-DshHardening/)
+assert.match(installPs1, /\[string\]\$RootPassword = ''/)
+assert.match(installPs1, /\[switch\]\$NoRootPassword/)
+assert.match(installPs1, /data\\secret\\root\.hash/)
+assert.match(installSh, /--root-password/)
+assert.match(installSh, /--no-root-password/)
+assert.match(installSh, /data\/secret\/root\.hash/)
+// The password itself must never be written into the Compose environment file.
+assert.doesNotMatch(installSh, /DSH_ROOT_PASSWORD=\$/)
+assert.doesNotMatch(envExample, /DSH_ROOT_PASSWORD/)
 assert.match(installPs1, /\.env\.pending\./)
 assert.ok(installPs1.indexOf('docker compose build dsh') < installPs1.indexOf("'.env.pending.'"), 'Windows must build before preparing the pending configuration')
 assert.ok(installPs1.indexOf('Invoke-ComposeWithEnvFile -Path $pendingEnvFile') < installPs1.indexOf('Move-Item -LiteralPath $pendingEnvFile'), 'Windows must start successfully before persisting the pending configuration')
@@ -166,5 +183,212 @@ assert.match(installPs1, /PSNativeCommandUseErrorActionPreference = \$false/)
 assert.match(installPs1, /UTF8Encoding\(\$false\)[\s\S]*htpasswd \$imageRef -niB/)
 assert.match(dshSh, /^unset DSH_ACCESS_MODE DSH_BIND_HOST DSH_TRUSTED_HOSTS DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL$/m)
 assert.match(dshBat, /set "DSH_BIND_HOST="/)
+
+// ---------------------------------------------------------------------------
+// 模型密钥代理 / 出站隔离 / userns 预检：两个安装器的开关集合必须一致
+// ---------------------------------------------------------------------------
+for (const [shellFlag, powershellParameter] of [
+  ['--model-key', '$ModelKey'],
+  ['--model-base-url', '$ModelBaseUrl'],
+  ['--model-keys-file', '$ModelKeysFile'],
+  ['--no-model-broker', '$NoModelBroker'],
+  ['--egress', '$Egress'],
+  ['--egress-allow', '$EgressAllow'],
+  ['--userns-preflight', '$UsernsPreflight'],
+]) {
+  assert.ok(installSh.includes(shellFlag), `install.sh missing ${shellFlag}`)
+  assert.ok(installPs1.includes(powershellParameter), `install.ps1 missing ${powershellParameter}`)
+}
+assert.match(installPs1, /\[string\[\]\]\$ModelKey = @\(\)/)
+assert.match(installPs1, /\[string\[\]\]\$ModelBaseUrl = @\(\)/)
+assert.match(installPs1, /\[string\]\$ModelKeysFile = ''/)
+assert.match(installPs1, /\[switch\]\$NoModelBroker/)
+assert.match(installPs1, /\[ValidateSet\('',\s*'open',\s*'allowlist'\)\]/)
+assert.match(installPs1, /\[string\[\]\]\$EgressAllow = @\(\)/)
+assert.match(installPs1, /\[switch\]\$UsernsPreflight/)
+// 密钥参数会进 ps，所以帮助文本必须把交互输入和 --model-keys-file 说成首选。
+assert.match(installSh, /--model-keys-file/)
+assert.match(installSh, /会出现在 ps 里/)
+assert.match(installSh, /DSH_MODEL_KEYS_FILE/)
+assert.match(installPs1, /DSH_MODEL_KEYS_FILE/)
+
+// 叠加顺序是契约：keys.yml 先把 dsh-key-broker 放进 dsh-internal，isolated.yml 才能
+// 把 dsh 收进那张没有网关的网络而不切断模型请求。
+assert.ok(
+  installSh.indexOf('COMPOSE_ARGS+=(-f docker-compose.keys.yml)') > 0
+    && installSh.indexOf('COMPOSE_ARGS+=(-f docker-compose.keys.yml)') < installSh.indexOf('COMPOSE_ARGS+=(-f docker-compose.isolated.yml)'),
+  'install.sh must add the keys overlay before the isolated overlay',
+)
+assert.ok(
+  installPs1.indexOf("@('-f','docker-compose.keys.yml')") > 0
+    && installPs1.indexOf("@('-f','docker-compose.keys.yml')") < installPs1.indexOf("@('-f','docker-compose.isolated.yml')"),
+  'install.ps1 must add the keys overlay before the isolated overlay',
+)
+// build 与 up 必须拿到同一套 -f，否则构建和启动读到的是不同的 Compose 文档。
+assert.match(installSh, /docker compose "\$\{COMPOSE_ARGS\[@\]\}" build dsh/)
+assert.match(installSh, /DOCKER compose --env-file "\$PENDING_ENV_FILE" "\$\{COMPOSE_ARGS\[@\]\}" up -d/)
+// install.ps1 把 -f 拆到 -FileArguments 里传：Compose 要求 -f 紧跟在 compose 之后，
+// 而 tests/run-mode-smoke.mjs 断言 up 的参数是那串字面量，两者只能靠拆参数同时满足。
+assert.match(installPs1, /-Arguments @\('up','-d','--no-build','--force-recreate'\)[^\n]*-FileArguments \$composeFileArgs/)
+assert.match(installPs1, /& docker compose --env-file \$Path @FileArguments @Arguments/)
+
+// .env 只记开关和地址；真实密钥只允许落在 data/broker/keys.json。
+assert.match(installSh, /set_compose_env DSH_MODEL_BROKER "\$PENDING_MODEL_BROKER"/)
+assert.match(installSh, /set_compose_env DSH_EGRESS_MODE "\$PENDING_EGRESS_MODE"/)
+assert.match(installSh, /set_compose_env DSH_EGRESS_ALLOWED_HOSTS "\$PENDING_EGRESS_ALLOWED_HOSTS"/)
+assert.match(installPs1, /Set-ComposeEnvValue \$pendingEnvFile 'DSH_MODEL_BROKER' \$modelBroker/)
+assert.match(installPs1, /Set-ComposeEnvValue \$pendingEnvFile 'DSH_EGRESS_MODE' \$egressMode/)
+assert.doesNotMatch(installSh, /set_compose_env \S*(KEYS?|SECRET)\b/)
+assert.doesNotMatch(installPs1, /Set-ComposeEnvValue [^\n]*\$(upstreamKey|ModelKey)\b/)
+// 落盘权限：Linux 上 0600 + chown 1000:1000（broker 容器以 UID 1000 只读挂载它）。
+assert.match(installSh, /chmod 600 "\$temporary"/)
+assert.match(installSh, /chown 1000:1000 data\/broker\/keys\.json/)
+assert.match(installSh, /mv "\$temporary" data\/broker\/keys\.json/)
+assert.match(installPs1, /function Protect-BrokerConfigFile/)
+assert.match(installPs1, /SetAccessRuleProtection\(\$true, \$false\)/)
+
+// 启动后的核验：broker 活着，且密钥配置绝不能出现在 DSH 容器里。
+for (const [label, source] of [['install.sh', installSh], ['install.ps1', installPs1]]) {
+  assert.ok(source.includes('8080/healthz'), `${label} must probe the broker health endpoint`)
+  assert.ok(source.includes("ls /etc/dsh-broker"), `${label} must prove the key config is absent from the DSH container`)
+  assert.ok(source.includes('3128/status'), `${label} must probe the egress proxy status endpoint`)
+  for (const name of ['dsh-key-broker', 'dsh-egress', 'dsh-ingress', 'dsh-internal']) {
+    assert.ok(source.includes(name), `${label} delete flow must know about ${name}`)
+  }
+}
+// 叠加文件在老部署目录里不存在，删除流程必须容忍。
+assert.match(installSh, /\[ -f docker-compose\.keys\.yml \] && compose_files\+=\( -f docker-compose\.keys\.yml \)/)
+assert.match(installPs1, /Test-Path -LiteralPath \(Join-Path \$resolvedDir \$overlay\) -PathType Leaf/)
+
+// userns-remap 是 daemon 级设置，安装器只许打印步骤，绝不许自己改 daemon.json 或重启 Docker。
+assert.match(installSh, /name=userns/)
+assert.match(installSh, /dockremap/)
+const printOnlyLines = (source) => source
+  .split('\n')
+  .map((entry) => entry.trim())
+  .filter((entry) => !entry.startsWith('#'))
+  .filter((entry) => entry.includes('daemon.json') || entry.includes('systemctl'))
+for (const line of printOnlyLines(installSh)) {
+  assert.match(line, /^echo /, `install.sh must only print, never run: ${line}`)
+}
+for (const line of printOnlyLines(installPs1)) {
+  assert.match(line, /^Write-Host /, `install.ps1 must only print, never run: ${line}`)
+}
+// Windows 上如实说明不支持，而不是假装预检通过。
+assert.match(installPs1, /Docker Desktop 不支持它/)
+assert.match(installPs1, /install\.sh --userns-preflight/)
+
+// ---------------------------------------------------------------------------
+// 实跑一遍：--model-key 生成的 keys.json 必须能通过 broker 自己的强校验
+// ---------------------------------------------------------------------------
+const repoRoot = resolve(new URL('..', import.meta.url).pathname.replace(/^\/(.:)/, '$1'))
+const bash = process.platform === 'win32'
+  ? [String.raw`C:\Program Files\Git\bin\bash.exe`, String.raw`C:\Program Files\Git\usr\bin\bash.exe`].find(existsSync)
+  : 'bash'
+assert.ok(bash, 'bash is required for the wizard installer smoke test')
+const bashPath = (path) => process.platform === 'win32'
+  ? path.replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`).replaceAll('\\', '/')
+  : path
+
+const sandbox = await mkdtemp(join(tmpdir(), 'dsh-wizard-smoke-'))
+const mockBin = join(sandbox, 'bin')
+const dockerLog = join(sandbox, 'docker.log')
+await mkdir(mockBin)
+
+// 只模拟安装器真正用到的子命令。exec 的分支是重点：/etc/dsh-broker 必须失败，
+// 那条命令失败才证明密钥配置没被挂进 Agent 能读的容器。
+const dockerMock = `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$MOCK_DOCKER_LOG"
+if [ "\${1:-}" = container ] && [ "\${2:-}" = inspect ]; then exit 1; fi
+if [ "\${1:-}" = inspect ]; then exit 1; fi
+if [ "\${1:-}" = run ]; then
+  case " $* " in
+    *hash-dsh-password*) printf '%s\\n' '$6$wizardSmokeSalt$wizardSmokeHash' ;;
+    *) printf '%s\\n' 'dsh:$2y$05$wizardSmokeHash' ;;
+  esac
+fi
+if [ "\${1:-}" = exec ]; then
+  case " $* " in
+    *verify-dsh-hardening*) exit 0 ;;
+    */etc/dsh-broker*) exit 1 ;;
+    *dsh-key-broker*) exit 0 ;;
+    *dsh-egress*) printf '%s\\n' '{"status":"ok","allowedHosts":42,"activeConnections":0}' ;;
+    *dsh-ingress*) exit 0 ;;
+    *) printf '%s\\n' 1000 ;;
+  esac
+  exit 0
+fi
+exit 0
+`
+const dockerMockPath = join(mockBin, 'docker')
+await writeFile(dockerMockPath, dockerMock)
+await chmod(dockerMockPath, 0o755)
+
+const prepareProject = async (name) => {
+  const directory = join(sandbox, name)
+  await mkdir(directory, { recursive: true })
+  await cp(join(repoRoot, 'docker-compose.yml'), join(directory, 'docker-compose.yml'))
+  await cp(join(repoRoot, 'docker-compose.keys.yml'), join(directory, 'docker-compose.keys.yml'))
+  await cp(join(repoRoot, 'docker-compose.isolated.yml'), join(directory, 'docker-compose.isolated.yml'))
+  await writeFile(join(directory, 'dsh.sh'), '#!/bin/sh\nexit 0\n')
+  await chmod(join(directory, 'dsh.sh'), 0o755)
+  return directory
+}
+
+const runInstall = (target, args) => spawnSync(bash, [
+  '-c',
+  'PATH="$MOCK_BIN:$PATH"; export PATH; exec "$INSTALL_SCRIPT" "$@"',
+  'dsh-wizard-smoke',
+  'install', '--non-interactive', '--dir', target, '--image-source', 'build', '--access', 'local', ...args,
+], {
+  cwd: sandbox,
+  encoding: 'utf8',
+  env: {
+    ...process.env,
+    MOCK_DOCKER_LOG: dockerLog,
+    MOCK_BIN: bashPath(mockBin),
+    INSTALL_SCRIPT: bashPath(join(repoRoot, 'install.sh')),
+  },
+})
+
+try {
+  const modelKey = 'sk-test-wizard-smoke-deepseek-key'
+  await prepareProject('broker')
+  const broker = runInstall('broker', ['--model-key', `deepseek=${modelKey}`])
+  assert.equal(broker.status, 0, `${broker.stdout}\n${broker.stderr}`)
+
+  // broker 自己的 parseBrokerConfig 是唯一的权威校验：配置写错它会拒绝启动。
+  const keysPath = join(sandbox, 'broker', 'data', 'broker', 'keys.json')
+  const parsed = parseBrokerConfig(await readFile(keysPath, 'utf8'))
+  assert.deepEqual([...parsed.upstreams.keys()], ['deepseek'])
+  assert.equal(parsed.upstreams.get('deepseek').key, modelKey)
+  assert.equal(parsed.upstreams.get('deepseek').baseUrl, 'https://api.deepseek.com')
+  assert.equal(parsed.upstreams.get('deepseek').headerValue, `Bearer ${modelKey}`)
+
+  // 这一条必须有：.env 全文不得含密钥字面值。
+  const brokerEnv = await readFile(join(sandbox, 'broker', '.env'), 'utf8')
+  assert.ok(!brokerEnv.includes(modelKey), '.env must never contain a model key')
+  assert.match(brokerEnv, /^DSH_MODEL_BROKER=on$/m)
+  assert.match(brokerEnv, /^DSH_MODEL_BROKER_BASE=http:\/\/dsh-key-broker:8080$/m)
+  assert.ok(!(await readFile(dockerLog, 'utf8')).includes(modelKey), 'a model key must never reach a docker command line')
+
+  // 关闭要连密钥一起清掉，而不只是翻开关。
+  const disabled = runInstall('broker', ['--no-model-broker'])
+  assert.equal(disabled.status, 0, `${disabled.stdout}\n${disabled.stderr}`)
+  assert.equal(existsSync(keysPath), false, '--no-model-broker must delete data/broker/keys.json')
+  assert.match(await readFile(join(sandbox, 'broker', '.env'), 'utf8'), /^DSH_MODEL_BROKER=off$/m)
+
+  await prepareProject('egress')
+  const isolated = runInstall('egress', ['--egress', 'allowlist', '--egress-allow', 'mirror.example.com'])
+  assert.equal(isolated.status, 0, `${isolated.stdout}\n${isolated.stderr}`)
+  const isolatedEnv = await readFile(join(sandbox, 'egress', '.env'), 'utf8')
+  assert.match(isolatedEnv, /^DSH_EGRESS_MODE=allowlist$/m)
+  assert.match(isolatedEnv, /^DSH_EGRESS_ALLOWED_HOSTS=mirror\.example\.com$/m)
+  const calls = await readFile(dockerLog, 'utf8')
+  assert.match(calls, /compose --env-file \S+ -f docker-compose\.yml -f docker-compose\.isolated\.yml up -d/)
+} finally {
+  await rm(sandbox, { recursive: true, force: true })
+}
 
 console.log('install wizard smoke: ok')

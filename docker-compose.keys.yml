@@ -1,0 +1,47 @@
+# 模型密钥代理（key broker）叠加文件。
+#
+# 为什么要单独一个容器：DSH 容器里跑的是一个可以执行任意命令的 Agent，所以任何
+# 放在那个容器里的模型 API 密钥都必然可被读出——提示注入不需要“骗”它说出密钥，
+# 一条 cat 就够了。把密钥搬到这里之后，DSH 只持有占位密钥和指向本服务的 base_url，
+# 容器内不存在真实密钥这个字符串。
+#
+# 只在 .env 里 DSH_MODEL_BROKER=on 时由安装器叠加：
+#   docker compose -f docker-compose.yml -f docker-compose.keys.yml up -d
+services:
+  dsh-key-broker:
+    image: "${DSH_IMAGE:-dsh:local}"
+    container_name: dsh-key-broker
+    hostname: dsh-key-broker
+    # 非 root、零能力、只读根文件系统。除了那份 0600 的只读密钥配置之外不挂任何卷，
+    # 也不和 DSH 容器共享任何文件系统路径。
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    entrypoint: ["node", "/usr/local/lib/dsh/dsh-key-broker.mjs"]
+    environment:
+      DSH_BROKER_CONFIG: /etc/dsh-broker/keys.json
+      DSH_BROKER_PORT: "8080"
+      DSH_BROKER_BIND: "0.0.0.0"
+      DSH_BROKER_MAX_CONCURRENT: "${DSH_BROKER_MAX_CONCURRENT:-64}"
+      NODE_OPTIONS: "--max-old-space-size=192"
+    volumes:
+      - ./data/broker:/etc/dsh-broker:ro
+    networks:
+      # default 提供出网（要能连模型上游），dsh-internal 让 DSH 容器在隔离模式下
+      # 仍然能访问它。这个服务不发布任何宿主端口。
+      - default
+      - dsh-internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then((response) => process.exit(response.status === 204 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -29,6 +29,8 @@ if [ "\$1" = clone ]; then
   printf '%s\\n' 'services: {}' > "\$3/docker-compose.yml"
   printf '%s\\n' '#!/bin/sh' 'exit 0' > "\$3/dsh.sh"
   chmod +x "\$3/dsh.sh"
+  printf '%s\\n' 'services: {}' > "\$3/docker-compose.keys.yml"
+  printf '%s\\n' 'services: {}' > "\$3/docker-compose.isolated.yml"
   exit 0
 fi
 exit 0
@@ -62,8 +64,24 @@ if [ "\${1:-}" = network ]; then
   exit 0
 fi
 if [ "\${1:-}" = container ] && [ "\${2:-}" = inspect ]; then exit 1; fi
-if [ "\${1:-}" = run ]; then printf '%s\\n' 'dsh:\$2y\$05\$networkSmokeHash'; fi
-if [ "\${1:-}" = exec ]; then printf '%s\\n' 0; fi
+if [ "\${1:-}" = run ]; then
+  case " $* " in
+    *hash-dsh-password*) printf '%s\\n' '\$6\$networkSmokeSalt\$networkSmokeHash' ;;
+    *) printf '%s\\n' 'dsh:\$2y\$05\$networkSmokeHash' ;;
+  esac
+fi
+if [ "\${1:-}" = exec ]; then
+  case " $* " in
+    *verify-dsh-hardening*) exit 0 ;;
+    # 密钥配置绝不能挂进 DSH 容器，安装器靠这条命令失败来反向核验。
+    */etc/dsh-broker*) exit 1 ;;
+    *dsh-key-broker*) exit 0 ;;
+    *dsh-egress*) printf '%s\\n' '{"status":"ok","allowedHosts":42,"activeConnections":0}' ;;
+    *dsh-ingress*) exit 0 ;;
+    *) printf '%s\\n' 1000 ;;
+  esac
+  exit 0
+fi
 exit 0
 `
 
@@ -133,7 +151,26 @@ try {
   const keptEnv = await readFile(join(sandbox, 'legacy-network', '.env'), 'utf8')
   assert.match(keptEnv, /^DSH_DOCKER_NETWORK_EXTERNAL=true$/m)
 
+  // 隔离模式和外部代理网络必须能共存：dsh 退到 dsh-internal，dsh-ingress 顶替
+  // dsh 这个名字接在外部网络上，所以 DPanel 侧写的 http://dsh:3080 不用改。
+  const isolatedProxy = runInstall('isolated-network', [
+    ...proxyArgs,
+    '--network', 'proxy-net',
+    '--egress', 'allowlist',
+    '--egress-allow', 'registry.example.com',
+  ], 'bridge host none proxy-net')
+  assert.equal(isolatedProxy.status, 0, `${isolatedProxy.stdout}\n${isolatedProxy.stderr}`)
+  const isolatedProxyEnv = await readFile(join(sandbox, 'isolated-network', '.env'), 'utf8')
+  assert.match(isolatedProxyEnv, /^DSH_DOCKER_NETWORK=proxy-net$/m)
+  assert.match(isolatedProxyEnv, /^DSH_DOCKER_NETWORK_EXTERNAL=true$/m)
+  assert.match(isolatedProxyEnv, /^DSH_EGRESS_MODE=allowlist$/m)
+  assert.match(isolatedProxyEnv, /^DSH_EGRESS_ALLOWED_HOSTS=registry\.example\.com$/m)
+  assert.match(isolatedProxyEnv, /^DSH_MODEL_BROKER=off$/m)
+
   const calls = await readFile(dockerLog, 'utf8')
+  assert.match(calls, /compose --env-file \S+ -f docker-compose\.yml -f docker-compose\.isolated\.yml up -d/)
+  // broker 没开就绝不能叠加 keys.yml，否则会凭空多起一个容器。
+  assert.doesNotMatch(calls, /docker-compose\.keys\.yml/)
   assert.match(calls, /network inspect proxy-net/)
   assert.doesNotMatch(calls, /network create/, 'non-interactive installs must never create a network implicitly')
 } finally {

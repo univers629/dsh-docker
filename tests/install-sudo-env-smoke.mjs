@@ -47,7 +47,16 @@ if [ "\${1:-}" = container ] && [ "\${2:-}" = inspect ] && [ "\${3:-}" = dsh ]; 
   exit 1
 fi
 if [ "\${1:-}" = exec ]; then
-  printf '%s\\n' 0
+  case " $* " in
+    *verify-dsh-hardening*) exit 0 ;;
+    # 密钥配置绝不能挂进 DSH 容器，安装器靠这条命令失败来反向核验。
+    */etc/dsh-broker*) exit 1 ;;
+    *dsh-key-broker*) exit 0 ;;
+    *dsh-egress*) printf '%s\\n' '{"status":"ok","allowedHosts":42,"activeConnections":0}' ;;
+    *dsh-ingress*) exit 0 ;;
+    *) printf '%s\\n' 1000 ;;
+  esac
+  exit 0
 fi
 exit 0
 `
@@ -74,6 +83,8 @@ const runInstall = async (target, args) => {
   const directory = join(sandbox, target)
   await mkdir(directory, { recursive: true })
   await cp(join(root, 'docker-compose.yml'), join(directory, 'docker-compose.yml'))
+  await cp(join(root, 'docker-compose.keys.yml'), join(directory, 'docker-compose.keys.yml'))
+  await cp(join(root, 'docker-compose.isolated.yml'), join(directory, 'docker-compose.isolated.yml'))
   return spawnSync(bash, [
     '-c',
     'PATH="$MOCK_BIN:$PATH"; export PATH; exec "$INSTALL_SCRIPT" "$@"',
@@ -117,6 +128,27 @@ try {
   const up = lastCall(buildLog, 'compose ', ' up -d ')
   assert.ok(up, 'installer never reached docker compose up')
   assert.match(up, /--env-file \.env\.pending\./)
+
+  // 叠加文件写在命令行上，所以 sudo 的 env_reset 影响不到它们；build 和 up 必须拿到
+  // 同一套 -f，否则构建和启动会读到不同的 Compose 文档。
+  const hardened = await runInstall('hardened-install', [
+    '--access', 'local',
+    '--image-source', 'build',
+    '--model-key', 'deepseek=sk-test-sudo-smoke-key',
+    '--egress', 'allowlist',
+  ])
+  assert.equal(hardened.status, 0, `${hardened.stdout}\n${hardened.stderr}`)
+  const hardenedLog = await readFile(dockerLog, 'utf8')
+  const hardenedBuild = lastCall(hardenedLog, 'compose ', ' build dsh')
+  assert.ok(hardenedBuild, 'installer never reached docker compose build')
+  assert.match(hardenedBuild, /^compose -f docker-compose\.yml -f docker-compose\.keys\.yml -f docker-compose\.isolated\.yml build dsh \| /)
+  const hardenedUp = lastCall(hardenedLog, 'compose ', ' up -d ')
+  assert.ok(hardenedUp, 'installer never reached docker compose up')
+  assert.match(hardenedUp, / -f docker-compose\.yml -f docker-compose\.keys\.yml -f docker-compose\.isolated\.yml up -d /)
+  // sudo 会把命令行原样交给 docker，所以这里正好能证明密钥没被写到命令行上。
+  assert.ok(!hardenedLog.includes('sk-test-sudo-smoke-key'), 'a model key must never reach a docker command line')
+  const hardenedEnv = await readFile(join(sandbox, 'hardened-install', '.env'), 'utf8')
+  assert.ok(!hardenedEnv.includes('sk-test-sudo-smoke-key'), '.env must never contain a model key')
 } finally {
   await rm(sandbox, { recursive: true, force: true })
 }

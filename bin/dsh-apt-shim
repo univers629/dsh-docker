@@ -1,0 +1,19 @@
+#!/bin/sh
+# /usr/local/bin/apt 与 /usr/local/bin/apt-get。
+#
+# 容器带着 no-new-privileges 启动，setuid sudo 在里面无法提权，所以非 root 的
+# dsh 账户执行 apt 时改为把请求交给以 root 运行的特权代理；代理按白名单校验
+# 参数后再调用 /usr/bin 下的真实 apt。root 自己执行时直接走真实命令，避免递归。
+set -eu
+
+command_name=${0##*/}
+case "$command_name" in
+  apt|apt-get|apt-cache|apt-mark) ;;
+  *) command_name=apt-get ;;
+esac
+
+if [ "$(id -u)" = 0 ]; then
+  exec "/usr/bin/$command_name" "$@"
+fi
+
+exec /usr/local/bin/dsh-root "$command_name" "$@"
