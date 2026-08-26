@@ -51,7 +51,7 @@ public static class DockerMock {
         throw "dsh.bat exited with $LASTEXITCODE. Calls: $diagnosticCalls State: $diagnosticState"
     }
     $calls = [IO.File]::ReadAllText($log)
-    if ($calls -notmatch 'desktop start' -or $calls -notmatch 'compose ps') {
+    if ($calls -notmatch 'desktop start' -or $calls -notmatch 'compose( -f \S+)+ ps') {
         throw "Unexpected Docker calls: $calls"
     }
 
@@ -61,7 +61,7 @@ public static class DockerMock {
     if ($LASTEXITCODE -ne 0) { throw "dsh.bat stop exited with $LASTEXITCODE." }
 
     $calls = [IO.File]::ReadAllText($log)
-    if ($calls -notmatch 'container inspect dsh' -or $calls -notmatch 'start dsh' -or $calls -notmatch 'compose stop dsh') {
+    if ($calls -notmatch 'container inspect dsh' -or $calls -notmatch 'start dsh' -or $calls -notmatch 'compose( -f \S+)+ stop dsh') {
         throw "Windows lifecycle did not reuse and stop the existing container: $calls"
     }
     if ($calls -match 'force-recreate|compose down|image prune') {

@@ -87,7 +87,7 @@ assert.match(nginx, /^user dsh;$/m)
 assert.match(nginx, /location = \/healthz/)
 assert.match(nginx, /healthz \{\s+auth_basic off/s)
 
-for (const action of ['install', 'configure', 'update', 'start', 'stop', 'restart', 'logs', 'status', 'delete']) {
+for (const action of ['install', 'configure', 'update', 'model-key', 'start', 'stop', 'restart', 'logs', 'status', 'delete']) {
   assert.ok(installSh.includes(action), `install.sh missing ${action}`)
   assert.ok(installPs1.includes(action), `install.ps1 missing ${action}`)
 }
@@ -250,12 +250,44 @@ assert.match(installPs1, /SetAccessRuleProtection\(\$true, \$false\)/)
 // 启动后的核验：broker 活着，且密钥配置绝不能出现在 DSH 容器里。
 for (const [label, source] of [['install.sh', installSh], ['install.ps1', installPs1]]) {
   assert.ok(source.includes('8080/healthz'), `${label} must probe the broker health endpoint`)
-  assert.ok(source.includes("ls /etc/dsh-broker"), `${label} must prove the key config is absent from the DSH container`)
+  // /etc/dsh-broker 是镜像里预建的只读挂载点，永远存在；按存在性判断会把一次成功的
+  // 安装判成致命错误。判定口径必须是"里面为空"，与 bin/verify-dsh-hardening 一致。
+  assert.ok(source.includes('ls -A /etc/dsh-broker'), `${label} must list the mount point contents, not just its existence`)
+  assert.ok(
+    !/ls \/etc\/dsh-broker'/.test(source),
+    `${label} must not treat the pre-created mount point's existence as a failure`,
+  )
   assert.ok(source.includes('3128/status'), `${label} must probe the egress proxy status endpoint`)
   for (const name of ['dsh-key-broker', 'dsh-egress', 'dsh-ingress', 'dsh-internal']) {
     assert.ok(source.includes(name), `${label} delete flow must know about ${name}`)
   }
 }
+// 密钥留空是有效答案（跳过密钥代理），不能再把用户卡在必填循环里；跳过时必须如实说明
+// WebUI 直填的代价，并给出补填的动作。
+assert.match(installSh, /留空 = 跳过/)
+assert.match(installPs1, /留空 = 跳过/)
+assert.doesNotMatch(installSh, /密钥不能为空/)
+assert.doesNotMatch(installPs1, /密钥不能为空/)
+assert.match(installSh, /^prompt_broker_upstreams\(\) \{$/m)
+assert.match(installPs1, /^function Read-BrokerUpstreams \{$/m)
+assert.match(installSh, /^print_broker_skipped_notice\(\) \{$/m)
+assert.match(installPs1, /^function Show-BrokerSkippedNotice \{$/m)
+// 补填动作绝不能重建 dsh：那会丢掉容器可写层里 apt 装的工具链。
+const shellModelKey = installSh.slice(installSh.indexOf('add_model_key() {'), installSh.indexOf('cleanup_pending_env() {'))
+assert.ok(shellModelKey.includes('./dsh.sh start'), 'install.sh model-key must start the sidecar through dsh.sh')
+assert.ok(!shellModelKey.includes('force-recreate'), 'install.sh model-key must never recreate the dsh container')
+assert.ok(shellModelKey.includes('set_compose_env DSH_MODEL_BROKER on'), 'install.sh model-key must flip the switch in .env')
+const powershellModelKey = installPs1.slice(installPs1.indexOf("    'model-key' {"), installPs1.indexOf("    'update' {"))
+assert.ok(powershellModelKey.includes('.\\dsh.bat start'), 'install.ps1 model-key must start the sidecar through dsh.bat')
+assert.ok(!powershellModelKey.includes('force-recreate'), 'install.ps1 model-key must never recreate the dsh container')
+assert.ok(
+  powershellModelKey.includes("Set-ComposeEnvValue $envFile 'DSH_MODEL_BROKER' 'on'"),
+  'install.ps1 model-key must flip the switch in .env',
+)
+for (const readme of [readmeZh, readmeEn]) {
+  assert.ok(readme.includes('model-key'), 'README must document the model-key action')
+}
+
 // 叠加文件在老部署目录里不存在，删除流程必须容忍。
 assert.match(installSh, /\[ -f docker-compose\.keys\.yml \] && compose_files\+=\( -f docker-compose\.keys\.yml \)/)
 assert.match(installPs1, /Test-Path -LiteralPath \(Join-Path \$resolvedDir \$overlay\) -PathType Leaf/)
@@ -295,12 +327,17 @@ const mockBin = join(sandbox, 'bin')
 const dockerLog = join(sandbox, 'docker.log')
 await mkdir(mockBin)
 
-// 只模拟安装器真正用到的子命令。exec 的分支是重点：/etc/dsh-broker 必须失败，
-// 那条命令失败才证明密钥配置没被挂进 Agent 能读的容器。
+// 只模拟安装器真正用到的子命令。exec 的分支是重点：ls -A /etc/dsh-broker 必须输出为空，
+// 空目录才证明密钥配置没被挂进 Agent 能读的容器（那个挂载点在镜像里本来就存在）。
+// MOCK_DOCKER_CONTAINER_EXISTS 用来切换"dsh 容器已存在"：install 需要它不存在，
+// model-key 反过来必须要求它已经存在。
 const dockerMock = `#!/bin/sh
 set -eu
 printf '%s\\n' "$*" >> "$MOCK_DOCKER_LOG"
-if [ "\${1:-}" = container ] && [ "\${2:-}" = inspect ]; then exit 1; fi
+if [ "\${1:-}" = container ] && [ "\${2:-}" = inspect ]; then
+  if [ -n "\${MOCK_DOCKER_CONTAINER_EXISTS:-}" ]; then exit 0; fi
+  exit 1
+fi
 if [ "\${1:-}" = inspect ]; then exit 1; fi
 if [ "\${1:-}" = run ]; then
   case " $* " in
@@ -311,7 +348,7 @@ fi
 if [ "\${1:-}" = exec ]; then
   case " $* " in
     *verify-dsh-hardening*) exit 0 ;;
-    */etc/dsh-broker*) exit 1 ;;
+    */etc/dsh-broker*) ;;
     *dsh-key-broker*) exit 0 ;;
     *dsh-egress*) printf '%s\\n' '{"status":"ok","allowedHosts":42,"activeConnections":0}' ;;
     *dsh-ingress*) exit 0 ;;
@@ -336,11 +373,11 @@ const prepareProject = async (name) => {
   return directory
 }
 
-const runInstall = (target, args) => spawnSync(bash, [
+const runInstaller = (action, target, args, extraEnv = {}) => spawnSync(bash, [
   '-c',
   'PATH="$MOCK_BIN:$PATH"; export PATH; exec "$INSTALL_SCRIPT" "$@"',
   'dsh-wizard-smoke',
-  'install', '--non-interactive', '--dir', target, '--image-source', 'build', '--access', 'local', ...args,
+  action, '--non-interactive', '--dir', target, '--image-source', 'build', '--access', 'local', ...args,
 ], {
   cwd: sandbox,
   encoding: 'utf8',
@@ -349,8 +386,10 @@ const runInstall = (target, args) => spawnSync(bash, [
     MOCK_DOCKER_LOG: dockerLog,
     MOCK_BIN: bashPath(mockBin),
     INSTALL_SCRIPT: bashPath(join(repoRoot, 'install.sh')),
+    ...extraEnv,
   },
 })
+const runInstall = (target, args) => runInstaller('install', target, args)
 
 try {
   const modelKey = 'sk-test-wizard-smoke-deepseek-key'
@@ -378,6 +417,26 @@ try {
   assert.equal(disabled.status, 0, `${disabled.stdout}\n${disabled.stderr}`)
   assert.equal(existsSync(keysPath), false, '--no-model-broker must delete data/broker/keys.json')
   assert.match(await readFile(join(sandbox, 'broker', '.env'), 'utf8'), /^DSH_MODEL_BROKER=off$/m)
+
+  // 装的时候跳过密钥之后，model-key 必须能把 broker 补上，而且只碰 keys.json 与 .env。
+  const lateKey = 'sk-test-wizard-smoke-late-key'
+  const withoutContainer = runInstaller('model-key', 'broker', ['--model-key', `openai=${lateKey}`])
+  assert.equal(withoutContainer.status, 1, 'model-key must refuse to run before the container exists')
+  assert.match(withoutContainer.stderr, /还没有 dsh 容器/)
+
+  const lateAdd = runInstaller('model-key', 'broker', ['--model-key', `openai=${lateKey}`], { MOCK_DOCKER_CONTAINER_EXISTS: '1' })
+  assert.equal(lateAdd.status, 0, `${lateAdd.stdout}\n${lateAdd.stderr}`)
+  const lateParsed = parseBrokerConfig(await readFile(keysPath, 'utf8'))
+  assert.deepEqual([...lateParsed.upstreams.keys()], ['openai'])
+  assert.equal(lateParsed.upstreams.get('openai').key, lateKey)
+  const lateEnv = await readFile(join(sandbox, 'broker', '.env'), 'utf8')
+  assert.match(lateEnv, /^DSH_MODEL_BROKER=on$/m)
+  assert.ok(!lateEnv.includes(lateKey), '.env must never contain a model key')
+  assert.ok(!(await readFile(dockerLog, 'utf8')).includes(lateKey), 'a model key must never reach a docker command line')
+
+  // 非交互又没给密钥来源时必须直接报参数错误，而不是静默什么都不做。
+  const lateWithoutKey = runInstaller('model-key', 'broker', [], { MOCK_DOCKER_CONTAINER_EXISTS: '1' })
+  assert.equal(lateWithoutKey.status, 2, 'non-interactive model-key needs --model-key or --model-keys-file')
 
   await prepareProject('egress')
   const isolated = runInstall('egress', ['--egress', 'allowlist', '--egress-allow', 'mirror.example.com'])
