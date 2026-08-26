@@ -18,11 +18,32 @@ build/
 *.zip
 *.log
 
+# Local test deployments: the installer's default --dir / -Dir is "dsh-docker",
+# so running it from inside the repo leaves a whole project tree here.
+/dsh-docker/
+
+# Python leftovers. The image ships python3 and uv, and host-side experiments
+# with them drop these next to the sources.
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Packaged archives and patch/editor leftovers.
+*.tgz
+*.tar.gz
+*.bak
+*.orig
+*.rej
+*~
+*.swp
+
 # Local configuration and editor/OS files.
 .env.*
 !.env.example
 .env
 .DS_Store
 Thumbs.db
+desktop.ini
 .idea/
 .vscode/

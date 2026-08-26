@@ -22,7 +22,9 @@ import {
   isHostAllowed,
   normalizeTarget,
   parseAllowList,
+  parseAllowListMode,
   parsePortSet,
+  resolveAllowList,
   stripHopByHopHeaders,
 } from '../bin/dsh-egress-policy.mjs'
 
@@ -91,6 +93,26 @@ for (const value of badAllowLists) {
     EgressPolicyError,
     `白名单必须拒绝 ${JSON.stringify(value)}`,
   )
+}
+
+// --- resolveAllowList：默认追加在内置白名单之上，replace 才整体顶替 ---
+// 这条语义是刻意的：自定义域名如果顶掉内置白名单，apt / pip / npm 会立刻全部 403，
+// 而现场只能看到一个 403，看不出白名单被换了。
+assert.deepEqual(resolveAllowList(undefined, undefined), Array.from(DEFAULT_ALLOWED_HOSTS))
+assert.deepEqual(resolveAllowList('', 'replace'), Array.from(DEFAULT_ALLOWED_HOSTS))
+const appended = resolveAllowList('search.example.com', undefined)
+assert.deepEqual(appended, [...DEFAULT_ALLOWED_HOSTS, 'search.example.com'])
+assert.ok(isHostAllowed('deb.debian.org', appended), '追加模式必须保留内置软件源')
+assert.ok(isHostAllowed('search.example.com', appended), '追加模式必须放行自定义域名')
+// 追加进来的域名和内置项重复时只留一条，顺序以内置白名单为先。
+assert.deepEqual(resolveAllowList('GitHub.com', 'append'), Array.from(DEFAULT_ALLOWED_HOSTS))
+assert.deepEqual(resolveAllowList('search.example.com', 'REPLACE'), ['search.example.com'])
+assert.equal(isHostAllowed('deb.debian.org', resolveAllowList('search.example.com', 'replace')), false)
+assert.equal(parseAllowListMode(undefined), 'append')
+assert.equal(parseAllowListMode(' Append '), 'append')
+assert.equal(parseAllowListMode('replace'), 'replace')
+for (const mode of ['merge', 'off', '1', 42]) {
+  assert.throws(() => parseAllowListMode(mode), EgressPolicyError, `白名单模式必须拒绝 ${JSON.stringify(mode)}`)
 }
 
 // --- parsePortSet ---
@@ -492,6 +514,9 @@ const child = spawn(
       DSH_EGRESS_PORT: '0',
       DSH_EGRESS_BIND: '127.0.0.1',
       DSH_EGRESS_ALLOWED_HOSTS: UPSTREAM_HOST,
+      // replace：这一份子进程只放行假上游，端到端地覆盖「顶替内置白名单」这条路径，
+      // 也让 /status 里的 allowedHosts 是确定的 1。
+      DSH_EGRESS_ALLOWED_HOSTS_MODE: 'replace',
       DSH_EGRESS_ALLOWED_PORTS: `80,443,${upstreamPort}`,
       DSH_EGRESS_MAX_SOCKETS: '32',
       DSH_TEST_UPSTREAM_HOST: UPSTREAM_HOST,
@@ -651,6 +676,7 @@ try {
         DSH_EGRESS_PORT: '0',
         DSH_EGRESS_BIND: '127.0.0.1',
         DSH_EGRESS_ALLOWED_HOSTS: UPSTREAM_HOST,
+        DSH_EGRESS_ALLOWED_HOSTS_MODE: 'replace',
         DSH_EGRESS_ALLOWED_PORTS: `80,443,${upstreamPort}`,
         DSH_TEST_UPSTREAM_HOST: UPSTREAM_HOST,
         DSH_EGRESS_ALLOW_PRIVATE_UPSTREAM: '0',
@@ -737,6 +763,65 @@ try {
     assert.equal(strictLog.includes('/payload'), false, '审计日志不能记录路径')
   } finally {
     await stopProxy(strictChild)
+  }
+
+  // --- 默认（append）模式：真起一个进程，确认 loadConfig 的接线没错 ---
+  //
+  // 单测已经覆盖 resolveAllowList，但「代理进程真的读了 DSH_EGRESS_ALLOWED_HOSTS_MODE」
+  // 只有起进程才能证明：接错了就会退回整体替换，装完之后 apt 会突然 403。
+  const appendChild = spawn(
+    process.execPath,
+    [path.join(root, 'bin', 'dsh-egress-proxy.mjs')],
+    {
+      env: {
+        ...process.env,
+        DSH_EGRESS_PORT: '0',
+        DSH_EGRESS_BIND: '127.0.0.1',
+        // 刻意不设 DSH_EGRESS_ALLOWED_HOSTS_MODE：测的就是缺省行为。
+        DSH_EGRESS_ALLOWED_HOSTS: 'search.example.com',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+  let appendLog = ''
+  let appendStderr = ''
+  appendChild.stdout.setEncoding('utf8')
+  appendChild.stderr.setEncoding('utf8')
+  appendChild.stdout.on('data', (chunk) => {
+    appendLog += chunk
+  })
+  appendChild.stderr.on('data', (chunk) => {
+    appendStderr += chunk
+  })
+  try {
+    const appendListen = await waitForListen(
+      appendChild,
+      () => appendLog,
+      () => appendStderr,
+    )
+    const appendStatus = await new Promise((resolve, reject) => {
+      const request = http.request(
+        { host: '127.0.0.1', port: appendListen.port, path: '/status', agent: false },
+        (response) => {
+          let body = ''
+          response.setEncoding('utf8')
+          response.on('data', (chunk) => {
+            body += chunk
+          })
+          response.on('end', () => resolve({ status: response.statusCode, body }))
+        },
+      )
+      request.on('error', reject)
+      request.end()
+    })
+    assert.equal(appendStatus.status, 200)
+    assert.equal(
+      JSON.parse(appendStatus.body).allowedHosts,
+      DEFAULT_ALLOWED_HOSTS.length + 1,
+      `默认模式必须是内置白名单 + 自定义域名：${appendStatus.body}`,
+    )
+  } finally {
+    await stopProxy(appendChild)
   }
 
   // CONNECT：白名单内建隧道并原样转发字节，白名单外 403。

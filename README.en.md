@@ -188,7 +188,8 @@ The threat model, per-layer configuration, the broker `keys.json` schema, egress
 
 Real keys are written only to `data/broker/keys.json` (0600) on the host and mounted read-only into `dsh-key-broker`, never into the DSH container. In DSH's model settings, set base_url to `http://dsh-key-broker:8080/u/<upstream>/v1` and the api key to any placeholder string.
 
-- At install time: the wizard reads each upstream key without echoing it, or use `--model-keys-file` with a 0600 `keys.json`.
+- At install time: the wizard reads each upstream key without echoing it and asks for the API shape (OpenAI-compatible / Responses / Chat Completions / Anthropic Messages / native Gemini) and any fixed request headers; `--model-keys-file` with a 0600 `keys.json` also works.
+- Non-interactively: `--model-api NAME=PROFILE` and `--model-header NAME=HEADER=VALUE` (repeatable), for example the `originator` / `version` / `User-Agent` trio a Codex client expects. The profile decides the auth header, the allowed endpoints, and whether base_url ends in `/v1`; see [docs/security.en.md](docs/security.en.md).
 - Afterwards: `./install.sh model-key` (Windows: `.\install.ps1 -DshAction model-key`) adds the broker container without recreating `dsh`.
 - Status: `./dsh.sh keys` prints upstreams, quotas, today's usage, and allow/deny counters, never the keys.
 - Keys cannot be moved into the WebUI: the WebUI runs inside the DSH container, so a key entered there is stored in the container where the agent can read the file directly. Entering keys in the WebUI still works when the broker is skipped, at the cost of this protection.
@@ -198,7 +199,7 @@ Real keys are written only to `data/broker/keys.json` (0600) on the host and mou
 `DSH_EGRESS_MODE` in `.env` selects how the container reaches the network:
 
 - `open` (default): the container connects directly, which is simpler but lets a compromised agent send data anywhere.
-- `allowlist`: the container joins a gateway-less internal network and must use the `dsh-egress` forward proxy, which allows 15 built-in domains covering Debian, npm, PyPI, GitHub, and GHCR. `DSH_EGRESS_ALLOWED_HOSTS` replaces that list wholesale.
+- `allowlist`: the container joins a gateway-less internal network and must use the `dsh-egress` forward proxy, which allows 15 built-in domains covering Debian, npm, PyPI, GitHub, and GHCR. `DSH_EGRESS_ALLOWED_HOSTS` adds domains on top of that list, and `DSH_EGRESS_ALLOWED_HOSTS_MODE=replace` swaps it out instead. Anything outside the list gets a 403, including web pages and search APIs the agent tries to reach.
 
 ## Publishing the image
 

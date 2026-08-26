@@ -23,7 +23,7 @@ import {
   DEFAULT_ALLOWED_HOSTS,
   DEFAULT_CONNECT_PORTS,
   DEFAULT_FORWARD_PORTS,
-  parseAllowList,
+  resolveAllowList,
   parsePortSet,
   assertConnectTarget,
   assertForwardRequest,
@@ -70,7 +70,13 @@ function loadConfig() {
     // 端口 0 只用于测试：内核分配端口，实际端口从启动日志里读。
     port: readInt('DSH_EGRESS_PORT', 3128, { min: 0, max: 65535 }),
     bind: (process.env.DSH_EGRESS_BIND || '0.0.0.0').trim(),
-    allowList: parseAllowList(process.env.DSH_EGRESS_ALLOWED_HOSTS, DEFAULT_ALLOWED_HOSTS),
+    // DSH_EGRESS_ALLOWED_HOSTS 默认是「在内置白名单之上追加」；要整体顶替内置白名单
+    // 得显式写 DSH_EGRESS_ALLOWED_HOSTS_MODE=replace。
+    allowList: resolveAllowList(
+      process.env.DSH_EGRESS_ALLOWED_HOSTS,
+      process.env.DSH_EGRESS_ALLOWED_HOSTS_MODE,
+      DEFAULT_ALLOWED_HOSTS,
+    ),
     connectPorts: parsePortSet(allowedPorts, DEFAULT_CONNECT_PORTS),
     forwardPorts: parsePortSet(allowedPorts, DEFAULT_FORWARD_PORTS),
     connectTimeoutMs: readInt('DSH_EGRESS_CONNECT_TIMEOUT_MS', 30_000, { min: 1_000, max: 600_000 }),

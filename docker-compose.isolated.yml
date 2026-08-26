@@ -65,9 +65,11 @@ services:
     environment:
       DSH_EGRESS_PORT: "3128"
       DSH_EGRESS_BIND: "0.0.0.0"
-      # 留空表示用内置白名单（Debian/npm/PyPI/GitHub/uv 生态）。要放行别的域名就在
-      # .env 里写 DSH_EGRESS_ALLOWED_HOSTS，逗号分隔，支持 *.example.com。
+      # 内置白名单覆盖 Debian/npm/PyPI/GitHub/uv 生态。要放行别的域名就在 .env 里写
+      # DSH_EGRESS_ALLOWED_HOSTS，逗号分隔，支持 *.example.com；默认追加在内置白名单
+      # 之后，写 DSH_EGRESS_ALLOWED_HOSTS_MODE=replace 才会整体顶替内置白名单。
       DSH_EGRESS_ALLOWED_HOSTS: "${DSH_EGRESS_ALLOWED_HOSTS:-}"
+      DSH_EGRESS_ALLOWED_HOSTS_MODE: "${DSH_EGRESS_ALLOWED_HOSTS_MODE:-append}"
       DSH_EGRESS_ALLOWED_PORTS: "${DSH_EGRESS_ALLOWED_PORTS:-}"
       DSH_EGRESS_MAX_SOCKETS: "${DSH_EGRESS_MAX_SOCKETS:-256}"
       # 解析结果的公网校验（DNS rebinding 防护）默认开着。只有白名单里确实是内网
