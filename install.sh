@@ -54,7 +54,8 @@ usage() {
   cat <<'EOF'
 用法：install.sh [操作] [选项]
 
-操作：install（默认）、configure、update（容器内更新 DSH）、start、stop、restart、logs、status、delete（删除）
+操作：install（默认）、configure、update（容器内更新 DSH）、model-key（给已装好的部署补填模型密钥）、
+      start、stop、restart、logs、status、delete（删除）
 选项：
   --access local|trusted-proxy|basic
   --bind-host ADDRESS             Docker 发布端口绑定地址
@@ -83,7 +84,7 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    install|configure|update|start|stop|restart|logs|status|delete)
+    install|configure|update|model-key|start|stop|restart|logs|status|delete)
       ACTION="$1"
       ;;
     --action)
@@ -191,7 +192,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$ACTION" in
-  ''|install|configure|update|start|stop|restart|logs|status|delete) ;;
+  ''|install|configure|update|model-key|start|stop|restart|logs|status|delete) ;;
   *) echo "[错误] 未知操作：$ACTION" >&2; exit 2 ;;
 esac
 case "$ACCESS_MODE_OVERRIDE" in
@@ -286,6 +287,7 @@ if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
     echo "6) 查看日志"
     echo "7) 查看状态"
     echo "8) 删除"
+    echo "9) 补填模型 API 密钥（只新增密钥代理容器，不重建 dsh）"
     prompt "这次要做什么" "1"
     case "$PROMPT_RESULT" in
       1) ACTION=install ;;
@@ -296,6 +298,7 @@ if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
       6) ACTION=logs ;;
       7) ACTION=status ;;
       8) ACTION=delete ;;
+      9) ACTION=model-key ;;
       *) echo "[错误] 无效选项。" >&2; exit 2 ;;
     esac
   else
@@ -989,18 +992,101 @@ ensure_external_network() {
   return 1
 }
 
-configure_model_broker() {
-  local name base key confirm rpm daily spec
-  PENDING_MODEL_BROKER="$(get_compose_env DSH_MODEL_BROKER off)"
-  case "$PENDING_MODEL_BROKER" in on|off) ;; *) PENDING_MODEL_BROKER=off ;; esac
-
-  # 先统一检查格式，否则报错时机会取决于上游出现的顺序，很难看懂。
+# --model-base-url 只做格式检查：报错时机不该取决于上游出现的顺序。
+validate_model_base_url_specs() {
+  local spec
   for spec in ${MODEL_BASE_URL_SPECS[@]+"${MODEL_BASE_URL_SPECS[@]}"}; do
     case "$spec" in
       ?*=?*) ;;
       *) echo "[错误] --model-base-url 需要 NAME=URL 格式。" >&2; exit 2 ;;
     esac
   done
+}
+
+# 把 --model-key 收集进上游数组。安装向导和 model-key 动作共用，保证两条路径下
+# "命令行给了密钥"的行为完全一致。
+apply_model_key_specs() {
+  local spec
+  for spec in ${MODEL_KEY_SPECS[@]+"${MODEL_KEY_SPECS[@]}"}; do
+    # 报错文案里不能回显 spec：格式写错时它整体可能就是一段密钥。
+    case "$spec" in
+      ?*=?*) ;;
+      *) echo "[错误] --model-key 需要 NAME=KEY 格式，且两边都不能为空。" >&2; exit 2 ;;
+    esac
+    add_broker_upstream "${spec%%=*}" "" "${spec#*=}" 0 0 || exit 2
+  done
+}
+
+# 交互式收集一个或多个上游。安装向导和 model-key 动作共用这一段：两处的问答必须
+# 完全一致，否则"装的时候跳过、之后再补"就会变成两套语义。收集结果只落在
+# BROKER_NAMES/BROKER_KEYS 等数组里，是否启用由调用方按数组是否为空来决定。
+#
+# 密钥处直接回车是有效答案，不是输入错误：
+#   - 还没填过任何上游 → 什么都不收集，调用方按"不启用"处理；
+#   - 已经填过 → 只是不再加下一个，前面填好的保留。
+prompt_broker_upstreams() {
+  local name base key confirm rpm daily
+  while :; do
+    while :; do
+      prompt "上游名字（小写字母、数字、下划线、短横线）" deepseek
+      name="$(printf '%s' "$PROMPT_RESULT" | tr '[:upper:]' '[:lower:]')"
+      validate_upstream_name "$name" && break
+    done
+    while :; do
+      base="$(model_default_base_url "$name" 2>/dev/null || true)"
+      prompt "$name 的 base_url" "$base"
+      base="$PROMPT_RESULT"
+      validate_upstream_base_url "$base" && break
+    done
+    while :; do
+      prompt_secret "$name 的 API 密钥（不回显，留空 = 跳过）"
+      key="$PROMPT_RESULT"
+      if [ -z "$key" ]; then
+        if [ "${#BROKER_NAMES[@]}" -gt 0 ]; then
+          echo "已跳过 $name，前面填好的上游保留。" > /dev/tty
+        fi
+        return 0
+      fi
+      prompt_secret "再次输入 $name 的 API 密钥"
+      confirm="$PROMPT_RESULT"
+      [ "$key" = "$confirm" ] && break
+      echo "两次输入不一致，请重试。" > /dev/tty
+    done
+    confirm=""
+    # 配额是这一层唯一能限制"额度被别人花掉"的手段：密钥代理保证的是密钥不外泄，
+    # 不保证额度不被用，被注入的 Agent 照样可以拿占位密钥发请求。
+    while :; do
+      prompt "$name 每分钟请求上限（0 = 不限）" 0
+      rpm="$PROMPT_RESULT"
+      case "$rpm" in ''|*[!0-9]*) echo "请输入非负整数。" > /dev/tty ;; *) break ;; esac
+    done
+    while :; do
+      prompt "$name 每日请求配额（0 = 不限）" 0
+      daily="$PROMPT_RESULT"
+      case "$daily" in ''|*[!0-9]*) echo "请输入非负整数。" > /dev/tty ;; *) break ;; esac
+    done
+    add_broker_upstream "$name" "$base" "$key" "$rpm" "$daily" || continue
+    key=""
+    prompt_yes_no "再添加一个上游" n
+    [ "$PROMPT_RESULT" = true ] || break
+  done
+}
+
+# 跳过密钥代理时必须把代价讲清楚，而不是静默放过：不开代理就只剩"密钥写进容器"这一条
+# 路，而容器里的 Agent 能读到它。同时给出补填的办法，否则用户只会以为要重装。
+print_broker_skipped_notice() {
+  echo "==> 本次不启用密钥代理。"
+  echo "    现在填密钥的地方就只有 DSH 的 WebUI，而 WebUI 跑在 DSH 容器里：填进去的密钥"
+  echo "    就落在容器内，容器里的 Agent（以及在容器内拿到 root 的人）一条 cat 就能读到。"
+  echo "    想改成真实密钥不进容器：cd 到工程目录后执行 ./install.sh model-key 补填，"
+  echo "    它只新增 dsh-key-broker 容器，不重建 dsh，容器里 apt 装过的东西不会丢。"
+}
+
+configure_model_broker() {
+  PENDING_MODEL_BROKER="$(get_compose_env DSH_MODEL_BROKER off)"
+  case "$PENDING_MODEL_BROKER" in on|off) ;; *) PENDING_MODEL_BROKER=off ;; esac
+
+  validate_model_base_url_specs
 
   if [ "$NO_MODEL_BROKER" = true ]; then
     PENDING_MODEL_BROKER=off
@@ -1013,15 +1099,10 @@ configure_model_broker() {
     PENDING_MODEL_BROKER=on
   fi
 
-  for spec in ${MODEL_KEY_SPECS[@]+"${MODEL_KEY_SPECS[@]}"}; do
-    # 报错文案里不能回显 spec：格式写错时它整体可能就是一段密钥。
-    case "$spec" in
-      ?*=?*) ;;
-      *) echo "[错误] --model-key 需要 NAME=KEY 格式，且两边都不能为空。" >&2; exit 2 ;;
-    esac
-    add_broker_upstream "${spec%%=*}" "" "${spec#*=}" 0 0 || exit 2
+  apply_model_key_specs
+  if [ "${#BROKER_NAMES[@]}" -gt 0 ]; then
     PENDING_MODEL_BROKER=on
-  done
+  fi
 
   if [ "$INTERACTIVE" != true ]; then
     # 非交互的默认行为必须和以前完全一样：既没给密钥、盘上也没有配置，就保持 off，
@@ -1045,6 +1126,8 @@ configure_model_broker() {
   echo "    根本不需要骗它说出来，一条 cat 就够了；容器内被拿到 root 也一样。"
   echo "    开启后真实密钥只留在 data/broker/keys.json 和独立的 dsh-key-broker 容器里，"
   echo "    DSH 容器只拿到占位密钥和 $MODEL_BROKER_BASE 这个地址。"
+  echo "    手上没有密钥就先跳过：下面回答 n，或在密钥那一步直接回车。装完之后随时可以用"
+  echo "    ./install.sh model-key 补填，那条命令不重建 dsh，容器里 apt 装过的东西不会丢。"
   if [ -s data/broker/keys.json ]; then
     prompt_yes_no "保留现有模型密钥配置" y
     if [ "$PROMPT_RESULT" = true ]; then
@@ -1056,51 +1139,18 @@ configure_model_broker() {
   prompt_yes_no "把模型 API 密钥搬到独立的密钥代理容器" y
   if [ "$PROMPT_RESULT" != true ]; then
     PENDING_MODEL_BROKER=off
+    print_broker_skipped_notice
     return 0
   fi
-  while :; do
-    while :; do
-      prompt "上游名字（小写字母、数字、下划线、短横线）" deepseek
-      name="$(printf '%s' "$PROMPT_RESULT" | tr '[:upper:]' '[:lower:]')"
-      validate_upstream_name "$name" && break
-    done
-    while :; do
-      base="$(model_default_base_url "$name" 2>/dev/null || true)"
-      prompt "$name 的 base_url" "$base"
-      base="$PROMPT_RESULT"
-      validate_upstream_base_url "$base" && break
-    done
-    while :; do
-      prompt_secret "$name 的 API 密钥（不回显）"
-      key="$PROMPT_RESULT"
-      if [ -z "$key" ]; then
-        echo "密钥不能为空。" > /dev/tty
-        continue
-      fi
-      prompt_secret "再次输入 $name 的 API 密钥"
-      confirm="$PROMPT_RESULT"
-      [ "$key" = "$confirm" ] && break
-      echo "两次输入不一致，请重试。" > /dev/tty
-    done
-    confirm=""
-    # 配额是这一层唯一能限制"额度被别人花掉"的手段：密钥代理保证的是密钥不外泄，
-    # 不保证额度不被用，被注入的 Agent 照样可以拿占位密钥发请求。
-    while :; do
-      prompt "$name 每分钟请求上限（0 = 不限）" 0
-      rpm="$PROMPT_RESULT"
-      case "$rpm" in ''|*[!0-9]*) echo "请输入非负整数。" > /dev/tty ;; *) break ;; esac
-    done
-    while :; do
-      prompt "$name 每日请求配额（0 = 不限）" 0
-      daily="$PROMPT_RESULT"
-      case "$daily" in ''|*[!0-9]*) echo "请输入非负整数。" > /dev/tty ;; *) break ;; esac
-    done
-    add_broker_upstream "$name" "$base" "$key" "$rpm" "$daily" || continue
-    key=""
-    PENDING_MODEL_BROKER=on
-    prompt_yes_no "再添加一个上游" n
-    [ "$PROMPT_RESULT" = true ] || break
-  done
+  prompt_broker_upstreams
+  # 一个上游都没收集到（密钥处直接回车）就按"本次不启用"处理。以前这里是必填死循环，
+  # 想先把环境装起来的人只能 Ctrl-C，反而更容易把安装打断在一半。
+  if [ "${#BROKER_NAMES[@]}" -eq 0 ]; then
+    PENDING_MODEL_BROKER=off
+    print_broker_skipped_notice
+    return 0
+  fi
+  PENDING_MODEL_BROKER=on
 }
 
 configure_egress_mode() {
@@ -1506,10 +1556,10 @@ assert_dsh_hardening() {
 
 # 密钥代理的核验分两半，缺一半都不算通过：
 #   1) broker 自己活着（/healthz 必须是 204）；
-#   2) DSH 容器里看不到 /etc/dsh-broker——这是整个设计的前提，一旦那份配置被挂进了
+#   2) DSH 容器里的 /etc/dsh-broker 是空的——这是整个设计的前提，一旦那份配置被挂进了
 #      Agent 能读的容器，密钥就等于没搬走，这时宁可让安装失败。
 assert_model_broker() {
-  local attempt state=""
+  local attempt state="" broker_entries=""
   [ "$PENDING_MODEL_BROKER" = on ] || return 0
   echo "==> 正在核验模型密钥代理（dsh-key-broker）..."
   for ((attempt = 0; attempt < 30; attempt++)); do
@@ -1525,12 +1575,18 @@ assert_model_broker() {
     return 1
   fi
   echo "==> 已核验 dsh-key-broker /healthz = 204"
-  if DOCKER exec dsh sh -c 'ls /etc/dsh-broker' >/dev/null 2>&1; then
-    echo "[错误] DSH 容器里能看到 /etc/dsh-broker：密钥配置被挂进了 Agent 可读的容器。" >&2
+  # /etc/dsh-broker 这个目录在镜像里就存在（broker 容器的根文件系统是 read_only，
+  # 只读挂载点必须预先建好），所以"目录存在"永远成立，不能当成失败信号——按存在性判断
+  # 会让一次完全成功的安装以致命错误收尾，连配置摘要都打不出来。真正要拦的是目录里
+  # 出现了内容：那才说明密钥配置被挂进了 Agent 可读的容器。判定口径与
+  # bin/verify-dsh-hardening 的 check_broker_mount() 一致。
+  broker_entries="$(DOCKER exec dsh sh -c 'ls -A /etc/dsh-broker 2>/dev/null' 2>/dev/null || true)"
+  if [ -n "$broker_entries" ]; then
+    echo "[错误] DSH 容器里的 /etc/dsh-broker 不是空的：密钥配置被挂进了 Agent 可读的容器。" >&2
     echo "       这会让密钥代理完全失去意义，请检查 docker-compose.keys.yml 有没有被改过。" >&2
     return 1
   fi
-  echo "==> 已核验 DSH 容器内不存在 /etc/dsh-broker（真实密钥不在 Agent 可达范围内）"
+  echo "==> 已核验 DSH 容器内 /etc/dsh-broker 为空（真实密钥不在 Agent 可达范围内）"
 }
 
 assert_egress_isolation() {
@@ -1623,6 +1679,68 @@ print_config_summary() {
   fi
 }
 
+# 给已经装好的部署补填模型密钥。单独做一个动作的理由：install/configure 见到 dsh 容器
+# 存在就会直接拒绝执行（那是为了保护容器可写层里 apt 装的东西），而 docker-compose.keys.yml
+# 只新增 dsh-key-broker，完全不改 dsh 服务的定义，所以补填密钥根本不需要重建 dsh。
+add_model_key() {
+  local upstream_name
+  if [ "$NO_MODEL_BROKER" = true ]; then
+    echo "[错误] model-key 是补填密钥的动作，不能和 --no-model-broker 一起用。" >&2
+    exit 2
+  fi
+  if [ ! -f docker-compose.keys.yml ]; then
+    echo "[错误] 工程目录里没有 docker-compose.keys.yml，请先更新工程文件后重试。" >&2
+    exit 1
+  fi
+  if ! container_exists; then
+    echo "[错误] 还没有 dsh 容器，请先执行安装。" >&2
+    exit 1
+  fi
+  validate_model_base_url_specs
+  if [ -n "$MODEL_KEYS_FILE" ]; then
+    import_model_keys_file "$MODEL_KEYS_FILE"
+  fi
+  apply_model_key_specs
+  # 命令行两种给法都没用到时才问答。
+  if [ "${#BROKER_NAMES[@]}" -eq 0 ] && [ -z "$MODEL_KEYS_FILE" ]; then
+    if [ "$INTERACTIVE" != true ]; then
+      echo "[错误] 非交互模式下 model-key 需要 --model-key NAME=KEY 或 --model-keys-file PATH。" >&2
+      exit 2
+    fi
+    echo
+    echo "补填模型 API 密钥："
+    echo "    真实密钥只会写进 $(pwd)/data/broker/keys.json（0600）与 dsh-key-broker 容器，"
+    echo "    DSH 容器只拿到占位密钥和 $MODEL_BROKER_BASE 这个地址。同名上游会被覆盖。"
+    prompt_broker_upstreams
+    if [ "${#BROKER_NAMES[@]}" -eq 0 ]; then
+      echo "==> 没有填任何密钥，配置未改动。"
+      return 0
+    fi
+  fi
+  write_broker_config
+  if [ ! -s data/broker/keys.json ]; then
+    echo "[错误] data/broker/keys.json 仍然是空的，.env 未改动。" >&2
+    exit 1
+  fi
+  PENDING_MODEL_BROKER=on
+  set_compose_env DSH_MODEL_BROKER on
+  set_compose_env DSH_MODEL_BROKER_BASE "$MODEL_BROKER_BASE"
+  # 只叫 dsh.sh start：它按 .env 算出叠加文件，只把缺失的旁路容器 up 起来，不动 dsh。
+  echo "==> 正在启动 dsh-key-broker（不重建 dsh 容器）..."
+  if ! ./dsh.sh start; then
+    echo "[错误] 启动失败。密钥已写入 data/broker/keys.json，修好后可以重试。" >&2
+    exit 1
+  fi
+  assert_model_broker
+  echo
+  echo "==> 密钥代理已就绪，在 DSH 的模型设置里这样填："
+  for upstream_name in $(broker_upstream_names); do
+    echo "      - $upstream_name: base_url = $MODEL_BROKER_BASE/u/$upstream_name/v1，api key 填占位串 $MODEL_BROKER_PLACEHOLDER_KEY"
+  done
+  echo "    容器内那份 skill 文档上的 DSH_MODEL_BROKER 仍显示安装时的值，要等下次重建容器"
+  echo "    才会刷新——那只是说明文字，不影响代理生效。"
+}
+
 cleanup_pending_env() {
   [ -z "$PENDING_ENV_FILE" ] || rm -f "$PENDING_ENV_FILE"
 }
@@ -1648,6 +1766,7 @@ case "$ACTION" in
     assert_egress_isolation
     print_config_summary
     ;;
+  model-key) add_model_key ;;
   update) ./dsh.sh update ;;
   start) ./dsh.sh start ;;
   stop) ./dsh.sh stop ;;

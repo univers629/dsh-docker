@@ -1,6 +1,6 @@
 param(
     [Alias('Action')]
-    [ValidateSet('','install','configure','update','start','stop','restart','logs','status','delete')]
+    [ValidateSet('','install','configure','update','model-key','start','stop','restart','logs','status','delete')]
     [string]$DshAction,
     [ValidateSet('','local','trusted-proxy','basic')]
     [string]$Access = '',
@@ -180,9 +180,73 @@ function Get-BrokerUpstreamNames {
     return @()
 }
 
+# 交互式收集一个或多个上游。安装向导和 model-key 动作共用这一段：两处问答必须完全一致，
+# 否则"装的时候跳过、之后再补"会变成两套语义。结果进 $BrokerUpstreams，是否启用由调用方
+# 按它是否为空来决定。
+#
+# 密钥处直接回车是有效答案，不是输入错误：
+#   - 还没填过任何上游 → 什么都不收集，调用方按"不启用"处理；
+#   - 已经填过 → 只是不再加下一个，前面填好的保留。
+function Read-BrokerUpstreams {
+    $addMoreUpstreams = $true
+    while ($addMoreUpstreams) {
+        $upstreamName = ''
+        while (-not $upstreamName) {
+            $candidate = (Ask '上游名字（小写字母、数字、下划线、短横线）' 'deepseek').ToLowerInvariant()
+            if ($candidate -match '^[a-z0-9_-]{1,32}$') { $upstreamName = $candidate }
+            else { Write-Host '上游名字只允许小写字母、数字、下划线和短横线，且不超过 32 个字符。' -ForegroundColor Red }
+        }
+        $upstreamBase = ''
+        while (-not $upstreamBase) {
+            $candidate = Ask "$upstreamName 的 base_url" (Get-ModelDefaultBaseUrl $upstreamName)
+            try { Test-UpstreamBaseUrl $candidate; $upstreamBase = $candidate }
+            catch { Write-Host $_.Exception.Message -ForegroundColor Red }
+        }
+        $upstreamKey = ''
+        while (-not $upstreamKey) {
+            $candidate = Ask-Secret "$upstreamName 的 API 密钥（不回显，留空 = 跳过）"
+            if (-not $candidate) {
+                if ($BrokerUpstreams.Count -gt 0) { Write-Host "已跳过 $upstreamName，前面填好的上游保留。" -ForegroundColor Yellow }
+                return
+            }
+            if ($candidate -ne (Ask-Secret "再次输入 $upstreamName 的 API 密钥")) {
+                Write-Host '两次输入不一致，请重试。' -ForegroundColor Red
+                continue
+            }
+            $upstreamKey = $candidate
+        }
+        # 配额是这一层唯一能限制"额度被别人花掉"的手段：密钥代理保证的是密钥不外泄，
+        # 不保证额度不被用，被注入的 Agent 照样可以拿占位密钥发请求。
+        $upstreamRpm = -1
+        while ($upstreamRpm -lt 0) {
+            $candidate = Ask "$upstreamName 每分钟请求上限（0 = 不限）" '0'
+            if ($candidate -match '^\d+$') { $upstreamRpm = [int]$candidate } else { Write-Host '请输入非负整数。' -ForegroundColor Red }
+        }
+        $upstreamDaily = -1
+        while ($upstreamDaily -lt 0) {
+            $candidate = Ask "$upstreamName 每日请求配额（0 = 不限）" '0'
+            if ($candidate -match '^\d+$') { $upstreamDaily = [int]$candidate } else { Write-Host '请输入非负整数。' -ForegroundColor Red }
+        }
+        Add-BrokerUpstream -Name $upstreamName -BaseUrl $upstreamBase -Key $upstreamKey `
+            -RequestsPerMinute $upstreamRpm -DailyRequestBudget $upstreamDaily
+        $upstreamKey = $null
+        $addMoreUpstreams = Ask-YesNo '再添加一个上游' $false
+    }
+}
+
+# 跳过密钥代理时必须把代价讲清楚，而不是静默放过：不开代理就只剩"密钥写进容器"这一条路，
+# 而容器里的 Agent 能读到它。同时给出补填的办法，否则用户只会以为要重装。
+function Show-BrokerSkippedNotice {
+    Write-Host '==> 本次不启用密钥代理。' -ForegroundColor Yellow
+    Write-Host '    现在填密钥的地方就只有 DSH 的 WebUI，而 WebUI 跑在 DSH 容器里：填进去的密钥' -ForegroundColor Yellow
+    Write-Host '    就落在容器内，容器里的 Agent（以及在容器内拿到 root 的人）一条 cat 就能读到。' -ForegroundColor Yellow
+    Write-Host '    想改成真实密钥不进容器：在工程目录里执行 .\install.ps1 -DshAction model-key 补填，' -ForegroundColor Yellow
+    Write-Host '    它只新增 dsh-key-broker 容器，不重建 dsh，容器里 apt 装过的东西不会丢。' -ForegroundColor Yellow
+}
+
 # 密钥代理的核验分两半，缺一半都不算通过：
 #   1) broker 自己活着（/healthz 必须是 204）；
-#   2) DSH 容器里看不到 /etc/dsh-broker——这是整个设计的前提，一旦那份配置被挂进了
+#   2) DSH 容器里的 /etc/dsh-broker 是空的——这是整个设计的前提，一旦那份配置被挂进了
 #      Agent 能读的容器，密钥就等于没搬走，这时宁可让安装失败。
 function Assert-ModelBroker {
     Write-Host '==> 正在核验模型密钥代理（dsh-key-broker）...' -ForegroundColor Yellow
@@ -194,9 +258,12 @@ function Assert-ModelBroker {
     }
     if (-not $healthy) { throw 'dsh-key-broker 未在 30 秒内让 /healthz 返回 204。查看原因：docker logs dsh-key-broker（配置写错时 broker 会拒绝启动）。' }
     Write-Host '==> 已核验 dsh-key-broker /healthz = 204' -ForegroundColor Green
-    & docker exec dsh sh -c 'ls /etc/dsh-broker' *> $null
-    if ($LASTEXITCODE -eq 0) { throw 'DSH 容器里能看到 /etc/dsh-broker：密钥配置被挂进了 Agent 可读的容器，密钥代理会完全失去意义。请检查 docker-compose.keys.yml 有没有被改过。' }
-    Write-Host '==> 已核验 DSH 容器内不存在 /etc/dsh-broker（真实密钥不在 Agent 可达范围内）' -ForegroundColor Green
+    # /etc/dsh-broker 在镜像里就已经建好（broker 容器根文件系统是 read_only，只读挂载点
+    # 必须预先存在），所以"目录存在"永远成立，不能当成失败信号。真正要拦的是里面出现了
+    # 内容，判定口径与 bin/verify-dsh-hardening 的 check_broker_mount() 一致。
+    $brokerEntries = @(& docker exec dsh sh -c 'ls -A /etc/dsh-broker 2>/dev/null' 2>$null | Where-Object { $_ -and $_.ToString().Trim() })
+    if ($brokerEntries.Count -gt 0) { throw 'DSH 容器里的 /etc/dsh-broker 不是空的：密钥配置被挂进了 Agent 可读的容器，密钥代理会完全失去意义。请检查 docker-compose.keys.yml 有没有被改过。' }
+    Write-Host '==> 已核验 DSH 容器内 /etc/dsh-broker 为空（真实密钥不在 Agent 可达范围内）' -ForegroundColor Green
 }
 
 function Assert-EgressIsolation {
@@ -753,10 +820,11 @@ if ($UsernsPreflight) {
 
 if (-not $DshAction -and $interactive) {
     $installLabel = if (Test-Path $Dir) { '重新配置并重建容器（保留挂载数据）' } else { '全新安装' }
-    Write-Host "1) $installLabel`n2) 在容器内更新 DSH`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态`n8) 删除"
+    Write-Host "1) $installLabel`n2) 在容器内更新 DSH`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态`n8) 删除`n9) 补填模型 API 密钥（只新增密钥代理容器，不重建 dsh）"
     switch (Ask '这次要做什么' '1') {
         '1' { $DshAction = 'install' }; '2' { $DshAction = 'update' }; '3' { $DshAction = 'start' }; '4' { $DshAction = 'stop' }
         '5' { $DshAction = 'restart' }; '6' { $DshAction = 'logs' }; '7' { $DshAction = 'status' }; '8' { $DshAction = 'delete' }
+        '9' { $DshAction = 'model-key' }
         default { throw '无效操作。' }
     }
 } elseif (-not $DshAction) { $DshAction = 'install' }
@@ -946,56 +1014,26 @@ if ($DshAction -in @('install','configure')) {
             Write-Host '    根本不需要骗它说出来，一条 cat 就够了；容器内被拿到 root 也一样。'
             Write-Host "    开启后真实密钥只留在 data\broker\keys.json 和独立的 dsh-key-broker 容器里，"
             Write-Host "    DSH 容器只拿到占位密钥和 $ModelBrokerBase 这个地址。"
+            Write-Host '    手上没有密钥就先跳过：下面回答 n，或在密钥那一步直接回车。装完之后随时可以用'
+            Write-Host '    .\install.ps1 -DshAction model-key 补填，那条命令不重建 dsh，容器里 apt 装过的东西不会丢。'
             $keepBrokerConfig = $false
             if (Test-Path -LiteralPath $brokerConfigFile -PathType Leaf) { $keepBrokerConfig = Ask-YesNo '保留现有模型密钥配置' $true }
             if ($keepBrokerConfig) {
                 $modelBroker = 'on'
                 Write-Host '==> 保留 data\broker\keys.json，本次完全不改动其中的密钥。' -ForegroundColor Yellow
             } elseif (Ask-YesNo '把模型 API 密钥搬到独立的密钥代理容器' $true) {
-                $addMoreUpstreams = $true
-                while ($addMoreUpstreams) {
-                    $upstreamName = ''
-                    while (-not $upstreamName) {
-                        $candidate = (Ask '上游名字（小写字母、数字、下划线、短横线）' 'deepseek').ToLowerInvariant()
-                        if ($candidate -match '^[a-z0-9_-]{1,32}$') { $upstreamName = $candidate }
-                        else { Write-Host '上游名字只允许小写字母、数字、下划线和短横线，且不超过 32 个字符。' -ForegroundColor Red }
-                    }
-                    $upstreamBase = ''
-                    while (-not $upstreamBase) {
-                        $candidate = Ask "$upstreamName 的 base_url" (Get-ModelDefaultBaseUrl $upstreamName)
-                        try { Test-UpstreamBaseUrl $candidate; $upstreamBase = $candidate }
-                        catch { Write-Host $_.Exception.Message -ForegroundColor Red }
-                    }
-                    $upstreamKey = ''
-                    while (-not $upstreamKey) {
-                        $candidate = Ask-Secret "$upstreamName 的 API 密钥（不回显）"
-                        if (-not $candidate) { Write-Host '密钥不能为空。' -ForegroundColor Red; continue }
-                        if ($candidate -ne (Ask-Secret "再次输入 $upstreamName 的 API 密钥")) {
-                            Write-Host '两次输入不一致，请重试。' -ForegroundColor Red
-                            continue
-                        }
-                        $upstreamKey = $candidate
-                    }
-                    # 配额是这一层唯一能限制"额度被别人花掉"的手段：密钥代理保证的是密钥不外泄，
-                    # 不保证额度不被用，被注入的 Agent 照样可以拿占位密钥发请求。
-                    $upstreamRpm = -1
-                    while ($upstreamRpm -lt 0) {
-                        $candidate = Ask "$upstreamName 每分钟请求上限（0 = 不限）" '0'
-                        if ($candidate -match '^\d+$') { $upstreamRpm = [int]$candidate } else { Write-Host '请输入非负整数。' -ForegroundColor Red }
-                    }
-                    $upstreamDaily = -1
-                    while ($upstreamDaily -lt 0) {
-                        $candidate = Ask "$upstreamName 每日请求配额（0 = 不限）" '0'
-                        if ($candidate -match '^\d+$') { $upstreamDaily = [int]$candidate } else { Write-Host '请输入非负整数。' -ForegroundColor Red }
-                    }
-                    Add-BrokerUpstream -Name $upstreamName -BaseUrl $upstreamBase -Key $upstreamKey `
-                        -RequestsPerMinute $upstreamRpm -DailyRequestBudget $upstreamDaily
-                    $upstreamKey = $null
+                Read-BrokerUpstreams
+                # 一个上游都没收集到（密钥处直接回车）就按"本次不启用"处理。以前这里是必填
+                # 死循环，想先把环境装起来的人只能 Ctrl-C，反而更容易把安装打断在一半。
+                if ($BrokerUpstreams.Count -eq 0) {
+                    $modelBroker = 'off'
+                    Show-BrokerSkippedNotice
+                } else {
                     $modelBroker = 'on'
-                    $addMoreUpstreams = Ask-YesNo '再添加一个上游' $false
                 }
             } else {
                 $modelBroker = 'off'
+                Show-BrokerSkippedNotice
             }
         }
     }
@@ -1119,6 +1157,53 @@ switch ($DshAction) {
                 Remove-Item -LiteralPath $pendingEnvFile -Force -ErrorAction SilentlyContinue
             }
         }
+    }
+    'model-key' {
+        # 给已经装好的部署补填模型密钥。单独做一个动作的理由：install/configure 见到 dsh
+        # 容器存在就会直接拒绝执行（那是为了保护容器可写层里 apt 装的东西），而
+        # docker-compose.keys.yml 只新增 dsh-key-broker、不改 dsh 服务的定义，所以补填
+        # 密钥根本不需要重建 dsh。
+        if ($NoModelBroker) { throw 'model-key 是补填密钥的动作，不能和 -NoModelBroker 一起用。' }
+        if (-not (Test-Path -LiteralPath 'docker-compose.keys.yml' -PathType Leaf)) { throw '工程目录里没有 docker-compose.keys.yml，请先更新工程文件后重试。' }
+        if (-not (Test-DshContainer)) { throw '还没有 dsh 容器，请先执行安装。' }
+        $keyBaseOverrides = @{}
+        foreach ($spec in @($ModelBaseUrl)) {
+            if ($spec -notmatch '^[^=]+=.+$') { throw '-ModelBaseUrl 需要 NAME=URL 格式。' }
+            $keyBaseOverrides[($spec -replace '=.*$','').ToLowerInvariant()] = ($spec -replace '^[^=]+=','')
+        }
+        if ($ModelKeysFile) { Import-ModelKeysFile $ModelKeysFile $brokerConfigFile }
+        foreach ($spec in @($ModelKey)) {
+            # 报错文案里不能回显 spec：格式写错时它整体可能就是一段密钥。
+            if ($spec -notmatch '^[^=]+=.+$') { throw '-ModelKey 需要 NAME=KEY 格式，且两边都不能为空。' }
+            $keyUpstreamName = ($spec -replace '=.*$','').ToLowerInvariant()
+            Add-BrokerUpstream -Name $keyUpstreamName -Key ($spec -replace '^[^=]+=','') `
+                -BaseUrl (Resolve-UpstreamBaseUrl -Name $keyUpstreamName -Explicit '' -Overrides $keyBaseOverrides)
+        }
+        if ($BrokerUpstreams.Count -eq 0 -and -not $ModelKeysFile) {
+            if (-not $interactive) { throw '非交互模式下 model-key 需要 -ModelKey NAME=KEY 或 -ModelKeysFile PATH。' }
+            Write-Host '补填模型 API 密钥：'
+            Write-Host "    真实密钥只会写进 $brokerConfigFile 与 dsh-key-broker 容器，"
+            Write-Host "    DSH 容器只拿到占位密钥和 $ModelBrokerBase 这个地址。同名上游会被覆盖。"
+            Read-BrokerUpstreams
+            if ($BrokerUpstreams.Count -eq 0) {
+                Write-Host '==> 没有填任何密钥，配置未改动。' -ForegroundColor Yellow
+                break
+            }
+        }
+        Write-BrokerConfig $brokerConfigFile
+        if (-not (Test-Path -LiteralPath $brokerConfigFile -PathType Leaf)) { throw "$brokerConfigFile 仍然不存在，.env 未改动。" }
+        Set-ComposeEnvValue $envFile 'DSH_MODEL_BROKER' 'on'
+        Set-ComposeEnvValue $envFile 'DSH_MODEL_BROKER_BASE' $ModelBrokerBase
+        # 只叫 dsh.bat start：它按 .env 算出叠加文件，只把缺失的旁路容器 up 起来，不动 dsh。
+        Write-Host '==> 正在启动 dsh-key-broker（不重建 dsh 容器）...' -ForegroundColor Yellow
+        & .\dsh.bat start
+        if ($LASTEXITCODE -ne 0) { throw '启动失败。密钥已写入 data\broker\keys.json，修好后可以重试。' }
+        Assert-ModelBroker
+        Write-Host '==> 密钥代理已就绪，在 DSH 的模型设置里这样填：' -ForegroundColor Green
+        foreach ($name in Get-BrokerUpstreamNames $brokerConfigFile) {
+            Write-Host "      - ${name}: base_url = $ModelBrokerBase/u/$name/v1，api key 填占位串 $ModelBrokerPlaceholderKey" -ForegroundColor Green
+        }
+        Write-Host '    容器内那份 skill 文档上的 DSH_MODEL_BROKER 仍显示安装时的值，要等下次重建容器才会刷新——那只是说明文字，不影响代理生效。' -ForegroundColor Yellow
     }
     'update' { & .\dsh.bat update }
     'start' { & .\dsh.bat start }

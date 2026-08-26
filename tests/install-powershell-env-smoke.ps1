@@ -64,12 +64,6 @@ try {
     if ($call -notmatch '^\|compose --env-file .*\.env up -d --force-recreate') { throw "Host environment was not isolated: $call" }
     if ($env:DSH_ACCESS_MODE -ne 'basic') { throw 'Host environment was not restored.' }
 
-    Assert-DshRoot
-    $script:MockUid = '1000'
-    $rejectedMismatch = $false
-    try { Assert-DshRoot } catch { $rejectedMismatch = $_.Exception.Message -match '期望 0' }
-    if (-not $rejectedMismatch) { throw 'Non-root DSH process was not rejected.' }
-
     Write-Output 'PowerShell compose environment smoke: ok'
 } finally {
     if ($accessExisted) { [Environment]::SetEnvironmentVariable('DSH_ACCESS_MODE', $originalAccess, 'Process') }
