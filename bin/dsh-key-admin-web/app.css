@@ -20,6 +20,7 @@ button.danger { color: var(--bad); }
 .list { display: flex; flex-direction: column; gap: 8px; }
 .item { display: flex; gap: 12px; align-items: center; justify-content: space-between; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 .item .meta { color: var(--muted); font-size: 12px; }
+.item .row-actions { display: flex; gap: 8px; flex: 0 0 auto; }
 .headers .row { align-items: center; margin-bottom: 0; }
 .models { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 2px 12px; margin-top: 10px; max-height: 280px; overflow: auto; }
 .models label { display: flex; gap: 6px; align-items: center; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }

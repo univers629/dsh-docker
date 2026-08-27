@@ -119,10 +119,36 @@ function renderList() {
     edit.type = 'button'
     edit.textContent = '编辑'
     edit.addEventListener('click', () => fillForm(view))
+    const remove = document.createElement('button')
+    remove.type = 'button'
+    remove.className = 'danger'
+    remove.textContent = '删除'
+    remove.addEventListener('click', () => deleteUpstream(view.name, 'auth-status'))
+    const buttons = document.createElement('div')
+    buttons.className = 'row-actions'
+    buttons.appendChild(edit)
+    buttons.appendChild(remove)
     item.appendChild(left)
-    item.appendChild(edit)
+    item.appendChild(buttons)
     list.appendChild(item)
   }
+}
+
+/**
+ * 删除一个上游的密钥和配置。
+ *
+ * 列表里每条都带一个删除按钮，不用先点“编辑”：在 DSH 的模型页删掉那张卡片并不会
+ * 动 keys.json（那是宿主上的文件，DSH 读不到），所以清掉残留的上游只能在这里做。
+ */
+function deleteUpstream(name, statusNode) {
+  return guard(statusNode, async () => {
+    if (name === '' || !window.confirm('删除上游 ' + name + ' 的密钥和配置？DSH 侧那条供应商要自己去 WebUI 删。')) return
+    const payload = await api('/api/upstreams/delete', { name })
+    await refresh()
+    if (S.editing === name) fillForm(null)
+    status(statusNode, '已删除 ' + name + '。', 'good')
+    log(seedSummary(payload))
+  })
 }
 
 function fillForm(view) {
@@ -312,15 +338,7 @@ function main() {
     status('form-status', '已保存 ' + payload.name + '。', 'good')
     log(seedSummary(payload))
   }))
-  byId('delete').addEventListener('click', () => guard('form-status', async () => {
-    const name = byId('name').value.trim()
-    if (name === '' || !window.confirm('删除上游 ' + name + ' 的密钥和配置？DSH 侧那条供应商要自己去 WebUI 删。')) return
-    const payload = await api('/api/upstreams/delete', { name })
-    await refresh()
-    fillForm(null)
-    status('form-status', '已删除 ' + name + '。', 'good')
-    log(seedSummary(payload))
-  }))
+  byId('delete').addEventListener('click', () => deleteUpstream(byId('name').value.trim(), 'form-status'))
   byId('reseed').addEventListener('click', () => guard('auth-status', async () => {
     const payload = await api('/api/seed', {})
     await refresh()
