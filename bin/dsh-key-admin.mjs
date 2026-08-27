@@ -62,6 +62,8 @@ const BROKER_BASE = process.env.DSH_KEY_ADMIN_BROKER_BASE ?? 'http://dsh-key-bro
 const PLACEHOLDER = process.env.DSH_KEY_ADMIN_PLACEHOLDER ?? 'dsh-broker-placeholder'
 const UPSTREAM_TIMEOUT_MS = Number(process.env.DSH_KEY_ADMIN_UPSTREAM_TIMEOUT_MS ?? 20_000)
 const SEED_TIMEOUT_MS = Number(process.env.DSH_KEY_ADMIN_SEED_TIMEOUT_MS ?? 120_000)
+// 凭据巡检间隔。0 或负数关闭；见 scrubCredentials 上面那段说明。
+const SCRUB_INTERVAL_MS = Number(process.env.DSH_KEY_ADMIN_SCRUB_INTERVAL_MS ?? 30_000)
 const BODY_LIMIT = 256 * 1024
 
 const STATIC_FILES = new Map([
@@ -245,7 +247,7 @@ function assertSeedTargetsSane() {
  * 把 keys.json 里的非秘密事实写进 DSH 自己的配置（settings.yaml / .credentials.yaml）。
  * 复用安装器那个脚本，不重写一份：格式契约只该有一个实现。密钥不进载荷。
  */
-function runSeed(document) {
+function spawnSeed(document) {
   if (!fs.existsSync(SEED_SCRIPT)) {
     return Promise.resolve({
       skipped: true,
@@ -292,6 +294,55 @@ function runSeed(document) {
     child.on('close', (code) => finish(code !== 0, code === 0 ? '' : (stderr.trim() || ('seed 退出码 ' + code))))
     child.stdin.end(payload)
   })
+}
+
+// seed 会读旧配置再整份写回，两个并发实例互相覆盖就会丢字段（保存和巡检都会触发它），
+// 所以排成一条队列。
+let seedChain = Promise.resolve()
+function runSeed(document) {
+  const next = seedChain.then(() => spawnSeed(document), () => spawnSeed(document))
+  seedChain = next.then(() => undefined, () => undefined)
+  return next
+}
+
+// 上一次巡检过后 .credentials.yaml 的 mtime：没变就跳过这一轮。
+let scrubbedMtimeMs = -1
+
+/**
+ * 凭据巡检：把 .credentials.yaml 里代理托管路由的引用换回占位串。
+ *
+ * 为什么要定时做而不是只在保存时做：DSH 自己的 WebUI「设置 - 模型」页把密钥框渲染成
+ * type=password，浏览器的密码管理器会往同源的这类输入框里自动填一个保存过的密码，
+ * 用户在那页上改任何东西点保存，那个值就明文落进 .credentials.yaml —— 而这个文件属主
+ * 是 dsh，容器里的 Agent 读得到。代理托管的上游本来就不需要容器里有真密钥（代理会剥掉
+ * 客户端凭证再注入自己那把），所以这里发现非占位串就换掉，并在日志里点名提醒轮换。
+ * 判据在 planSeed 里：只动 baseURL 正好指向本部署代理的路由，用户自己加的直连供应商不碰。
+ */
+async function scrubCredentials() {
+  const file = path.join(DSH_HOME, '.credentials.yaml')
+  let stats
+  try {
+    stats = fs.statSync(file)
+  } catch {
+    return
+  }
+  // 文件没动过就不必再跑一遍 seed（它每次都要起一个 node 进程）。
+  if (stats.mtimeMs === scrubbedMtimeMs) return
+  const seed = await runSeed(readDocument(readConfigText()))
+  try {
+    scrubbedMtimeMs = fs.statSync(file).mtimeMs
+  } catch {
+    scrubbedMtimeMs = -1
+  }
+  if (seed.failed || seed.skipped) {
+    log({ event: 'scrub', failed: Boolean(seed.failed), error: seed.error ?? '' })
+    return
+  }
+  // 只有真回收到东西才记一条：否则每次用户在 WebUI 里改设置都会刷一行无意义的日志。
+  if (String(seed.output ?? '').includes('换回占位串')) {
+    log({ event: 'scrub', reclaimed: true })
+    process.stdout.write(String(seed.output).trimEnd() + '\n')
+  }
 }
 
 async function fetchModels(record) {
@@ -513,4 +564,10 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 
 server.listen(PORT, BIND, () => {
   log({ event: 'listening', port: PORT, bind: BIND, config: CONFIG_PATH, dshHome: DSH_HOME })
+  if (!(SCRUB_INTERVAL_MS > 0)) return
+  const tick = () => {
+    scrubCredentials().catch((error) => log({ event: 'scrub', failed: true, error: String(error && error.message) }))
+  }
+  tick()
+  setInterval(tick, SCRUB_INTERVAL_MS).unref()
 })

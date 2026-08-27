@@ -63,9 +63,17 @@ export function piAiRoutePath(name) {
   return ['llm-pi-ai', 'providers', name]
 }
 
-/** 这个 baseURL 是不是指向本部署的密钥代理路由（即安装器自己写出来的那种）。 */
-export function isBrokerRouteBaseUrl(value, name) {
-  return String(value ?? '').replace(/\/+$/, '').endsWith('/u/' + name)
+/**
+ * 这个 baseURL 是不是指向本部署的密钥代理路由（即安装器自己写出来的那种）。
+ *
+ * 给了 brokerBase 就按整条地址比对（回收凭据引用要用这种严格判据：只有确实指向
+ * 本部署代理的路由才该被换成占位串，用户自己加的直连供应商一律不动）；不给就只
+ * 看 /u/<名字> 后缀。
+ */
+export function isBrokerRouteBaseUrl(value, name, brokerBase) {
+  const normalized = String(value ?? '').replace(/\/+$/, '')
+  if (String(brokerBase ?? '').length > 0) return normalized === brokerRouteBaseUrl(brokerBase, name)
+  return normalized.endsWith('/u/' + name)
 }
 
 /**
@@ -249,6 +257,11 @@ export function planProvider(request) {
   }
 }
 
+/** 可能指向密钥代理的路由候选：pi-ai 路由按名字，第一方命名空间按上游名。 */
+function brokerRouteCandidates(providers, natives) {
+  return [...Object.entries(providers ?? {}), ...Object.entries(natives ?? {})]
+}
+
 /**
  * 规划整份种子配置。
  *
@@ -256,7 +269,7 @@ export function planProvider(request) {
  * @param request.brokerBase 密钥代理 base
  * @param request.placeholder 占位密钥字面值
  * @param request.catalog 目录快照
- * @param request.existing { providers: 已有的 llm-pi-ai.providers（名字 → profile 对象）, refValues: 已有的凭据引用（名字 → 当前值）, defaultModel: 已有的 agent-default-model }
+ * @param request.existing { providers: 已有的 llm-pi-ai.providers（名字 → profile 对象）, natives: 已有的第一方命名空间 profile（上游名 → profile 对象）, refValues: 已有的凭据引用（名字 → 当前值）, defaultModel: 已有的 agent-default-model }
  * @returns { entries, skipped, refs, reclaimed, defaultModel, removals }
  */
 export function planSeed(request) {
@@ -302,6 +315,23 @@ export function planSeed(request) {
     if (current !== '' && current !== request.placeholder && !reclaimed.includes(ref)) {
       reclaimed.push(ref)
     }
+  }
+
+  // 再扫一遍"孤儿引用"。上面那圈只覆盖 keys.json 里还在的上游，但漏了两种情况：
+  // 上游从面板删掉之后（settings.yaml 里那条路由和凭据引用都还留着），以及浏览器的
+  // 密码管理器往 WebUI 的密钥框里自动填了一个值、用户随手保存了一次。两种情况下那个
+  // 引用都不会再被写过，一把真密钥就永久留在 dsh 容器里给 Agent 读。
+  // 判据是"这条路由的 baseURL 正好等于本部署的代理地址"：这种路由的真实密钥在代理
+  // 手里，容器里留一把只是泄漏；用户自己加的直连供应商不满足判据，一律不动。
+  for (const [name, profile] of brokerRouteCandidates(existingProviders, existing.natives ?? {})) {
+    if (!isBrokerRouteBaseUrl(profile?.baseURL, name, request.brokerBase)) continue
+    const ref = typeof profile?.apiKeyEnv === 'string' && profile.apiKeyEnv.length > 0
+      ? profile.apiKeyEnv
+      : NATIVE_ROUTES[name]?.credentialRef ?? deriveCredentialRef(name)
+    const current = String(existingRefValues[ref] ?? '')
+    if (current === '' || current === request.placeholder) continue
+    refs[ref] = request.placeholder
+    if (!reclaimed.includes(ref)) reclaimed.push(ref)
   }
 
   // 默认模型只在还没有的时候设：这是"装完就能对话"的最后一步，但用户选过之后
