@@ -215,28 +215,51 @@ assert.match(installPs1, /\[string\[\]\]\$ModelHeader = @\(\)/)
 // 向导里的可选输入必须有对应的助手函数：少了它，"固定请求头"那一问会在运行时炸。
 assert.match(installPs1, /^function Ask-Optional \{$/m)
 assert.match(installSh, /^prompt_optional\(\) \{$/m)
-// API 形态的问答两边必须给出同一组选项，否则"装的时候选一种、补填时选另一种"。
-for (const option of [
+// 向导做过一次减法：官方上游只问密钥。API 形态、固定请求头、模型 id、限额这四问都被删了，
+// 因为它们都不是秘密（隔离要保护的只有密钥），而且都能在密钥管理面板里改。这里用"必须不存在"
+// 锁住这次减法，防止以后有人把问答一条条加回来。
+for (const removed of [
   '1) OpenAI 兼容，不额外收窄端点（chat/completions、responses、embeddings 都放行）',
-  '2) 只用 Responses（Codex 那类客户端）',
-  '3) 只用 Chat Completions',
   '4) Anthropic Messages（认证头 x-api-key，自动带 anthropic-version）',
-  '5) Gemini 原生（认证头 x-goog-api-key，端点 /v1beta/models）',
   '一行一个 name=value，回车结束。示例：user-agent=codex_cli_rs/0.101.0',
-  // 模型 id 那一问决定 WebUI 的模型下拉里有什么，两边必须一字不差。
-  '在 DSH 内置模型目录里，直接回车就沿用目录里的整份模型清单。',
-  '不在 DSH 内置模型目录里，必须自己列出模型 id，照上游文档原样写。',
-  '    例如：claude-opus-5-thinking 或 gpt-5.2,gemini-3-pro。',
-  '不在内置目录里，至少要填一个模型 id。',
   '模型 id（多个用逗号分隔）',
-  // 自建网关的 base_url 忘了版本段就是上游 404，提示也必须两边一致。
+  '每分钟请求上限（0 = 不限）',
+  '每日请求配额（0 = 不限）',
+  '需要固定请求头',
+]) {
+  assert.ok(!installSh.includes(removed), `install.sh 不该再问：${removed}`)
+  assert.ok(!installPs1.includes(removed), `install.ps1 不该再问：${removed}`)
+}
+// 自建网关的 base_url 忘了版本段就是上游 404，这一问留着，提示也必须两边一致。
+for (const option of [
   '不在内置默认表里，base_url 照上游文档原样填，注意带上版本段：',
   '    OpenAI 兼容网关一般是 https://<域名>/v1，Anthropic 兼容的一般不带 /v1。',
   '    这里填的是真实上游地址；DSH 容器那边填什么由安装器自己算。',
+  '上游名字（小写字母开头，只能用小写字母、数字和短横线）',
+  '的 API 密钥（不回显，留空 = 跳过）',
 ]) {
-  assert.ok(installSh.includes(option), `install.sh 缺少形态问答：${option}`)
-  assert.ok(installPs1.includes(option), `install.ps1 缺少形态问答：${option}`)
+  assert.ok(installSh.includes(option), `install.sh 缺少上游问答：${option}`)
+  assert.ok(installPs1.includes(option), `install.ps1 缺少上游问答：${option}`)
 }
+// 模型清单不再问人，改为保存前向上游要一次。少了这一步，目录外的自建网关会因为
+// 一个模型都没有被 DSH 的 settings 校验整条丢掉，WebUI 上就是"卡片没出现且没有报错"。
+assert.ok(installSh.includes('discover_broker_models'), 'install.sh 缺少模型清单发现步骤')
+assert.ok(installPs1.includes('Invoke-BrokerModelDiscovery'), 'install.ps1 缺少模型清单发现步骤')
+for (const helper of ['bin/discover-upstream-models.mjs', 'bin/dsh-upstream-models.mjs']) {
+  assert.ok(existsSync(new URL(`../${helper}`, import.meta.url)), `缺少 ${helper}`)
+}
+// 上游名字的规则必须三处一致：两个安装器 + 面板策略。不一致就会出现"装的时候能填、
+// 面板里改不了"这种只在某一端复现的问题。
+assert.ok(installSh.includes("''|[!a-z]*|*[!a-z0-9-]*|*-|*--*"), 'install.sh 的上游名字规则没跟上')
+for (const source of [installPs1, await read('bin/dsh-key-admin-policy.mjs')]) {
+  assert.ok(
+    source.includes('^[a-z][a-z0-9]*(-[a-z0-9]+)*$') || source.includes('^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$'),
+    '上游名字规则三处不一致',
+  )
+}
+// keys.json 里的 dsh 段是面板和 DSH 之间唯一的形态/模型清单来源，两个安装器都要写。
+assert.ok(installSh.includes('\\"dsh\\"'), 'install.sh 没写 keys.json 的 dsh 段')
+assert.ok(installPs1.includes("$entry['dsh']"), 'install.ps1 没写 keys.json 的 dsh 段')
 // 出站模式的说明也必须逐字一致：这是用户唯一能看到的策略说明。
 for (const line of [
   '1) open（默认）：容器可访问任意外网地址。',

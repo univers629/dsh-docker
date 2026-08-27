@@ -37,7 +37,7 @@ Windows PowerShell (requires Docker Desktop in Linux containers mode):
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-The installer asks what to do, where the image comes from, how access is protected, where the reverse proxy runs, which domain and port binding to use, which model-key-broker upstreams and quotas to configure, which model ids to enable, and which outbound mode to use, then writes `.env`. Model keys can be left empty and added later with menu item 9 or `./install.sh model-key`, which does not recreate the container. The container root password is stored only as a sha512crypt hash in `data/secret/root.hash` and the Basic Auth password only as a bcrypt hash in `data/auth/htpasswd`; neither is written to `.env`. Nothing in this flow uses a privileged container, mounts a Docker socket, or grants host root.
+The installer asks what to do, where the image comes from, how access is protected, where the reverse proxy runs, which domain and port binding to use, which model-key-broker upstreams to configure, and which outbound mode to use, then writes `.env`. The key step only asks for an upstream name and its key (plus a base_url for self-hosted gateways); the API shape, model list, and request headers are inferred or queried from the upstream. Model keys can be left empty and added later with menu item 9 or `./install.sh model-key`, which does not recreate the container. The container root password is stored only as a sha512crypt hash in `data/secret/root.hash` and the Basic Auth password only as a bcrypt hash in `data/auth/htpasswd`; neither is written to `.env`. Nothing in this flow uses a privileged container, mounts a Docker socket, or grants host root.
 
 | Menu item | What it does |
 | --- | --- |
@@ -192,17 +192,18 @@ The threat model, per-layer configuration, the broker `keys.json` schema, egress
 
 Real keys are written only to `data/broker/keys.json` (0600) on the host and mounted read-only into `dsh-key-broker`, never into the DSH container. The installer writes the DSH-side provider configuration into `data/dsh/settings.yaml` in DSH's own format (base_url pointing at `http://dsh-key-broker:8080/u/<upstream>`, api key set to a placeholder), so models can be picked directly under Settings → Models once the install finishes.
 
-- At install time: the wizard reads each upstream key without echoing it and asks for the API shape (OpenAI-compatible / Responses / Chat Completions / Anthropic Messages / native Gemini), any fixed request headers, and the model ids to enable; `--model-keys-file` with a 0600 `keys.json` also works.
+- At install time: the wizard asks only for an upstream name and its key (never echoed); built-in upstreams such as `deepseek`, `openai`, `anthropic`, `google`, and `nvidia` do not even ask for a base_url. The API shape is inferred from the name, no fixed headers are added by default, and the model list is queried from the upstream before saving. `--model-keys-file` with a 0600 `keys.json` also works.
 - Non-interactively: `--model-api NAME=PROFILE` and `--model-header NAME=HEADER=VALUE` (repeatable), for example the `originator` / `version` / `User-Agent` trio a Codex client expects. The profile decides the auth header, the allowed endpoints, and the protocol written into DSH; see [docs/security.en.md](docs/security.en.md).
-- Model list: upstream names that match DSH's built-in catalog (`deepseek`, `openai`, `anthropic`, `google`, `nvidia`, and others) reuse the catalog's full model list; a self-hosted gateway needs `--model-id NAME=ID[,ID]` or the model ids typed into the wizard. `--no-model-settings-seed` skips writing the configuration and leaves it to the WebUI.
+- Model list: upstream names that match DSH's built-in catalog (`deepseek`, `openai`, `anthropic`, `google`, `nvidia`, and others) reuse the catalog's full model list. An upstream outside the catalog must carry at least one model id, otherwise DSH rejects the whole provider entry and the Models page shows no card, so the installer queries the upstream's `/models` with the key and fills the list automatically; if that fails it prints the reason and the ids can be supplied with `--model-id NAME=ID[,ID]` or in the admin panel. `--no-model-settings-seed` skips writing the configuration and leaves it to the WebUI.
 - A `deepseek` upstream configures DSH's own DeepSeek provider (`llm-deepseek`), so the Models page does not gain a second row; a duplicate `llm-pi-ai.providers.deepseek` left by an older installer is removed on the next write.
+- Upstream name: must start with a lowercase letter and may then contain lowercase letters, digits, and single hyphens, up to 32 characters — the same rule as DSH's "Add custom provider". A non-conforming name is dropped silently, which looks like a missing card on the Models page.
 - base_url: type the real upstream address including its version segment (an OpenAI-compatible gateway is usually `https://<host>/v1`; Anthropic-compatible ones usually have none). The DSH-side URL is derived by the installer, so adding the segment on both sides produces `/v1/v1/...`. Built-in catalog upstreams can just accept the default.
 - Afterwards: `./install.sh model-key` (Windows: `.\install.ps1 -DshAction model-key`) adds the broker container without recreating `dsh`.
 - Status: `./dsh.sh keys` prints upstreams, quotas, today's usage, and allow/deny counters, never the keys.
 
 ### Key admin panel
 
-The panel is the browser alternative to typing keys in a terminal: add or remove upstreams, enter keys, pick the API shape, list model ids, set fixed request headers, and fetch an upstream's model list once. Saving writes both `data/broker/keys.json` and DSH's `settings.yaml` and `.credentials.yaml`; both sides hot-reload, so no container restart is needed.
+The panel is the browser alternative to typing keys in a terminal: add or remove upstreams, enter keys, pick the API shape, list model ids, set fixed request headers, and fetch an upstream's model list once. Saving writes both `data/broker/keys.json` and DSH's `settings.yaml` and `.credentials.yaml`; both sides hot-reload, so no container restart is needed. The panel has no rate-limit or quota fields (neither does DSH's Models page); values already present in an existing configuration are preserved, and changing them needs `--model-keys-file`.
 
 - Enable: the fresh-install wizard asks. An existing deployment runs `./install.sh key-panel` (Windows: `.\install.ps1 -DshAction key-panel`), which adds the `dsh-key-admin` container without recreating `dsh`. `--no-key-admin` turns it off.
 - Access: `http://127.0.0.1:3082/` by default, with the token in `data/broker/admin.token` (0600). For remote use, tunnel it: `ssh -N -L 3082:127.0.0.1:3082 <user@host>`. `DSH_KEY_ADMIN_BIND_HOST` and `DSH_KEY_ADMIN_HOST_PORT` control the published address.
@@ -210,6 +211,16 @@ The panel is the browser alternative to typing keys in a terminal: add or remove
 - Repeated wrong tokens trigger incremental delay and lockout. The panel container itself is `read_only`, `cap_drop: ALL`, runs as 1000:1000, and can only touch `data/broker` and `data/dsh`.
 - An empty `keys.json` is a valid state: install without any key, accept 503 for model requests in the meantime, and enter the first key in the panel.
 - With both the broker and the panel skipped, entering keys in the WebUI still works, at the cost of this protection.
+
+### No card on the Models page
+
+DSH renders only providers that actually exist in its configuration, and a rejected entry produces no error — just a missing card. Check in order:
+
+1. On the host, `cat data/dsh/settings.yaml` and look for the upstream under `llm-pi-ai.providers`. If it is absent the configuration never landed: check `docker logs dsh-key-admin` (panel) or the installer's warnings (wizard).
+2. Present but with an empty `models`: an upstream outside the catalog needs at least one model id, or DSH drops the whole route. Add one and save again.
+3. A non-conforming name (uppercase, underscore, leading digit) is dropped too. Rename and save again.
+4. The DeepSeek card comes from DSH's own first-party provider and is always there; it is not something the installer added.
+5. If the key field already contains something when the settings page opens and it matches a key entered elsewhere, that is the browser's password manager autofilling. DSH never echoes a stored key; the field starts empty.
 
 ## Outbound modes
 

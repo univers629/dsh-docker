@@ -103,6 +103,7 @@ function renderList() {
     meta.className = 'meta'
     const bits = [view.shape, view.baseUrl]
     bits.push(view.models.length > 0 ? view.models.length + ' 个模型' : '模型清单沿用 DSH 内置目录')
+    // 限额不再有输入框，但老配置里设过的值仍然生效，所以还是要显示出来。
     if (view.requestsPerMinute > 0) bits.push(view.requestsPerMinute + ' 次/分钟')
     if (view.dailyRequestBudget > 0) bits.push(view.dailyRequestBudget + ' 次/天')
     if (view.extraHeaders.length > 0) bits.push(view.extraHeaders.length + ' 个固定头')
@@ -129,8 +130,6 @@ function fillForm(view) {
   byId('shape').value = view ? view.shape : 'any'
   byId('base-url').value = view ? view.baseUrl : ''
   byId('key').value = ''
-  byId('rpm').value = view ? String(view.requestsPerMinute) : '0'
-  byId('daily').value = view ? String(view.dailyRequestBudget) : '0'
   byId('models').value = view ? view.models.join(', ') : ''
   byId('key-hint').textContent = view && view.hasKey
     ? '这个上游已有密钥（指纹 ' + view.keyFingerprint + '）。要换密钥就填新的，不换就留空。'
@@ -160,8 +159,7 @@ function readForm() {
     rename: S.editing,
     models: byId('models').value,
     extraHeaders,
-    requestsPerMinute: byId('rpm').value.trim(),
-    dailyRequestBudget: byId('daily').value.trim(),
+    // 限额字段故意不发：面板没有这两个输入框，缺字段时后端沿用 keys.json 里的现值。
   }
 }
 

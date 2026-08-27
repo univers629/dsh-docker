@@ -37,7 +37,7 @@ Windows PowerShell（需要 Docker Desktop 并切换到 Linux containers）：
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-安装器依次询问操作类型、镜像来源、访问保护方式、反向代理位置、域名与端口绑定、模型密钥代理的上游与配额、要启用的模型 id、容器出站模式，并写入 `.env`。模型密钥可以留空跳过，之后用菜单第 9 项或 `./install.sh model-key` 补填，该操作不重建容器。容器 root 密码仅以 sha512crypt 哈希写入 `data/secret/root.hash`，Basic Auth 密码仅以 bcrypt 哈希写入 `data/auth/htpasswd`，两者都不写入 `.env`。安装过程不使用特权容器、不挂载 Docker socket、不授予宿主机 root。
+安装器依次询问操作类型、镜像来源、访问保护方式、反向代理位置、域名与端口绑定、模型密钥代理的上游密钥、容器出站模式，并写入 `.env`。模型密钥那一步只问上游名字和密钥（自建网关多问一个 base_url），API 形态、模型清单、请求头都由安装器推断或向上游查询。模型密钥可以留空跳过，之后用菜单第 9 项或 `./install.sh model-key` 补填，该操作不重建容器。容器 root 密码仅以 sha512crypt 哈希写入 `data/secret/root.hash`，Basic Auth 密码仅以 bcrypt 哈希写入 `data/auth/htpasswd`，两者都不写入 `.env`。安装过程不使用特权容器、不挂载 Docker socket、不授予宿主机 root。
 
 | 菜单项 | 作用 |
 | --- | --- |
@@ -192,17 +192,18 @@ Debian 系统目录留在容器可写层，不使用 overlay 覆盖，因此同�
 
 真实密钥只写入宿主的 `data/broker/keys.json`（0600），以只读方式挂给 `dsh-key-broker`，不挂进 DSH 容器。DSH 侧的供应商配置由安装器按官方格式写进 `data/dsh/settings.yaml`（base_url 指向 `http://dsh-key-broker:8080/u/<上游名>`，api key 是占位串），装完在 WebUI 的「设置 → 模型」里直接选模型即可。
 
-- 安装时配置：向导逐个输入上游密钥（不回显），并逐个询问 API 形态（OpenAI 兼容 / Responses / Chat Completions / Anthropic Messages / Gemini 原生）、固定请求头与模型 id；也可以用 `--model-keys-file` 指向一份 0600 的 `keys.json`。
+- 安装时配置：向导每个上游只问名字和密钥（不回显）；`deepseek`、`openai`、`anthropic`、`google`、`nvidia` 这类内置上游连 base_url 都不问。API 形态按上游名推断，固定请求头默认不加，模型清单在保存前向上游查一次。也可以用 `--model-keys-file` 指向一份 0600 的 `keys.json`。
 - 非交互指定形态与请求头：`--model-api NAME=PROFILE`、`--model-header NAME=HEADER=VALUE`（可重复），例如 Codex 客户端需要的 `originator` / `version` / `User-Agent`。形态决定认证头、放行端点，以及写进 DSH 的协议，详见 [docs/security.md](docs/security.md)。
-- 模型清单：上游名命中 DSH 内置目录（`deepseek`、`openai`、`anthropic`、`google`、`nvidia` 等）时自动沿用目录里的整份清单；自建网关要用 `--model-id NAME=ID[,ID]` 或在向导里给出模型 id。`--no-model-settings-seed` 可以跳过写配置，改为在 WebUI 里自己加。
+- 模型清单：上游名命中 DSH 内置目录（`deepseek`、`openai`、`anthropic`、`google`、`nvidia` 等）时沿用目录里的整份清单。目录外的自建网关必须至少有一个模型 id，否则 DSH 会拒收整条供应商配置、模型页上不出现卡片，所以安装器会先用密钥请求上游的 `/models` 自动填一份；拉不到时会打印原因，用 `--model-id NAME=ID[,ID]` 或在管理面板里补。`--no-model-settings-seed` 可以跳过写配置，改为在 WebUI 里自己加。
 - `deepseek` 上游配置的是 DSH 自带的 DeepSeek 供应商（`llm-deepseek`），模型页上不会多出一行；旧版安装器写下的重复 `llm-pi-ai.providers.deepseek` 会在下次写配置时自动删掉。
+- 上游名字：小写字母开头，之后只能是小写字母、数字和单个短横线，最多 32 个字符，与 DSH「添加自定义提供方」的规则一致。不合规的名字会被 DSH 静默丢弃，表现就是模型页上没有卡片。
 - base_url：填真实上游地址，带上版本段（OpenAI 兼容网关一般是 `https://<域名>/v1`，Anthropic 兼容的一般不带）。DSH 侧填什么由安装器自己算，两边都补一次会变成 `/v1/v1/...`。内置目录里的上游直接回车用默认值即可。
 - 装完后补填：`./install.sh model-key`（Windows：`.\install.ps1 -DshAction model-key`），只新增代理容器，不重建 `dsh`。
 - 查看状态：`./dsh.sh keys` 输出上游、配额、今日用量与放行/拒绝计数，不输出密钥。
 
 ### 密钥管理面板
 
-不想在终端里填密钥就用管理面板：浏览器里增删上游、填密钥、选 API 形态、写模型 id、设固定请求头，还能按上游拉一次模型列表；保存后同时写 `data/broker/keys.json` 与 DSH 的 `settings.yaml`、`.credentials.yaml`，两边都是热加载，不用重启任何容器。
+不想在终端里填密钥就用管理面板：浏览器里增删上游、填密钥、选 API 形态、写模型 id、设固定请求头，还能按上游拉一次模型列表；保存后同时写 `data/broker/keys.json` 与 DSH 的 `settings.yaml`、`.credentials.yaml`，两边都是热加载，不用重启任何容器。面板不提供限速和配额输入框（DSH 的模型页也没有），已有配置里设过的值会照原样保留，改这两项请用 `--model-keys-file`。
 
 - 开启：新装向导会问；已有部署执行 `./install.sh key-panel`（Windows：`.\install.ps1 -DshAction key-panel`），它只新增 `dsh-key-admin` 容器，不重建 `dsh`。关闭用 `--no-key-admin`。
 - 访问：默认 `http://127.0.0.1:3082/`，访问令牌在 `data/broker/admin.token`（0600）。远程用 SSH 隧道：`ssh -N -L 3082:127.0.0.1:3082 <用户名@宿主地址>`。地址与端口由 `DSH_KEY_ADMIN_BIND_HOST`、`DSH_KEY_ADMIN_HOST_PORT` 决定。
@@ -210,6 +211,16 @@ Debian 系统目录留在容器可写层，不使用 overlay 覆盖，因此同�
 - 令牌连续输错会触发递增延迟与锁定；面板容器自身 `read_only`、`cap_drop: ALL`、以 1000:1000 运行，只能读写 `data/broker` 与 `data/dsh`。
 - 空的 `keys.json` 是合法状态：安装时可以先不填密钥，这期间模型请求返回 503，等在面板里填完第一把密钥即可。
 - 跳过密钥代理和面板时，WebUI 直填密钥仍然可用，代价是失去这一层保护。
+
+### 模型页没出现卡片
+
+DSH 的模型页只渲染配置里真实存在的供应商，配置被拒收时页面不报错，只是少一张卡片。按顺序查：
+
+1. 宿主上 `cat data/dsh/settings.yaml`，看 `llm-pi-ai.providers` 下有没有这个上游。没有就是配置没写进去，看 `docker logs dsh-key-admin`（面板保存）或安装器输出里的警告（向导）。
+2. 有这个上游但 `models` 是空的：目录外的上游必须至少有一个模型 id，DSH 会因此丢掉整条路由。补一个模型 id 再保存。
+3. 上游名字不合规（大写、下划线、开头是数字）也会被丢掉，改名重存。
+4. DeepSeek 那张卡片走的是 DSH 自带的第一方供应商，永远存在，不是新增出来的。
+5. 打开设置页时密钥输入框里已经有内容、复制出来正好是自己填过的密钥：这是浏览器密码管理器的自动填充。DSH 从不回填已存的密钥，输入框始终是空的。
 
 ## 出站模式
 

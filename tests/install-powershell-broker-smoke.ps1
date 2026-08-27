@@ -55,22 +55,24 @@ Assert-Equal 'spaced' (Ask-Optional '请求头' 'old-value') 'Ask-Optional 去�
 
 # ---------------------------------------------------------------------------
 # 交互向导整跑一遍：Codex 那类客户端 = responses 形态 + 三个固定请求头
+#
+# 向导做过减法之后只问「名字 → base_url（内置表里没有才问）→ 密钥两次 → 还加不加」。
+# 形态、固定请求头、模型 id 改由命令行参数提供（面板里也能改），所以这里先把那三样
+# 用 -ModelApi / -ModelHeader / -ModelId 摆好，再驱动问答，验证向导确实会沿用它们。
 # ---------------------------------------------------------------------------
 $codexKey = 'sk-test-powershell-broker-key'
+$script:ModelApi = @('justwoker=responses')
+$script:ModelHeader = @(
+    'justwoker=user-agent=codex_cli_rs/0.101.0',
+    'justwoker=originator=codex_cli_rs',
+    'justwoker=version=0.101.0'
+)
+$script:ModelId = @('justwoker=gpt-fake-1,gpt-fake-2')
 @(
     'justwoker',                          # 上游名字
-    'https://api.justwoker.icu',          # base_url
-    '2',                                  # API 形态：只用 Responses
+    'https://api.justwoker.icu',          # base_url（不在内置默认表里才会问）
     $codexKey,                            # 密钥
     $codexKey,                            # 密钥确认
-    '60',                                 # 每分钟上限
-    '2000',                               # 每日配额
-    'y',                                  # 需要固定请求头
-    'user-agent=codex_cli_rs/0.101.0',    # 请求头 1
-    'originator=codex_cli_rs',            # 请求头 2
-    'version=0.101.0',                    # 请求头 3
-    '',                                   # 请求头输入结束
-    'gpt-fake-1, gpt-fake-2',             # 要在 DSH 里启用的模型 id
     'n'                                   # 不再添加上游
 ) | ForEach-Object { $script:Answers.Enqueue($_) }
 Read-BrokerUpstreams
@@ -81,8 +83,9 @@ $entry = $script:BrokerUpstreams[0]
 Assert-Equal 'justwoker' $entry.name '上游名字'
 Assert-Equal 'https://api.justwoker.icu' $entry.baseUrl '上游 base_url'
 Assert-Equal $codexKey $entry.key '上游密钥'
-Assert-Equal 60 $entry.requestsPerMinute '每分钟上限'
-Assert-Equal 2000 $entry.dailyRequestBudget '每日配额'
+# 限额向导里已经不问了：缺省就是不限，keys.json 里干脆不写这两个键（broker 读不到就是 0）。
+if ($entry.Contains('requestsPerMinute')) { throw '向导不该写出 requestsPerMinute' }
+if ($entry.Contains('dailyRequestBudget')) { throw '向导不该写出 dailyRequestBudget' }
 # 默认认证头不该被抄进配置：抄了就会在 broker 改默认值之后变成静默的行为分叉。
 if ($entry.Contains('headerName')) { throw 'responses 形态不应写出 headerName' }
 if ($entry.allowedPathPrefixes -notcontains '/v1/responses') { throw 'responses 形态必须放行 /v1/responses' }
@@ -94,7 +97,7 @@ Assert-Equal '0.101.0' $entry.extraHeaders['version'] '固定请求头 version'
 Assert-Equal 'responses' (Get-BrokerUpstreamProfile 'justwoker') '向导记下的 API 形态'
 Assert-Equal 'any' (Get-BrokerUpstreamProfile 'never-configured') '没配过的上游按 any 处理'
 # 模型 id 只进 DSH 的 settings.yaml，不进 keys.json（broker 不认这个字段）。
-Assert-Equal 'gpt-fake-1, gpt-fake-2' $script:BrokerModels['justwoker'] '向导记下的模型 id'
+Assert-Equal 'gpt-fake-1,gpt-fake-2' $script:BrokerModels['justwoker'] '向导沿用 -ModelId 的模型清单'
 if ($entry.Contains('models')) { throw 'keys.json 不应带 models 字段' }
 
 # 写盘之后交给 broker 自己的 parseBrokerConfig 校验：那是唯一权威的校验器。
@@ -119,8 +122,8 @@ assert.ok(!upstream.allowedPathPrefixes.includes('/v1/chat/completions'))
 assert.equal(upstream.extraHeaders['user-agent'], 'codex_cli_rs/0.101.0')
 assert.equal(upstream.extraHeaders.originator, 'codex_cli_rs')
 assert.equal(upstream.extraHeaders.version, '0.101.0')
-assert.equal(upstream.requestsPerMinute, 60)
-assert.equal(upstream.dailyRequestBudget, 2000)
+assert.equal(upstream.requestsPerMinute, 0)
+assert.equal(upstream.dailyRequestBudget, 0)
 '@
     [IO.File]::WriteAllText($validator, $validatorSource, (New-Object System.Text.UTF8Encoding($false)))
     $env:DSH_KEYS_PATH = $keysPath
@@ -134,40 +137,50 @@ assert.equal(upstream.dailyRequestBudget, 2000)
 }
 
 # ---------------------------------------------------------------------------
-# 目录里没有的上游必须给模型 id：空回车要重问，不能放过去
-# 放过去的后果是 DSH 侧那条供应商一个模型都没有，用户装完在 WebUI 里选不到东西。
+# base_url 只在内置默认表里查不到时才问
+#
+# 这是减法之后向导唯一的分支：问多了，装 deepseek 的人要抄一个本来就知道的地址；
+# 问少了，自建网关根本无从填。答案队列数量对不上就说明分支跑错了。
 # ---------------------------------------------------------------------------
 $script:BrokerUpstreams.Clear()
 $script:BrokerProfiles = @{}
 $script:BrokerModels = @{}
+$script:ModelApi = @()
+$script:ModelHeader = @()
+$script:ModelId = @()
 @(
     'gatewaytest',                        # 上游名字（不在内置目录里）
-    'https://api.gatewaytest.invalid/v1', # base_url
-    '1',                                  # API 形态：OpenAI 兼容
+    'https://api.gatewaytest.invalid/v1', # base_url：必须问
     'sk-gatewaytest',                     # 密钥
     'sk-gatewaytest',                     # 密钥确认
-    '0',                                  # 每分钟上限
-    '0',                                  # 每日配额
-    'n',                                  # 不需要固定请求头
-    '',                                   # 模型 id：空回车 → 必须重问
-    'only-model-1',                       # 重问后填上
     'n'                                   # 不再添加上游
 ) | ForEach-Object { $script:Answers.Enqueue($_) }
 Read-BrokerUpstreams
 if ($script:Answers.Count -ne 0) { throw "目录外上游的向导没问完预置答案，剩余 $($script:Answers.Count) 条" }
-Assert-Equal 'only-model-1' $script:BrokerModels['gatewaytest'] '重问之后记下的模型 id'
+Assert-Equal 'https://api.gatewaytest.invalid/v1' $script:BrokerUpstreams[0].baseUrl '目录外上游的 base_url'
+# 模型清单这时是空的：向导不再追问，改由 Invoke-BrokerModelDiscovery 在写配置前向上游要。
+if ($script:BrokerModels.ContainsKey('gatewaytest') -and $script:BrokerModels['gatewaytest']) {
+    throw '向导不该自己编出模型 id'
+}
 
-# 内置目录里的上游相反：空回车是合法答案，安装器沿用目录里的整份清单。
+# 内置目录里的上游连 base_url 都不问：只有名字、密钥两次、还加不加这四问。
 $script:BrokerUpstreams.Clear()
 $script:BrokerProfiles = @{}
 $script:BrokerModels = @{}
-@('deepseek', 'https://api.deepseek.com', '1', 'sk-deepseek', 'sk-deepseek', '0', '0', 'n', '', 'n') |
-    ForEach-Object { $script:Answers.Enqueue($_) }
+@('deepseek', 'sk-deepseek', 'sk-deepseek', 'n') | ForEach-Object { $script:Answers.Enqueue($_) }
 Read-BrokerUpstreams
 if ($script:Answers.Count -ne 0) { throw "目录内上游的向导没问完预置答案，剩余 $($script:Answers.Count) 条" }
-if ($script:BrokerModels.ContainsKey('deepseek') -and $script:BrokerModels['deepseek']) {
-    throw '目录内上游空回车不应记下模型 id'
-}
+Assert-Equal 'https://api.deepseek.com' $script:BrokerUpstreams[0].baseUrl '目录内上游沿用默认 base_url'
+
+# 名字不合规要当场重问，而不是写进配置让 DSH 静默丢掉整条路由。
+$script:BrokerUpstreams.Clear()
+$script:BrokerProfiles = @{}
+$script:BrokerModels = @{}
+@('b_ai', '4o', 'b-ai', 'https://api.b-ai.invalid/v1', 'sk-b-ai', 'sk-b-ai', 'n') |
+    ForEach-Object { $script:Answers.Enqueue($_) }
+Read-BrokerUpstreams
+if ($script:Answers.Count -ne 0) { throw "名字重问路径没问完预置答案，剩余 $($script:Answers.Count) 条" }
+Assert-Equal 'b-ai' $script:BrokerUpstreams[0].name '重问之后收下的上游名字'
 
 # ---------------------------------------------------------------------------
 # -ModelApi / -ModelHeader：非交互路径

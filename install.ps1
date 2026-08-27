@@ -271,7 +271,11 @@ function Add-BrokerUpstream {
         [string]$ApiProfile = '', [string[]]$ExtraHeader = @(), [string]$ModelIds = ''
     )
     $normalized = $Name.ToLowerInvariant()
-    if ($normalized -notmatch '^[a-z0-9_-]{1,32}$') { throw "上游名字只允许小写字母、数字、下划线和短横线，且不超过 32 个字符：$normalized" }
+    # 规则不能比 DSH 自己宽：官方「添加自定义提供方」用 ^[a-z][a-z0-9]*(-[a-z0-9]+)*$，
+    # 首字符必须是小写字母（凭据引用名是 POSIX 标识符，不能以数字开头）。
+    if ($normalized -notmatch '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' -or $normalized.Length -gt 32) {
+        throw "上游名字要以小写字母开头，之后只能是小写字母、数字和单个短横线，最多 32 个字符：$normalized"
+    }
     if (-not $Key) { throw "上游 $normalized 的密钥为空。" }
     if (-not $ApiProfile) { $ApiProfile = Get-BrokerDefaultProfile $normalized }
     Test-BrokerProfile $ApiProfile
@@ -294,10 +298,15 @@ function Add-BrokerUpstream {
         $headers[($pair -replace '=.*$','')] = ($pair -replace '^[^=]+=','')
     }
     if ($headers.Count -gt 0) { $entry['extraHeaders'] = $headers }
-    # profile 与模型 id 都不是 broker 的字段，不写进 keys.json，只留在内存里供
-    # "写 DSH 模型配置"这一步用。
     $BrokerProfiles[$normalized] = $ApiProfile
     $BrokerModels[$normalized] = $ModelIds
+    # dsh 这个字段 broker 自己会忽略（它的解析器丢掉未知字段），存的是"DSH 侧要怎么填"：
+    # 形态和模型清单。不写的话密钥管理面板打开这条上游时看到的是空清单，用户会以为
+    # 安装时填的东西丢了，一保存还会把已经问到的模型清单覆盖掉。
+    $entry['dsh'] = [ordered]@{
+        api = $ApiProfile
+        models = @(($ModelIds -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
     # 可选字段能省就省：把 broker 的默认值抄一份进 keys.json，只会在 broker 改默认值之后
     # 变成静默的行为分叉，也让人更难看出哪些限制是自己真的设过的。
     if ($RequestsPerMinute -gt 0) { $entry['requestsPerMinute'] = $RequestsPerMinute }
@@ -375,6 +384,79 @@ function Invoke-DshModelSettingsSeed {
     }
 }
 
+# 替"DSH 内置目录之外的上游"向上游问一次模型清单。
+#
+# 这一步不是省一次输入：DSH 对目录外的路由要求至少一个模型 id，缺了就拒绝整条路由，
+# 而拒绝的表现是 WebUI 的模型页不多出卡片、也不报任何错。向导以前靠追问用户手写模型
+# id 来避免它，但那是把上游文档的活推给了用户，跳过一次就装出一个"填了密钥却选不到
+# 模型"的部署。密钥这时就在手上，直接问上游最省事；问不出来才提示手动补。
+#
+# 密钥全程走 stdin，不进任何进程的命令行（Windows 上 docker run 的参数同样会被别的
+# 进程看到）。宿主没有 node 时借镜像里那个，和合并 keys.json 同一个理由。
+function Invoke-BrokerModelDiscovery {
+    param([string]$Image)
+    if ($BrokerUpstreams.Count -eq 0) { return }
+    $discoverScript = Join-Path (Get-Location) 'bin\discover-upstream-models.mjs'
+    if (-not (Test-Path -LiteralPath $discoverScript -PathType Leaf)) { return }
+    $pending = @()
+    foreach ($entry in @($BrokerUpstreams)) {
+        $name = [string]$entry.name
+        if (Get-ModelDefaultBaseUrl $name) { continue }
+        $models = ''
+        if ($BrokerModels.ContainsKey($name)) { $models = [string]$BrokerModels[$name] }
+        if ($models) { continue }
+        $pending += [ordered]@{
+            name = $name
+            baseUrl = [string]$entry.baseUrl
+            key = [string]$entry.key
+            shape = (Get-BrokerUpstreamProfile $name)
+        }
+    }
+    if ($pending.Count -eq 0) { return }
+    Write-Host '==> 这些上游不在 DSH 内置模型目录里，正在向上游问它们的模型清单...' -ForegroundColor Yellow
+    $payload = [ordered]@{ upstreams = $pending } | ConvertTo-Json -Depth 6 -Compress
+    $binDir = Join-Path (Get-Location) 'bin'
+    $previousOutputEncoding = $OutputEncoding
+    $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    $output = @()
+    try {
+        if (Get-Command node -ErrorAction SilentlyContinue) {
+            $output = @($payload | & node $discoverScript 2>$null)
+        } else {
+            if (-not $Image) { $Image = $DefaultPrebuiltImage }
+            $output = @($payload | docker run --rm -i -v "${binDir}:/dsh-bin:ro" `
+                --entrypoint node $Image /dsh-bin/discover-upstream-models.mjs 2>$null)
+        }
+    } catch {
+        Write-Host "[警告] 问模型清单时出错：$($_.Exception.Message)" -ForegroundColor Yellow
+    } finally { $OutputEncoding = $previousOutputEncoding }
+    $payload = $null
+    foreach ($line in $output) {
+        $parts = [string]$line -split "`t"
+        if ($parts.Count -lt 3) { continue }
+        $name = $parts[1]
+        switch ($parts[0]) {
+            'models' {
+                if (-not $parts[2]) { continue }
+                $BrokerModels[$name] = $parts[2]
+                foreach ($entry in @($BrokerUpstreams | Where-Object { $_.name -eq $name })) {
+                    $entry['dsh'] = [ordered]@{
+                        api = (Get-BrokerUpstreamProfile $name)
+                        models = @(($parts[2] -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                    }
+                }
+                $count = @(($parts[2] -split ',') | Where-Object { $_ }).Count
+                Write-Host "    ${name}：问到 $count 个模型 id，已写进 DSH 的模型清单。"
+            }
+            'failed' {
+                Write-Host "[警告] 上游 $name 的模型清单问不出来：$($parts[2])" -ForegroundColor Yellow
+                Write-Host '       DSH 要求内置目录之外的上游至少有一个模型 id，所以它暂时不会出现在' -ForegroundColor Yellow
+                Write-Host '       「设置 → 模型」里。装完在密钥管理面板的"模型清单"里手写一个再保存即可。' -ForegroundColor Yellow
+            }
+        }
+    }
+}
+
 function Write-BrokerConfig {
     param([string]$Path)
     if ($BrokerUpstreams.Count -eq 0) { return }
@@ -443,44 +525,23 @@ function Read-BrokerUpstreams {
     while ($addMoreUpstreams) {
         $upstreamName = ''
         while (-not $upstreamName) {
-            $candidate = (Ask '上游名字（小写字母、数字、下划线、短横线）' 'deepseek').ToLowerInvariant()
-            if ($candidate -match '^[a-z0-9_-]{1,32}$') { $upstreamName = $candidate }
-            else { Write-Host '上游名字只允许小写字母、数字、下划线和短横线，且不超过 32 个字符。' -ForegroundColor Red }
+            $candidate = (Ask '上游名字（小写字母开头，只能用小写字母、数字和短横线）' 'deepseek').ToLowerInvariant()
+            if ($candidate -match '^[a-z][a-z0-9]*(-[a-z0-9]+)*$' -and $candidate.Length -le 32) { $upstreamName = $candidate }
+            else { Write-Host '上游名字要以小写字母开头，之后只能是小写字母、数字和单个短横线，最多 32 个字符。' -ForegroundColor Red }
         }
-        $upstreamBase = ''
-        if (-not (Get-ModelDefaultBaseUrl $upstreamName)) {
-            # 内置表里没有这个名字，说明是自建网关或聚合站：版本段是这里最常漏的一项，
-            # 漏了就是上游 404，而那时候人已经在 WebUI 里找不到原因了。
+        # base_url 内置表里有就不问：deepseek、openai、anthropic、google、nvidia 这些
+        # 上游的地址不是用户该记的东西。表里没有才问，因为自建网关的地址无从猜测。
+        $upstreamBase = Get-ModelDefaultBaseUrl $upstreamName
+        if (-not $upstreamBase) {
+            # 版本段是这里最常漏的一项，漏了就是上游 404，而那时候人已经在 WebUI 里找不到原因了。
             Write-Host ''
             Write-Host "$upstreamName 不在内置默认表里，base_url 照上游文档原样填，注意带上版本段："
             Write-Host '    OpenAI 兼容网关一般是 https://<域名>/v1，Anthropic 兼容的一般不带 /v1。'
             Write-Host '    这里填的是真实上游地址；DSH 容器那边填什么由安装器自己算。'
-        }
-        while (-not $upstreamBase) {
-            $candidate = Ask "$upstreamName 的 base_url" (Get-ModelDefaultBaseUrl $upstreamName)
-            try { Test-UpstreamBaseUrl $candidate; $upstreamBase = $candidate }
-            catch { Write-Host $_.Exception.Message -ForegroundColor Red }
-        }
-        # 形态决定注入哪个认证头、放行哪些端点，也决定 WebUI 里 base_url 要不要带 /v1。
-        # 默认值按上游名猜，绝大多数情况直接回车就对。
-        $upstreamProfile = Get-BrokerDefaultProfile $upstreamName
-        Write-Host ''
-        Write-Host "$upstreamName 走哪种 API："
-        Write-Host '1) OpenAI 兼容，不额外收窄端点（chat/completions、responses、embeddings 都放行）'
-        Write-Host '2) 只用 Responses（Codex 那类客户端）'
-        Write-Host '3) 只用 Chat Completions'
-        Write-Host '4) Anthropic Messages（认证头 x-api-key，自动带 anthropic-version）'
-        Write-Host '5) Gemini 原生（认证头 x-goog-api-key，端点 /v1beta/models）'
-        $profileDefault = switch ($upstreamProfile) { 'messages' { '4' } 'gemini' { '5' } default { '1' } }
-        $upstreamProfile = ''
-        while (-not $upstreamProfile) {
-            switch (Ask '请选择' $profileDefault) {
-                '1' { $upstreamProfile = 'any' }
-                '2' { $upstreamProfile = 'responses' }
-                '3' { $upstreamProfile = 'chat' }
-                '4' { $upstreamProfile = 'messages' }
-                '5' { $upstreamProfile = 'gemini' }
-                default { Write-Host '请输入 1 到 5。' -ForegroundColor Red }
+            while (-not $upstreamBase) {
+                $candidate = Ask "$upstreamName 的 base_url" ''
+                try { Test-UpstreamBaseUrl $candidate; $upstreamBase = $candidate }
+                catch { Write-Host $_.Exception.Message -ForegroundColor Red }
             }
         }
         $upstreamKey = ''
@@ -496,51 +557,17 @@ function Read-BrokerUpstreams {
             }
             $upstreamKey = $candidate
         }
-        # 配额是这一层唯一能限制"额度被别人花掉"的手段：密钥代理保证的是密钥不外泄，
-        # 不保证额度不被用，被注入的 Agent 照样可以拿占位密钥发请求。
-        $upstreamRpm = -1
-        while ($upstreamRpm -lt 0) {
-            $candidate = Ask "$upstreamName 每分钟请求上限（0 = 不限）" '0'
-            if ($candidate -match '^\d+$') { $upstreamRpm = [int]$candidate } else { Write-Host '请输入非负整数。' -ForegroundColor Red }
-        }
-        $upstreamDaily = -1
-        while ($upstreamDaily -lt 0) {
-            $candidate = Ask "$upstreamName 每日请求配额（0 = 不限）" '0'
-            if ($candidate -match '^\d+$') { $upstreamDaily = [int]$candidate } else { Write-Host '请输入非负整数。' -ForegroundColor Red }
-        }
-        # 有些上游（或客户端协议）要求固定的请求头，例如 Codex 那套 originator / version，
-        # 或者上游按 User-Agent 做识别。放在代理这一侧配，容器里改不了，客户端也不用管。
-        $upstreamHeaders = @()
-        if (Ask-YesNo "$upstreamName 需要固定请求头（originator、version、User-Agent 之类）" $false) {
-            Write-Host '一行一个 name=value，回车结束。示例：user-agent=codex_cli_rs/0.101.0'
-            while ($true) {
-                $candidate = Ask-Optional '请求头'
-                if (-not $candidate) { break }
-                try { $upstreamHeaders += (Format-BrokerHeader $candidate) }
-                catch { Write-Host $_.Exception.Message -ForegroundColor Red }
-            }
-        }
-        # 模型 id 决定 WebUI 的模型下拉里能选到什么。内置目录里的上游不用填：安装器
-        # 会沿用 DSH 自带的那份清单；目录里没有的网关，DSH 无从知道它有哪些模型，
-        # 空着就等于装完在 WebUI 里一个模型都选不到，所以这里直接挡住。
-        $upstreamInCatalog = [bool](Get-ModelDefaultBaseUrl $upstreamName)
-        Write-Host ''
-        Write-Host "$upstreamName 要在 DSH 里启用哪些模型："
-        if ($upstreamInCatalog) {
-            Write-Host "    $upstreamName 在 DSH 内置模型目录里，直接回车就沿用目录里的整份模型清单。"
-        } else {
-            Write-Host "    $upstreamName 不在 DSH 内置模型目录里，必须自己列出模型 id，照上游文档原样写。"
-            Write-Host '    例如：claude-opus-5-thinking 或 gpt-5.2,gemini-3-pro。'
-        }
-        $upstreamModels = ''
-        while ($true) {
-            $upstreamModels = Ask-Optional '模型 id（多个用逗号分隔）'
-            if (-not $upstreamModels) { $upstreamModels = Get-ModelIdOverride $upstreamName }
-            if ($upstreamModels -or $upstreamInCatalog) { break }
-            Write-Host "$upstreamName 不在内置目录里，至少要填一个模型 id。" -ForegroundColor Red
-        }
+        # 认证头形态、固定请求头、模型清单、限额都不在这里问：
+        #   - 形态按上游名推断（Get-BrokerDefaultProfile），认证头因此不会写错；
+        #   - 模型清单由 Invoke-BrokerModelDiscovery 向上游问，问不出来才需要人介入；
+        #   - 这四样都能在密钥管理面板里改，而且它们都不是秘密，唯一必须在这里给的是密钥。
+        # 命令行给过 -ModelApi / -ModelHeader / -ModelId 时沿用，不再重复追问。
+        $upstreamProfile = Get-ModelApiOverride $upstreamName
+        # 不能再套一层 @()：Get-ModelHeaderOverrides 已经用 ,$pairs 保住了数组，
+        # 外面再包一次会变成"一个元素是数组的数组"，传给 [string[]] 参数时被拼成一整行。
+        $upstreamHeaders = Get-ModelHeaderOverrides $upstreamName
+        $upstreamModels = Get-ModelIdOverride $upstreamName
         Add-BrokerUpstream -Name $upstreamName -BaseUrl $upstreamBase -Key $upstreamKey `
-            -RequestsPerMinute $upstreamRpm -DailyRequestBudget $upstreamDaily `
             -ApiProfile $upstreamProfile -ExtraHeader $upstreamHeaders -ModelIds $upstreamModels
         $upstreamKey = $null
         $addMoreUpstreams = Ask-YesNo '再添加一个上游' $false
@@ -1611,6 +1638,7 @@ switch ($DshAction) {
             $env:DSH_ROOT_PASSWORD = $null
             Write-Host '==> 容器 root 密码已用 sha512crypt 哈希保存到 data\secret\root.hash，未写入 .env。' -ForegroundColor Yellow
         }
+        Invoke-BrokerModelDiscovery -Image $imageRef
         Write-BrokerConfig $brokerConfigFile
         Write-KeyAdminToken ($keyAdmin -eq 'on')
         Invoke-DshModelSettingsSeed -Image $imageRef -BrokerConfig $brokerConfigFile -Enabled ($modelBroker -eq 'on')
@@ -1685,6 +1713,7 @@ switch ($DshAction) {
                 break
             }
         }
+        Invoke-BrokerModelDiscovery -Image (Get-NodeToolImage $envFile)
         Write-BrokerConfig $brokerConfigFile
         if (-not (Test-Path -LiteralPath $brokerConfigFile -PathType Leaf)) { throw "$brokerConfigFile 仍然不存在，.env 未改动。" }
         Set-ComposeEnvValue $envFile 'DSH_MODEL_BROKER' 'on'

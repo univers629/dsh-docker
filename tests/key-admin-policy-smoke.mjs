@@ -9,6 +9,7 @@ import {
   defaultShapeOf,
   extractModelIds,
   inferShape,
+  looksLikeCatalogRoute,
   mergeUpstream,
   modelsRequestCandidates,
   normalizeExtraHeaders,
@@ -163,6 +164,13 @@ assert.equal(inferShape({}), 'any')
 // 密钥留空 = 沿用已存的那把：改配额不该要求把密钥再抄一遍。
 const kept = normalizeUpstreamInput({ name: 'b-ai', shape: 'responses', baseUrl: 'https://api.justwoker.icu/v1', models: 'x', dailyRequestBudget: '5' }, entry)
 assert.equal(kept.key, 'sk-secret-value')
+// 面板上已经没有限额输入框了，所以缺字段必须理解成"别动"，不能理解成 0（= 清零）。
+assert.equal(kept.requestsPerMinute, 30, '面板没送 requestsPerMinute 时要沿用已存的值')
+assert.equal(kept.dailyRequestBudget, 5)
+// 全新上游没有旧值可沿用，缺字段就是不限。
+const fresh = normalizeUpstreamInput({ name: 'gw', key: 'k', baseUrl: 'https://api.example.com', shape: 'chat', models: 'x' })
+assert.equal(fresh.requestsPerMinute, 0)
+assert.equal(fresh.dailyRequestBudget, 0)
 
 // --- 文档合并 ---
 
@@ -207,5 +215,27 @@ assert.deepEqual(extractModelIds({ models: [{ name: 'models/gemini-3-pro' }] }),
 assert.deepEqual(extractModelIds(['a', { id: 'b' }]), ['a', 'b'])
 assert.deepEqual(extractModelIds({ error: 'nope' }), [])
 assert.deepEqual(extractModelIds({ data: [{ id: 'bad id' }] }), [], '上游返回的垃圾 id 不能进 settings.yaml')
+
+// --- 上游名字规则 ---
+//
+// 这条规则是照 DSH 官方"添加自定义提供方"的 ROUTE_PATTERN 抄的：首字符必须是小写字母，
+// 短横线只能单个出现在中间。名字不合规的话 DSH 那边会拒收整个路由，而拒收是静默的——
+// 页面上只会表现为"卡片没出现"，所以宁可在这里就挡住。
+for (const bad of ['b_ai', '4o', 'ai-', '-ai', 'a--b', 'x'.repeat(33)]) {
+  assert.throws(
+    () => normalizeUpstreamInput({ name: bad, key: 'k', baseUrl: 'https://api.example.com', shape: 'chat', models: 'x' }),
+    AdminInputError,
+    '应当拒绝上游名字：' + bad,
+  )
+}
+for (const good of ['deepseek', 'b-ai', 'my-gateway-2']) {
+  assert.equal(normalizeUpstreamInput({ name: good, key: 'k', baseUrl: 'https://api.example.com', shape: 'chat', models: 'x' }).name, good)
+}
+
+// 目录内/目录外的判定决定了"模型清单能不能留空"：目录内的上游 DSH 自带整份清单，
+// 目录外的必须至少有一个模型 id，否则 settings 校验会把整条路由丢掉。
+assert.equal(looksLikeCatalogRoute('deepseek'), true)
+assert.equal(looksLikeCatalogRoute('google'), true)
+assert.equal(looksLikeCatalogRoute('b-ai'), false)
 
 console.log('key-admin policy smoke: ok')

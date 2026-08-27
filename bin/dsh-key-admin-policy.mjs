@@ -31,7 +31,11 @@ export class AdminInputError extends Error {
   }
 }
 
-const UPSTREAM_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/
+// 上游名字同时是 settings.yaml 里的路由键和凭据引用名的词干，所以规则不能比 DSH
+// 自己宽：官方「添加自定义提供方」用的是 /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/，首字符必须
+// 是小写字母（凭据引用名是 POSIX 标识符，不能以数字开头），分隔符只有单个短横线。
+// 我们这边放行 b_ai、4o 之类的名字，只会写出一条用户在官方页面上改不了的路由。
+const UPSTREAM_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 // 模型 id 会被写进 settings.yaml，也会出现在页面上：限制字符集，别让上游返回的
 // 任意字符串成为一条注入路径。冒号、斜杠、点在真实模型 id 里都常见，必须放行。
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$/
@@ -113,6 +117,16 @@ export const FORBIDDEN_HEADER_NAMES = Object.freeze([
 ])
 
 /** 没显式选形态时按上游名猜一个。猜错只影响端点宽窄，不影响认证头写对写错。 */
+/**
+ * 这个名字是不是 DSH 内置模型目录里的路由。用内置 base_url 表当近似：那张表本来就是
+ * 从 pi-ai 的目录里抄下来的，而面板这一侧拿不到真正的目录（它在 dsh 镜像的依赖里）。
+ * 目录路由不用列模型清单，DSH 会沿用它自带的那份；目录外的网关必须至少有一个模型 id，
+ * 否则 DSH 会拒绝整条路由，页面上也就不会多出那张卡片。
+ */
+export function looksLikeCatalogRoute(name) {
+  return Object.prototype.hasOwnProperty.call(DEFAULT_BASE_URLS, name)
+}
+
 export function defaultShapeOf(name) {
   switch (name) {
     case 'anthropic':
@@ -129,8 +143,10 @@ export function defaultShapeOf(name) {
 
 export function normalizeName(raw) {
   const name = String(raw ?? '').trim().toLowerCase()
-  if (!UPSTREAM_NAME.test(name)) {
-    throw new AdminInputError('上游名字只能是小写字母、数字、下划线和短横线，最多 32 个字符：' + name)
+  if (!UPSTREAM_NAME.test(name) || name.length > 32) {
+    throw new AdminInputError(
+      '上游名字要以小写字母开头，之后只能是小写字母、数字和单个短横线，最多 32 个字符：' + name,
+    )
   }
   return name
 }
@@ -207,9 +223,10 @@ export function normalizeExtraHeaders(raw, shape) {
   return out
 }
 
-export function normalizeQuota(raw, field) {
-  const text = String(raw ?? '').trim()
-  if (text === '') return 0
+export function normalizeQuota(raw, field, fallback = 0) {
+  if (raw === undefined || raw === null) return fallback
+  const text = String(raw).trim()
+  if (text === '') return fallback
   const value = Number(text)
   if (!Number.isInteger(value) || value < 0) throw new AdminInputError(field + ' 必须是非负整数')
   if (value > 1_000_000) throw new AdminInputError(field + ' 太大了（上限 1000000）')
@@ -232,8 +249,14 @@ export function normalizeUpstreamInput(raw, existingEntry) {
   const baseUrl = normalizeBaseUrl(raw?.baseUrl, name)
   const models = normalizeModelIds(raw?.models)
   const extraHeaders = normalizeExtraHeaders(raw?.extraHeaders, shape)
-  const requestsPerMinute = normalizeQuota(raw?.requestsPerMinute, '每分钟请求上限')
-  const dailyRequestBudget = normalizeQuota(raw?.dailyRequestBudget, '每日请求配额')
+  // 面板不再提供限额输入框（DSH 官方的供应商卡片也没有），但已经设过的值要留住：
+  // 缺字段一律沿用 keys.json 里那条的现值，只有显式写 0 才是"取消限制"。
+  const requestsPerMinute = normalizeQuota(
+    raw?.requestsPerMinute, '每分钟请求上限', Number(existingEntry?.requestsPerMinute ?? 0) || 0,
+  )
+  const dailyRequestBudget = normalizeQuota(
+    raw?.dailyRequestBudget, '每日请求配额', Number(existingEntry?.dailyRequestBudget ?? 0) || 0,
+  )
   const typed = typeof raw?.key === 'string' ? raw.key.trim() : ''
   const key = typed !== '' ? typed : String(existingEntry?.key ?? '')
   if (key === '') throw new AdminInputError('上游 ' + name + ' 还没有密钥，请填一次（之后修改其它字段可以留空）')
