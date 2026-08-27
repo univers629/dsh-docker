@@ -1050,6 +1050,20 @@ broker_upstream_models() {
   printf '%s' ''
 }
 
+# 把自动问出来的 base_url 回填。少写一个 /v1 的后果是整条上游一个请求都发不出去，
+# 所以这一项比模型清单更要紧：面板里"拉取模型列表"会同时试 /models 和 /v1/models，
+# 因此它照样成功，而 DSH 走代理发的请求全落在上游根路径上，换回来 403 或 404。
+set_broker_base_url() {
+  local wanted="$1" value="$2" index=0
+  while [ "$index" -lt "${#BROKER_NAMES[@]}" ]; do
+    if [ "${BROKER_NAMES[$index]}" = "$wanted" ]; then
+      BROKER_BASE_URLS[$index]="$value"
+      return 0
+    fi
+    index=$((index + 1))
+  done
+}
+
 # 把自动问到的模型清单回填进数组。名字对不上就什么都不做（上游可能已经被跳过了）。
 set_broker_models() {
   local wanted="$1" value="$2" index=0
@@ -1137,11 +1151,22 @@ process.stdin.on("end", () => {
   const incoming = Array.isArray(payload.incoming) ? payload.incoming : []
   const names = new Set(incoming.map((entry) => entry && entry.name))
   let kept = []
+  const previous = new Map()
   if (payload.existing) {
     const document = JSON.parse(payload.existing)
     if (Array.isArray(document.upstreams)) {
       kept = document.upstreams.filter((entry) => entry && !names.has(entry.name))
+      for (const entry of document.upstreams) if (entry && entry.name) previous.set(entry.name, entry)
     }
+  }
+  // 向导不问推理强度档位（那是面板里的事），但同名上游被重新配置时不能把它丢掉：
+  // 档位是 dsh.reasoningEfforts，没有它 DSH 的模型页就不显示推理强度菜单。
+  for (const entry of incoming) {
+    if (!entry || !entry.dsh || entry.dsh.reasoningEfforts !== undefined) continue
+    const levels = previous.get(entry.name) && previous.get(entry.name).dsh
+      ? previous.get(entry.name).dsh.reasoningEfforts
+      : undefined
+    if (Array.isArray(levels) && levels.length > 0) entry.dsh.reasoningEfforts = levels
   }
   process.stdout.write(JSON.stringify({ version: 1, upstreams: kept.concat(incoming) }, null, 2))
 })
@@ -1208,6 +1233,11 @@ discover_broker_models() {
   payload=""
   while IFS="$(printf '\t')" read -r kind name value; do
     case "$kind" in
+      baseurl)
+        [ -n "$value" ] || continue
+        set_broker_base_url "$name" "$value"
+        echo "    $name：base_url 少了版本段，已改成 $value（否则 DSH 发出的请求全会被上游拒掉）。"
+        ;;
       models)
         [ -n "$value" ] || continue
         set_broker_models "$name" "$value"

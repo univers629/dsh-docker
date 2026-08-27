@@ -35,6 +35,7 @@ import {
   AdminInputError,
   API_SHAPES,
   DEFAULT_BASE_URLS,
+  baseUrlLooksUnversioned,
   defaultShapeOf,
   findUpstream,
   looksLikeCatalogRoute,
@@ -322,28 +323,51 @@ function stateResponse() {
 const RELOAD_NOTE = 'dsh-key-broker 每 5 秒按修改时间热加载 keys.json，DSH 的 settings.yaml 也是热加载：两边都不用重启容器。'
 
 /**
- * 目录外的网关一个模型 id 都没有时，替用户去上游问一次。
+ * 保存前替目录外的网关向上游问一次：模型清单，以及 base_url 到底该不该带版本段。
  *
- * 这不是省一次点击：DSH 对目录外的路由要求至少一个模型，缺了就拒绝整条路由，而被拒绝的
- * 结果是"页面上不多出任何卡片、也不报错"。面板本来就持有密钥、也本来就有拉取按钮，
- * 所以保存时顺手拉一次，比让用户先猜到要点哪个按钮现实得多。拉不到就照原样保存，
- * 让 seed 的警告去说明为什么 DSH 那边还没这条供应商。
+ * 两件事都不是"省一次点击"，而是没有它这条上游根本用不了：
+ *   1) DSH 对目录外的路由要求至少一个模型，缺了就拒绝整条路由，而被拒绝的结果是
+ *      "页面上不多出任何卡片、也不报错"。
+ *   2) base_url 少写一个 /v1 时，面板这边看不出问题——modelsRequestCandidates 会同时试
+ *      /models 和 /v1/models，第二个能成。可 DSH 走代理发的是 /responses、
+ *      /chat/completions、/models，一个版本段都不补，于是全落在上游的根路径上，
+ *      换回来 403 或 404，页面上显示成"API key is invalid"。
+ *
+ * 拉不到就照原样保存，让提示去说明为什么 DSH 那边还没这条供应商。
  */
 async function withDiscoveredModels(record) {
-  if (record.models.length > 0 || looksLikeCatalogRoute(record.name)) return { record, discovery: '' }
+  const needsModels = record.models.length === 0
+  // 模型清单齐了、base_url 也带着版本段，就没有任何要问上游的事。
+  if (looksLikeCatalogRoute(record.name) || (!needsModels && !baseUrlLooksUnversioned(record.shape, record.baseUrl))) {
+    return { record, discovery: '' }
+  }
   try {
     const found = await fetchModels(record)
-    const models = found.models.slice(0, 200)
-    return {
-      record: { ...record, models },
-      discovery: '已从 ' + found.endpoint + ' 拉到 ' + models.length + ' 个模型 id（目录外的上游必须有模型清单，'
-        + '所以保存时自动拉了一次）。不想要这么多就在模型清单里删掉再保存。',
+    const notes = []
+    let fixed = record
+    if (found.suggestedBaseUrl) {
+      fixed = { ...fixed, baseUrl: found.suggestedBaseUrl }
+      notes.push('base_url 少了版本段，已改成 ' + found.suggestedBaseUrl
+        + '：模型列表只在带版本段的地址上才有，而 DSH 发请求时不会自己补这一段——'
+        + '不改的话面板里能拉到清单，网页里一发请求就是 403 或"API key is invalid"。')
     }
+    if (needsModels) {
+      const models = found.models.slice(0, 200)
+      fixed = { ...fixed, models }
+      notes.push('已从 ' + found.endpoint + ' 拉到 ' + models.length + ' 个模型 id（目录外的上游必须有模型清单，'
+        + '所以保存时自动拉了一次）。不想要这么多就在模型清单里删掉再保存。')
+    }
+    return { record: fixed, discovery: notes.join('\n') }
   } catch (error) {
+    const reason = error instanceof AdminInputError ? error.message : String(error && error.message)
+    if (!needsModels) {
+      // 模型清单是用户自己写的，留着；只是 base_url 没法验证，如实说一句。
+      return { record, discovery: 'base_url 没带版本段，想验证一下却拉不到模型列表：' + reason
+        + ' 如果网页里报 403 或"API key is invalid"，先给 base_url 补上 /v1 再试。' }
+    }
     return {
       record,
-      discovery: '这个上游不在 DSH 内置目录里，而模型清单是空的，自动拉取也没成功：'
-        + (error instanceof AdminInputError ? error.message : String(error && error.message))
+      discovery: '这个上游不在 DSH 内置目录里，而模型清单是空的，自动拉取也没成功：' + reason
         + ' 请在模型清单里手写至少一个模型 id 再保存，否则 DSH 不会多出这条供应商。',
     }
   }
@@ -366,7 +390,9 @@ async function saveUpstream(body) {
   const notes = [RELOAD_NOTE]
   if (discovered.discovery !== '') notes.push(discovered.discovery)
   if (renamed) notes.push('上游 ' + rename + ' 已被改名成 ' + record.name + '；DSH 侧那条旧供应商要自己在 WebUI 里删。')
-  return { ok: true, name: record.name, models: record.models, brokerReload: notes.join('\n'), seed }
+  // baseUrl / models 回给页面：保存时可能被自动改过，表单里必须跟着变，否则用户下一次
+  // 保存又会把旧值写回去。
+  return { ok: true, name: record.name, baseUrl: record.baseUrl, models: record.models, brokerReload: notes.join('\n'), seed }
 }
 
 async function deleteUpstreamHandler(body) {

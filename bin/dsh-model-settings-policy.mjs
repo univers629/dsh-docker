@@ -82,6 +82,51 @@ export function brokerRouteBaseUrl(brokerBase, name) {
   return String(brokerBase).replace(/\/+$/, '') + '/u/' + name
 }
 
+/**
+ * pi-ai 认的推理强度档位，按升级顺序。与 llm-pi-ai 的 THINKING_LEVELS 一致。
+ */
+export const THINKING_LEVELS = Object.freeze(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+
+/**
+ * 归一化推理强度档位：只留认识的档位，按升级顺序排列。
+ *
+ * 面板那边已经校验过一次并会拒掉非法输入，这里只做"读到什么就用什么"的过滤，
+ * 免得 keys.json 被手改过之后整份种子配置写不下去。
+ */
+export function normalizeThinkingLevels(raw) {
+  const wanted = new Set()
+  for (const piece of (Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,]+/))) {
+    const level = String(piece ?? '').trim().toLowerCase()
+    if (THINKING_LEVELS.includes(level)) wanted.add(level)
+  }
+  const levels = THINKING_LEVELS.filter((level) => wanted.has(level))
+  // 只有 off 会被 pi-ai 判成配置错误（"没有 off 之外的档位"），当成没声明处理。
+  return levels.some((level) => level !== 'off') ? levels : []
+}
+
+/**
+ * 一条 models 条目。
+ *
+ * 为什么要显式声明 reasoningEfforts：pi-ai 对"手写声明的模型"（我们写进 settings.yaml 的
+ * 全都是）一律报告"不提供任何档位"，WebUI 的推理强度下拉就不会出现。声明了档位才有菜单。
+ * 反过来也不能默认给所有模型加：不吃 reasoning_effort 的模型会被上游直接 400，所以这是
+ * 按上游显式选择的。档位的 wire 值就用档位名（OpenAI/Anthropic 系都认 low/medium/high），
+ * off 必须是 null —— pi-ai 用 null 表示"不思考时什么参数都不发"。
+ */
+export function modelEntry(id, levels) {
+  const efforts = thinkingLevelMap(levels)
+  return efforts === null ? { id } : { id, reasoningEfforts: efforts }
+}
+
+/** 档位数组 -> settings.yaml 里那个 reasoningEfforts 字典；没声明就返回 null。 */
+export function thinkingLevelMap(levels) {
+  const declared = normalizeThinkingLevels(levels)
+  if (declared.length === 0) return null
+  const map = {}
+  for (const level of declared) map[level] = level === 'off' ? null : level
+  return map
+}
+
 /** 归一化模型 id 列表：去空、去重、保持填写顺序。 */
 export function normalizeModelIds(models) {
   const seen = new Set()
@@ -108,6 +153,7 @@ export function normalizeModelIds(models) {
  * @param request.name 上游名（同时是 settings 里的路由键）
  * @param request.shape 安装器的 API 形态（any/chat/responses/messages/gemini）
  * @param request.models 用户填的模型 id
+ * @param request.reasoningEfforts 这个上游要声明的推理强度档位（空 = 不声明，页面上就没有强度菜单）
  * @param request.brokerBase 密钥代理的 base（http://dsh-key-broker:8080）
  * @param request.catalog 目录快照：{ [id]: { api, models: [id] } }
  * @returns 可写入时返回 ok:true 与字段计划，否则 ok:false 与拒绝原因
@@ -116,6 +162,7 @@ export function planProvider(request) {
   const name = String(request.name ?? '')
   const catalogEntry = (request.catalog ?? {})[name]
   const models = normalizeModelIds(request.models)
+  const levels = normalizeThinkingLevels(request.reasoningEfforts)
   const baseURL = brokerRouteBaseUrl(request.brokerBase, name)
   const apiKeyEnv = deriveCredentialRef(name)
 
@@ -124,7 +171,7 @@ export function planProvider(request) {
   if (native) {
     const nativeWhenMissing = {}
     // 用户明确列了模型 id 才写 models：不写就沿用第一方内置的那份清单。
-    if (models.length > 0) nativeWhenMissing.models = models.map((id) => ({ id }))
+    if (models.length > 0) nativeWhenMissing.models = models.map((id) => modelEntry(id, levels))
     return {
       ok: true,
       name,
@@ -136,6 +183,7 @@ export function planProvider(request) {
       whenMissing: nativeWhenMissing,
       api: '',
       models: models.length > 0 ? models : [...native.models],
+      reasoningEfforts: thinkingLevelMap(levels),
       // 旧版安装器写过的同名 pi-ai 路由要一起收掉，否则重复那行留在页面上。
       supersedes: piAiRoutePath(name),
     }
@@ -149,7 +197,7 @@ export function planProvider(request) {
   if (catalogEntry) {
     // 目录路由不写 api：写了就等于宣布"这条路由的每个模型都说这一种协议"，
     // 而目录里的模型各自带着自己的协议（google 的就不在自定义路由的三种里）。
-    if (models.length > 0) whenMissing.models = models.map((id) => ({ id }))
+    if (models.length > 0) whenMissing.models = models.map((id) => modelEntry(id, levels))
     return {
       ok: true,
       name,
@@ -161,6 +209,7 @@ export function planProvider(request) {
       whenMissing,
       api: catalogEntry.api ?? '',
       models: models.length > 0 ? models : normalizeModelIds(catalogEntry.models),
+      reasoningEfforts: thinkingLevelMap(levels),
     }
   }
 
@@ -184,7 +233,7 @@ export function planProvider(request) {
     }
   }
   whenMissing.api = protocol
-  whenMissing.models = models.map((id) => ({ id }))
+  whenMissing.models = models.map((id) => modelEntry(id, levels))
   return {
     ok: true,
     name,
@@ -196,13 +245,14 @@ export function planProvider(request) {
     whenMissing,
     api: protocol,
     models,
+    reasoningEfforts: thinkingLevelMap(levels),
   }
 }
 
 /**
  * 规划整份种子配置。
  *
- * @param request.upstreams [{ name, shape, models }]
+ * @param request.upstreams [{ name, shape, models, reasoningEfforts }]
  * @param request.brokerBase 密钥代理 base
  * @param request.placeholder 占位密钥字面值
  * @param request.catalog 目录快照
@@ -224,6 +274,7 @@ export function planSeed(request) {
       name: upstream.name,
       shape: upstream.shape,
       models: upstream.models,
+      reasoningEfforts: upstream.reasoningEfforts,
       brokerBase: request.brokerBase,
       catalog: request.catalog,
     })

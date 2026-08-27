@@ -248,6 +248,17 @@ assert.ok(installPs1.includes('Invoke-BrokerModelDiscovery'), 'install.ps1 缺�
 for (const helper of ['bin/discover-upstream-models.mjs', 'bin/dsh-upstream-models.mjs']) {
   assert.ok(existsSync(new URL(`../${helper}`, import.meta.url)), `缺少 ${helper}`)
 }
+// 同一次发现还要修 base_url 的版本段。少了它就是用户报过的那个现象：面板/安装器
+// 能拉到模型清单（拉取会同时试 /models 和 /v1/models），而 DSH 发请求时一个版本段
+// 都不补，于是每个请求都落在上游根路径上，网页里显示成 403 或 "API key is invalid"。
+assert.ok(installSh.includes('set_broker_base_url'), 'install.sh 缺少 base_url 版本段修正')
+assert.ok(installSh.includes('baseurl)'), 'install.sh 没有处理发现脚本的 baseurl 行')
+assert.ok(installPs1.includes("'baseurl'"), 'install.ps1 没有处理发现脚本的 baseurl 行')
+// 推理强度档位只在密钥管理面板里设（向导不问），所以两个安装器重新配置同名上游时
+// 必须把 dsh.reasoningEfforts 继承下来，否则一次"重新配置"就把强度菜单弄没了。
+for (const [label, source] of [['install.sh', installSh], ['install.ps1', installPs1]]) {
+  assert.ok(source.includes('reasoningEfforts'), `${label} 合并 keys.json 时没保留 reasoningEfforts`)
+}
 // 上游名字的规则必须三处一致：两个安装器 + 面板策略。不一致就会出现"装的时候能填、
 // 面板里改不了"这种只在某一端复现的问题。
 assert.ok(installSh.includes("''|[!a-z]*|*[!a-z0-9-]*|*-|*--*"), 'install.sh 的上游名字规则没跟上')

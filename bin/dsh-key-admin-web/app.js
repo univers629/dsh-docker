@@ -107,7 +107,11 @@ function renderList() {
     if (view.requestsPerMinute > 0) bits.push(view.requestsPerMinute + ' 次/分钟')
     if (view.dailyRequestBudget > 0) bits.push(view.dailyRequestBudget + ' 次/天')
     if (view.extraHeaders.length > 0) bits.push(view.extraHeaders.length + ' 个固定头')
+    if (view.reasoningEfforts.length > 0) bits.push('推理强度 ' + view.reasoningEfforts.join('/'))
     bits.push('密钥指纹 ' + (view.keyFingerprint || '无'))
+    // 这条是“面板能拉到模型、DSH 网页里 403”的唯一可见线索：拉清单时面板会容错地
+    // 试 /v1/models，缺版本段在这一侧完全看不出来。
+    if (view.needsVersionSegment) bits.push('base_url 少版本段：点编辑再保存一次即可自动改对')
     meta.textContent = bits.join(' · ')
     left.appendChild(title)
     left.appendChild(meta)
@@ -131,6 +135,7 @@ function fillForm(view) {
   byId('base-url').value = view ? view.baseUrl : ''
   byId('key').value = ''
   byId('models').value = view ? view.models.join(', ') : ''
+  byId('reasoning').value = view ? view.reasoningEfforts.join(', ') : ''
   byId('key-hint').textContent = view && view.hasKey
     ? '这个上游已有密钥（指纹 ' + view.keyFingerprint + '）。要换密钥就填新的，不换就留空。'
     : '新上游必须填一次密钥。'
@@ -154,6 +159,7 @@ function readForm() {
   return {
     name: byId('name').value.trim(),
     shape: byId('shape').value,
+    reasoningEfforts: byId('reasoning').value,
     baseUrl: byId('base-url').value.trim(),
     key: byId('key').value,
     rename: S.editing,
@@ -281,7 +287,17 @@ function main() {
   byId('fetch-models').addEventListener('click', () => guard('form-status', async () => {
     const payload = await api('/api/models', readForm())
     renderModelChoices(payload.models)
-    status('form-status', '上游 ' + payload.endpoint + ' 返回了 ' + payload.models.length + ' 个模型，勾选后点"把勾选的写进上面"。', 'good')
+    // 拉取成功只说明"这个地址上有模型列表"，不代表 base_url 对：清单只在带版本段的地址上
+    // 有，而 DSH 发请求时不补版本段。所以拉到之后顺手把 base_url 改对，否则用户看到的
+    // 就是"面板能拉到模型、网页里一用就说密钥无效"。
+    if (payload.suggestedBaseUrl) {
+      byId('base-url').value = payload.suggestedBaseUrl
+      status('form-status', '模型列表在 ' + payload.endpoint + '（' + payload.models.length + ' 个）。'
+        + 'base_url 少了版本段，已替你改成 ' + payload.suggestedBaseUrl
+        + '——DSH 发请求时不会自己补这一段，不改就会 403。勾选模型后记得保存。', 'good')
+    } else {
+      status('form-status', '上游 ' + payload.endpoint + ' 返回了 ' + payload.models.length + ' 个模型，勾选后点"把勾选的写进上面"。', 'good')
+    }
     log(payload.models.join('\n') || '（上游没有返回任何模型 id）')
   }))
   byId('save').addEventListener('click', () => guard('form-status', async () => {
@@ -290,6 +306,9 @@ function main() {
     S.editing = payload.name
     byId('form-title').textContent = '编辑上游：' + payload.name
     byId('key').value = ''
+    // 保存时 base_url 和模型清单可能被自动改过，表单要跟着变，不然下一次保存会写回旧值。
+    if (payload.baseUrl) byId('base-url').value = payload.baseUrl
+    if (Array.isArray(payload.models) && payload.models.length > 0) byId('models').value = payload.models.join(', ')
     status('form-status', '已保存 ' + payload.name + '。', 'good')
     log(seedSummary(payload))
   }))

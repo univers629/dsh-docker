@@ -15,7 +15,7 @@ import https from 'node:https'
 
 import { createGuardedLookup } from './dsh-egress-policy.mjs'
 import { redactSecrets } from './dsh-key-broker-policy.mjs'
-import { extractModelIds, modelsRequestCandidates } from './dsh-key-admin-policy.mjs'
+import { extractModelIds, modelsRequestCandidates, suggestBaseUrlFix } from './dsh-key-admin-policy.mjs'
 
 /** 响应体上限：模型列表再大也就几十 KB，留 4 MB 是为了别被一个坏上游拖垮内存。 */
 const BODY_LIMIT = 4 * 1024 * 1024
@@ -79,8 +79,12 @@ function fetchJson(candidate, secrets, timeoutMs) {
  * 没带时要打 /v1/models。全部失败不抛异常——很多自建网关根本不实现 /models，
  * 手写模型 id 一样能用，所以"拉不到"是一个调用方要如实转述的结果，不是错误。
  *
+ * 成功时还会回答一个只有这里能回答的问题：base_url 是不是少了版本段。命中 /v1/models
+ * 而不是 /models，就说明这个上游的真实地址带版本段，而 DSH 客户端不会自己补——不改的话
+ * 面板里能拉到清单、网页里一发请求就 403。suggestedBaseUrl 非空就是该改成的那个值。
+ *
  * @param record { name, baseUrl, key, shape, extraHeaders }
- * @returns { ok: true, models, endpoint, tried } 或 { ok: false, tried, message }
+ * @returns { ok: true, models, endpoint, suggestedBaseUrl, tried } 或 { ok: false, tried, message }
  */
 export async function fetchUpstreamModels(record, options = {}) {
   const timeoutMs = Number(options.timeoutMs ?? 20_000)
@@ -97,7 +101,7 @@ export async function fetchUpstreamModels(record, options = {}) {
       tried.push(candidate.url + ' -> 200，但响应里没有可用的模型 id')
       continue
     }
-    return { ok: true, models, endpoint: candidate.url, tried }
+    return { ok: true, models, endpoint: candidate.url, suggestedBaseUrl: suggestBaseUrlFix(record, candidate.url), tried }
   }
   return { ok: false, tried, message: '试过的地址：' + tried.join('；') }
 }

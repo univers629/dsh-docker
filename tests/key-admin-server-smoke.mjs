@@ -164,7 +164,13 @@ try {
 
   const seedPayload = JSON.parse(readFileSync(seedPayloadPath, 'utf8'))
   assert.equal(readFileSync(seedPayloadPath, 'utf8').includes(realKey), false, 'seed 载荷里不能有密钥')
-  assert.deepEqual(seedPayload.upstreams, [{ name: 'deepseek', shape: 'any', models: ['deepseek-v4-flash', 'deepseek-v4-pro'] }])
+  assert.deepEqual(seedPayload.upstreams, [{
+    name: 'deepseek',
+    shape: 'any',
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    // 面板没填推理强度，所以是空数组：seed 那边把它理解成"不声明"，模型页也就没有强度菜单。
+    reasoningEfforts: [],
+  }])
   assert.equal(seedPayload.placeholder, 'dsh-broker-placeholder')
   assert.equal(seedPayload.brokerBase, 'http://dsh-key-broker:8080')
 

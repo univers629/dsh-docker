@@ -131,6 +131,8 @@
 - 上游名命中 DSH 内置模型目录（`deepseek`、`openai`、`anthropic`、`google`、`nvidia`、`openrouter`、`groq`、`xai`、`moonshotai` 等）时，协议和整份模型清单由目录提供，安装器只写 `baseURL` 与 `apiKeyEnv`，WebUI 里立刻有一整排可选模型。
 - 目录里没有的自建网关必须有模型 id，少了它 DSH 会拒绝整个 `llm-pi-ai` 命名空间，结果是所有供应商一起消失。所以安装器在写配置前会先用刚拿到的密钥请求上游的 `/models`（`bin/discover-upstream-models.mjs`，走 SSRF 防护的解析器，最多取 200 个 id），拉到就自动填；拉不到就打印失败原因，此时用 `--model-id NAME=ID[,ID]`（PowerShell：`-ModelId`）或在管理面板里补。安装器写入前还会用 DSH 自己的校验函数过一遍，不通过就一个字都不写。
 - `baseURL`、`apiKeyEnv` 和凭据引用的值每次都按当前部署重写；`api`、`models`、`agent-default-model` 只在缺失时补，不覆盖用户在 WebUI 里的选择。
+- `keys.json` 里那条上游的 `baseUrl` 少了版本段时会被自动补上。这件事只能在拉模型清单的时候顺手发现：拉取会同时试 `<base>/models` 和 `<base>/v1/models`，第二个成功就说明版本段在 base_url 里缺了一段。而 pi-ai 的 OpenAI 兼容客户端发的是 `/responses`、`/chat/completions`、`/models`，一个版本段都不补，于是所有请求落到上游根路径上，DSH 里显示成 403 或「API key is invalid」——而面板那边看起来一切正常。Anthropic 与 Gemini 相反，它们的客户端自己发 `/v1/messages`、`/v1beta/models`，所以这两种形态的 base_url 不补版本段。
+- 推理强度菜单需要模型显式声明档位：pi-ai 对手写声明的模型（安装器和面板写出来的都是）一律报告"不提供任何档位"，模型页因此没有那个下拉。管理面板的「推理强度档位」栏会把 `reasoningEfforts`（`off` 的 wire 值是 `null`，其余用档位名）写到这个上游的每个模型上，包括上一次已经写过 `models` 的路由——那时逐条模型补，已经带着 `reasoningEfforts`（包括用户自己写的 `false`）的不动。默认不声明：给不支持 `reasoning_effort` 的模型声明档位会被上游拒绝。
 - 凭据引用被写死成占位串，不是"缺失时才补"：这个上游的真实密钥在代理手里，代理转发时会把认证头换成自己那把，所以容器里留一把真的既不起作用，又会被 WebUI 的供应商卡片明文显示、被 Agent 直接读走。写入前发现引用里存的不是占位串时，会换回占位串并在输出里点明，此时应当认为那把密钥已经进过容器，到上游控制台轮换它。
 - `--no-model-settings-seed`（PowerShell：`-NoModelSettingsSeed`）关闭这一步，供应商与模型改为在 WebUI 里自行添加。
 

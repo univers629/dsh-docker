@@ -436,6 +436,16 @@ function Invoke-BrokerModelDiscovery {
         if ($parts.Count -lt 3) { continue }
         $name = $parts[1]
         switch ($parts[0]) {
+            'baseurl' {
+                # base_url 少写一个 /v1 时，面板里"拉取模型列表"照样成功（它会同时试
+                # /models 和 /v1/models），可 DSH 走代理发的请求全落在上游根路径上，
+                # 换回来 403/404。所以这一项必须当场改掉，而不是只提示一句。
+                if (-not $parts[2]) { continue }
+                foreach ($entry in @($BrokerUpstreams | Where-Object { $_.name -eq $name })) {
+                    $entry['baseUrl'] = $parts[2]
+                }
+                Write-Host "    ${name}：base_url 少了版本段，已改成 $($parts[2])（否则 DSH 发出的请求全会被上游拒掉）。"
+            }
             'models' {
                 if (-not $parts[2]) { continue }
                 $BrokerModels[$name] = $parts[2]
@@ -466,6 +476,15 @@ function Write-BrokerConfig {
         $names = @($BrokerUpstreams | ForEach-Object { $_.name })
         $existing = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
         if ($existing.upstreams) { $kept = @($existing.upstreams | Where-Object { $_.name -notin $names }) }
+        # 向导不问推理强度档位（那是密钥管理面板里的事），但重新配置同名上游时不能把它丢掉：
+        # 没有 dsh.reasoningEfforts，DSH 的模型页就不显示推理强度菜单。
+        foreach ($entry in @($BrokerUpstreams)) {
+            if (-not $entry['dsh'] -or $entry['dsh'].Contains('reasoningEfforts')) { continue }
+            $before = @($existing.upstreams | Where-Object { $_.name -eq $entry.name }) | Select-Object -First 1
+            $levels = @()
+            if ($before -and $before.dsh -and $before.dsh.reasoningEfforts) { $levels = @($before.dsh.reasoningEfforts) }
+            if ($levels.Count -gt 0) { $entry['dsh']['reasoningEfforts'] = $levels }
+        }
     }
     $document = [ordered]@{ version = 1; upstreams = @($kept + @($BrokerUpstreams)) }
     New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null

@@ -12,6 +12,7 @@
 //
 // stdout 是给 shell 读的行，字段用制表符分隔（模型 id 和上游名里都不可能出现制表符）：
 //   models<TAB><上游名><TAB><id,id,...>
+//   baseurl<TAB><上游名><TAB><补好版本段的 base_url>
 //   failed<TAB><上游名><TAB><拉不到的原因>
 // 密钥不出现在输出里；上游响应万一回显了密钥，共享模块会在拼进原因之前抹掉它。
 
@@ -49,8 +50,11 @@ for (const upstream of Array.isArray(payload.upstreams) ? payload.upstreams : []
   // 一个上游拉不到不影响别的：失败原因单独记下来，让安装器逐条如实转述。
   try {
     const found = await fetchUpstreamModels(record, { timeoutMs: Number(payload.timeoutMs ?? 20_000) })
-    if (found.ok) out.push('models\t' + name + '\t' + found.models.slice(0, 200).join(','))
-    else out.push('failed\t' + name + '\t' + flatten(found.message))
+    if (found.ok) {
+      // base_url 的修正要先说：模型清单对不对无所谓，base_url 错了整条上游都发不出请求。
+      if (found.suggestedBaseUrl) out.push('baseurl\t' + name + '\t' + found.suggestedBaseUrl)
+      out.push('models\t' + name + '\t' + found.models.slice(0, 200).join(','))
+    } else out.push('failed\t' + name + '\t' + flatten(found.message))
   } catch (error) {
     out.push('failed\t' + name + '\t' + flatten(error instanceof Error ? error.message : String(error)))
   }
