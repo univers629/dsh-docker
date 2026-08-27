@@ -96,7 +96,7 @@ export async function fetchUpstreamModels(record, options = {}) {
       tried.push(candidate.url + ' -> ' + result.message)
       continue
     }
-    const models = extractModelIds(result.payload)
+    const models = extractModelIds(result.payload, record.shape)
     if (models.length === 0) {
       tried.push(candidate.url + ' -> 200，但响应里没有可用的模型 id')
       continue

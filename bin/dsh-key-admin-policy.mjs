@@ -36,9 +36,14 @@ export class AdminInputError extends Error {
 // 是小写字母（凭据引用名是 POSIX 标识符，不能以数字开头），分隔符只有单个短横线。
 // 我们这边放行 b_ai、4o 之类的名字，只会写出一条用户在官方页面上改不了的路由。
 const UPSTREAM_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
-// 模型 id 会被写进 settings.yaml，也会出现在页面上：限制字符集，别让上游返回的
-// 任意字符串成为一条注入路径。冒号、斜杠、点在真实模型 id 里都常见，必须放行。
-const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$/
+// 模型 id 会被写进 settings.yaml，也会出现在页面上，所以要挡住控制字符、引号和
+// 反斜杠（YAML 与 JSON 的引号语义）以及空白和逗号（它们是模型清单的分隔符）。
+// 除此之外一律放行：DSH 那边 id 就是 z.string()，没有字符集限制，而转卖网关很爱给
+// 模型贴花名（[蝶恋花]deepseek-v4-flash①），照官方模板发请求就得用那个原样的 id。
+const MODEL_ID = /^[^\s,'"\\\u0000-\u001f\u007f]{1,128}$/u
+// Gemini 原生协议例外：它把模型 id 拼进 URL 路径（/v1beta/models/<id>:generateContent），
+// 所以这一种形态下 id 必须是 URL 路径里能原样出现的字符。
+const MODEL_ID_URL_SAFE = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$/
 const HEADER_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 /**
@@ -180,14 +185,19 @@ export function normalizeBaseUrl(raw, name) {
   return url.origin + url.pathname.replace(/\/+$/, '')
 }
 
-export function normalizeModelIds(raw) {
+export function normalizeModelIds(raw, shape) {
   // 逗号和空白都算分隔符：页面上的模型清单是个多行文本框，人会顺手按回车。
   const list = Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,]+/)
+  const pattern = shape === 'gemini' ? MODEL_ID_URL_SAFE : MODEL_ID
   const out = []
   for (const entry of list) {
     const id = String(entry ?? '').trim()
     if (id === '') continue
-    if (!MODEL_ID.test(id)) throw new AdminInputError('模型 id 含有不允许的字符：' + id)
+    if (!pattern.test(id)) {
+      throw new AdminInputError(shape === 'gemini'
+        ? '模型 id 含有不允许的字符（Gemini 原生协议把它拼进 URL 路径，只能用字母、数字和 . _ : @ / + -）：' + id
+        : '模型 id 含有不允许的字符（空白、逗号、引号、反斜杠和控制字符不行，其它都可以）：' + id)
+    }
     if (!out.includes(id)) out.push(id)
   }
   if (out.length > 200) throw new AdminInputError('一个上游最多 200 个模型 id')
@@ -279,7 +289,7 @@ export function normalizeUpstreamInput(raw, existingEntry) {
   const name = normalizeName(raw?.name)
   const shape = normalizeShape(raw?.shape, name)
   const baseUrl = normalizeBaseUrl(raw?.baseUrl, name)
-  const models = normalizeModelIds(raw?.models)
+  const models = normalizeModelIds(raw?.models, shape)
   const extraHeaders = normalizeExtraHeaders(raw?.extraHeaders, shape)
   // 缺字段沿用已存的值，和限额同一个理由：页面上不一定每次都把它填一遍。
   const reasoningEfforts = raw?.reasoningEfforts === undefined
@@ -355,7 +365,7 @@ export function toUpstreamView(entry) {
   }
   let models = []
   try {
-    models = normalizeModelIds(entry?.dsh?.models)
+    models = normalizeModelIds(entry?.dsh?.models, shape)
   } catch {
     models = []
   }
@@ -498,7 +508,7 @@ export function suggestBaseUrlFix(record, endpoint) {
 }
 
 /** 上游的模型列表响应 -> 模型 id 数组。OpenAI、Anthropic、Gemini 三种形状都认。 */
-export function extractModelIds(payload) {
+export function extractModelIds(payload, shape) {
   const list = Array.isArray(payload)
     ? payload
     : Array.isArray(payload?.data)
@@ -513,7 +523,8 @@ export function extractModelIds(payload) {
     // Gemini 返回的是 models/gemini-3-pro 这种全名，DSH 侧要的是后面那一段。
     if (id.startsWith('models/')) id = id.slice('models/'.length)
     id = id.trim()
-    if (id === '' || !MODEL_ID.test(id) || out.includes(id)) continue
+    const pattern = shape === 'gemini' ? MODEL_ID_URL_SAFE : MODEL_ID
+    if (id === '' || !pattern.test(id) || out.includes(id)) continue
     out.push(id)
     if (out.length >= 500) break
   }
