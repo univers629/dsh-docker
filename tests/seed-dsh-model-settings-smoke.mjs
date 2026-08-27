@@ -99,10 +99,16 @@ try {
   }
   assert.deepEqual(fresh.written.map((entry) => entry.name), ['deepseek', 'justwoker'])
   assert.deepEqual(fresh.skipped.map((entry) => entry.name), ['badgw'])
+  // deepseek 落在 DSH 第一方命名空间上，而不是再建一条同名 pi-ai 路由：
+  // 两条同时存在时 WebUI 会显示两行 DeepSeek，默认模型只指其中一行。
+  assert.match(fresh.settingsText, /^llm-deepseek:$/m)
+  assert.doesNotMatch(fresh.settingsText, /^ {4}deepseek:$/m)
+  assert.equal(fresh.written[0].provider, 'deepseek-official')
+  assert.equal(fresh.defaultModel.provider, 'deepseek-official')
   // base_url 不带版本段：broker 会把上游 base_url 的路径和客户端路径拼起来。
   assert.match(fresh.settingsText, /baseURL: http:\/\/dsh-key-broker:8080\/u\/deepseek$/m)
   assert.doesNotMatch(fresh.settingsText, /\/u\/\w+\/v1/)
-  assert.match(fresh.settingsText, /apiKeyEnv: DEEPSEEK_API_KEY/)
+  assert.match(fresh.settingsText, /apiKeyEnv: JUSTWOKER_API_KEY/)
   // 自定义路由必须显式声明协议和模型 id，否则 pi-ai 会拒绝整个 namespace。
   assert.match(fresh.settingsText, /api: openai-responses/)
   assert.match(fresh.settingsText, /id: claude-opus-5-thinking/)
@@ -110,12 +116,15 @@ try {
   assert.deepEqual(fresh.credentialRefs.slice().sort(), ['DEEPSEEK_API_KEY', 'JUSTWOKER_API_KEY'])
   assert.match(fresh.credentialsText, /^version: 1$/m)
   assert.ok(fresh.credentialsText.includes('DEEPSEEK_API_KEY: ' + placeholder))
-  // 目录路由不写 api：目录里的模型各自带着自己的协议，写死一个就全按它对待了。
+  // 第一方那节只写 baseURL：models 沿用它内置的清单，apiKeyEnv 的默认值本来就是
+  // DEEPSEEK_API_KEY，写进去只会平白覆盖用户可能改过的引用名。
   const deepseekBlock = fresh.settingsText.slice(
-    fresh.settingsText.indexOf('deepseek:'),
-    fresh.settingsText.indexOf('justwoker:'),
+    fresh.settingsText.indexOf('llm-deepseek:'),
+    fresh.settingsText.indexOf('llm-pi-ai:'),
   )
   assert.doesNotMatch(deepseekBlock, /api:/)
+  assert.doesNotMatch(deepseekBlock, /models:/)
+  assert.doesNotMatch(deepseekBlock, /apiKeyEnv:/)
 
   // -------------------------------------------------------------------------
   // 幂等：把产物再喂一遍，两份文本都不能变
@@ -169,6 +178,41 @@ try {
   // 已经有真实密钥的引用不写占位串，否则等于把用户的配置弄坏。
   assert.deepEqual(merged.credentialRefs, ['JUSTWOKER_API_KEY'])
   assert.match(merged.credentialsText, /DEEPSEEK_API_KEY: sk-real-user-key/)
+
+  // -------------------------------------------------------------------------
+  // 旧版安装器写下的重复 deepseek 路由：收掉它，只留第一方那一行
+  // -------------------------------------------------------------------------
+  const stale = [
+    'llm-pi-ai:',
+    '  providers:',
+    '    deepseek:',
+    '      baseURL: http://dsh-key-broker:8080/u/deepseek',
+    '      apiKeyEnv: DEEPSEEK_API_KEY',
+    '',
+  ].join('\n')
+  const cleaned = transform({
+    brokerBase,
+    placeholder,
+    upstreams: [{ name: 'deepseek', shape: 'any', models: [] }],
+    settingsText: stale,
+    credentialsText: '',
+  })
+  assert.equal(cleaned.validationFailure, '', cleaned.validationFailure)
+  assert.deepEqual(cleaned.removed, ['llm-pi-ai.providers.deepseek'])
+  assert.match(cleaned.settingsText, /^llm-deepseek:$/m)
+  // 这条路由是这份文档里唯一的 pi-ai 路由，删掉之后空掉的父节点也不该留下。
+  assert.doesNotMatch(cleaned.settingsText, /llm-pi-ai/)
+
+  // 用户自己手写的同名路由（指向别的地址）不能被删：那不是安装器写的。
+  const foreign = transform({
+    brokerBase,
+    placeholder,
+    upstreams: [{ name: 'deepseek', shape: 'any', models: [] }],
+    settingsText: stale.replace('http://dsh-key-broker:8080/u/deepseek', 'https://my-own-proxy.example'),
+    credentialsText: '',
+  })
+  assert.deepEqual(foreign.removed, [])
+  assert.match(foreign.settingsText, /https:\/\/my-own-proxy\.example/)
 
   // -------------------------------------------------------------------------
   // --home 模式：落盘 + 中文摘要；顶层不是映射时一个字都不写

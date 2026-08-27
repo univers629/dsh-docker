@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>DSH 密钥管理面板</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="app">
+  <h1>DSH 密钥管理面板</h1>
+  <p class="hint">这里填的模型 API 密钥写进宿主上的 <code>data/broker/keys.json</code>（0600）并只交给 dsh-key-broker 容器。
+  DSH 容器拿到的永远是占位密钥和代理地址，所以容器里的 Agent 读不到真实密钥。保存后会顺便把供应商按 DSH 官方格式写进
+  <code>settings.yaml</code>，刷新 DSH 的 WebUI 就能在「设置 → 模型」里选模型。</p>
+
+  <div class="panel">
+    <h2>访问令牌</h2>
+    <div class="row">
+      <label class="field"><span>令牌（安装器打印过，也在宿主的 data/broker/admin.token 里）</span>
+        <input id="token" type="password" autocomplete="off" spellcheck="false"></label>
+      <button id="save-token" class="primary" type="button">连接</button>
+      <button id="forget-token" type="button">忘记</button>
+    </div>
+    <p id="auth-status" class="status"></p>
+  </div>
+
+  <div class="panel">
+    <h2>已配置的上游</h2>
+    <div id="list" class="list"></div>
+    <div class="actions">
+      <button id="new" type="button">新增上游</button>
+      <button id="reseed" type="button">重新写入 DSH 模型配置</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 id="form-title">新增上游</h2>
+    <div class="row">
+      <label class="field"><span>上游名字（小写字母、数字、下划线、短横线）</span>
+        <input id="name" autocomplete="off" spellcheck="false" placeholder="deepseek"></label>
+      <label class="field"><span>API 形态</span><select id="shape"></select></label>
+    </div>
+    <div class="row">
+      <label class="field"><span>base_url（真实上游地址，要带版本段；DSH 侧地址由面板自己算）</span>
+        <input id="base-url" autocomplete="off" spellcheck="false" placeholder="https://api.deepseek.com"></label>
+    </div>
+    <div class="row">
+      <label class="field"><span>API 密钥（不回显；改其它字段时留空 = 沿用已存的那把）</span>
+        <input id="key" type="password" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span>每分钟请求上限（0 = 不限）</span>
+        <input id="rpm" inputmode="numeric" value="0"></label>
+      <label class="field"><span>每日请求配额（0 = 不限）</span>
+        <input id="daily" inputmode="numeric" value="0"></label>
+    </div>
+    <p id="key-hint" class="hint"></p>
+
+    <h2>固定请求头</h2>
+    <p class="hint">代理转发时覆盖上去的头，例如 Codex 客户端要的 originator、version、User-Agent。认证类头不允许在这里出现：密钥由形态决定的那个头注入。</p>
+    <div id="headers" class="headers"></div>
+    <div class="actions"><button id="add-header" type="button">加一行</button></div>
+
+    <h2>模型清单</h2>
+    <p class="hint">写进 DSH 的模型 id，逗号或换行分隔。DSH 内置目录里的上游（deepseek、openai、anthropic、google、nvidia 等）留空就沿用目录里的整份清单；自建网关必须至少给一个。</p>
+    <textarea id="models" spellcheck="false" placeholder="deepseek-v4-flash, deepseek-v4-pro"></textarea>
+    <div class="actions">
+      <button id="fetch-models" type="button">向上游拉取模型列表</button>
+      <button id="check-all" type="button">全选</button>
+      <button id="check-none" type="button">全不选</button>
+      <button id="apply-models" type="button">把勾选的写进上面</button>
+    </div>
+    <div id="model-list" class="models"></div>
+
+    <div class="actions">
+      <button id="save" class="primary" type="button">保存并写入 DSH 配置</button>
+      <button id="delete" class="danger" type="button">删除这个上游</button>
+    </div>
+    <p id="form-status" class="status"></p>
+  </div>
+
+  <div class="panel">
+    <h2>输出</h2>
+    <pre id="log">还没有操作。</pre>
+  </div>
+</div>
+<script src="/app.js" defer></script>
+</body>
+</html>

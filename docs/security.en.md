@@ -41,7 +41,7 @@ Only removal is restricted: installing, reinstalling, and querying these package
 
 ## Self-check
 
-`./dsh.sh verify` runs `verify-dsh-hardening` inside the container: 23 checks covering the run UID, capability set, `no-new-privileges`, the privileged-helper socket, root-only write access to the boot chain (`boot-chain-immutable`), UID separation between the Supervisor / Nginx master / privileged helper and `dsh` (`signal-isolation`), whether the apt removal guard is in force (`apt-removal-guard`), root-password state, and the `/proc`, `/sys`, and cgroup mounts. Any failing check exits non-zero.
+`./dsh.sh verify` runs `verify-dsh-hardening` inside the container: 24 checks covering the run UID, capability set, `no-new-privileges`, the privileged-helper socket, root-only write access to the boot chain (`boot-chain-immutable`), UID separation between the Supervisor / Nginx master / privileged helper and `dsh` (`signal-isolation`), whether the apt removal guard is in force (`apt-removal-guard`), root-password state, and the `/proc`, `/sys`, and cgroup mounts. Any failing check exits non-zero.
 
 ## Model key broker
 
@@ -121,10 +121,11 @@ Once the real keys live in the broker, all DSH needs is a base_url pointing at t
 
 | File | Contents |
 | --- | --- |
-| `data/dsh/settings.yaml` | `baseURL` / `apiKeyEnv` under `llm-pi-ai.providers.<upstream>`, plus `api` and `models` when needed, and `agent-default-model` when it is not set yet |
+| `data/dsh/settings.yaml` | `baseURL` / `apiKeyEnv` under `llm-pi-ai.providers.<upstream>`, plus `api` and `models` when needed; `llm-deepseek.baseURL` for an upstream named `deepseek`; and `agent-default-model` when it is not set yet |
 | `data/dsh/.credentials.yaml` | `refs.<UPSTREAM>_API_KEY` = the placeholder `dsh-broker-placeholder` (0600) |
 
 - The credential reference name matches the one the WebUI derives itself (upstream name uppercased, non-alphanumerics to underscores, `_API_KEY` suffix), so editing the key in the UI later edits the same reference.
+- `deepseek` configures DSH's first-party namespace `llm-deepseek` (route id `deepseek-official`) instead of adding a same-named `llm-pi-ai` route: the Models page renders one row per route, so both would show up as two DeepSeek rows while the default model points at only one of them. The first-party route already reads `DEEPSEEK_API_KEY` and ships its own model list. A duplicate route left behind by an older installer is removed on the next write, and only when its `baseURL` points at this deployment's broker.
 - DSH hot-reloads both files, so a page refresh is enough; no container restart.
 - When the upstream name matches DSH's built-in model catalog (`deepseek`, `openai`, `anthropic`, `google`, `nvidia`, `openrouter`, `groq`, `xai`, `moonshotai`, and others), the catalog supplies the protocol and the full model list, so the installer writes only `baseURL` and `apiKeyEnv` and the WebUI immediately offers a full model dropdown.
 - A self-hosted gateway that is not in the catalog must declare its model ids: the wizard asks, and automation uses `--model-id NAME=ID[,ID]` (PowerShell: `-ModelId`). Without them DSH rejects the whole `llm-pi-ai` namespace and every provider disappears, so the installer validates the section with DSH's own checker first and writes nothing when it fails, printing the reason instead.
@@ -135,7 +136,25 @@ The merge runs in the image's node (that is where the yaml library, the built-in
 
 ### Adding keys later
 
+`./install.sh key-panel` (Windows: `.\install.ps1 -DshAction key-panel`) enables the key admin panel for an existing deployment; `--no-key-admin` disables it and removes the panel container while leaving `keys.json` and `admin.token` untouched. Like `model-key`, it only adds a sidecar container and never recreates `dsh`.
+
 `./install.sh model-key` (Windows: `.\install.ps1 -DshAction model-key`) writes `data/broker/keys.json` for an existing deployment, flips the `.env` switch to `on`, starts `dsh-key-broker`, and verifies `/healthz`. `docker-compose.keys.yml` only adds the broker service and does not touch the `dsh` service definition, so the container is not recreated and apt-installed toolchains survive. The only leftover is the `DSH_MODEL_BROKER` value shown in the in-container skill document, which is fixed when the container is created and refreshes on the next recreate; it is descriptive text and does not affect the broker.
+
+### Key admin panel
+
+When `.env` sets `DSH_KEY_ADMIN=on`, the installer also overlays `docker-compose.keys-admin.yml` and runs the separate `dsh-key-admin` container: a small panel that does nothing but model key configuration (add or remove upstreams, enter keys, pick the API shape, list model ids, set fixed request headers, fetch an upstream's model list once). Saving writes both `data/broker/keys.json` and DSH's `settings.yaml` and `.credentials.yaml`.
+
+It closes the "keys can only be entered from the install wizard" gap without becoming a new attack surface. The panel holds every real key, so if any of these three boundaries is missing it is worse than typing keys into the WebUI:
+
+1. **Network**: the panel joins only the `dsh-admin` network, which the `dsh` container is not on, so Docker itself drops traffic across the two bridges. Before reporting success the installer runs `net.connect(8090, 'dsh-key-admin')` from inside the `dsh` container; that connection must fail or the install fails. The in-container self-check does the same thing as `key-admin-unreachable`, regardless of whether the panel is enabled: with the panel off the probe usually fails at DNS resolution, which also counts as a pass.
+2. **Published address**: the host port defaults to `127.0.0.1:3082`. Published on `0.0.0.0`, the `dsh` container can reach the port back through the host gateway and boundary 1 is bypassed, so a non-loopback bind produces a warning and remote access should go through an SSH tunnel.
+3. **Authentication**: every `/api` route requires a bearer token; only `/healthz` and the static assets do not. The token is a 192-bit random value stored in `data/broker/admin.token` (0600) and never written into `.env`. Comparison runs over fixed-length digests, and repeated failures hit the same incremental delay and lockout used for the container root password.
+
+The container is locked down like the broker: non-root (1000:1000), `cap_drop: ALL`, `no-new-privileges`, read-only root filesystem, `pids_limit`, and only `data/broker` and `data/dsh` writable. Two details are worth stating separately:
+
+- The service code is mounted read-only from the project's `./bin` rather than baked into the image, so an existing deployment can enable the panel without rebuilding.
+- Before writing DSH configuration the panel `lstat`s the targets and refuses when `settings.yaml` or `.credentials.yaml` is a symlink or a directory. The `dsh` container can write `data/dsh`, so without this check it could replace those paths with symlinks and trick the panel into writing `keys.json` content somewhere the agent can read. A refusal counts only as "writing DSH configuration failed" and does not affect saving the keys themselves.
+- An empty `upstreams` array is a valid state, because the panel has to work from scratch: install without any key and the broker answers every `/u/` request with 503 until the first key is entered.
 
 ### Limits
 

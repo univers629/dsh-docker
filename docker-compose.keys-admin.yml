@@ -1,0 +1,74 @@
+# 模型密钥管理面板（dsh-key-admin）叠加文件。
+#
+# 为什么密钥不能在 DSH 自己的 WebUI 里填：那个页面跑在 dsh 容器里，填进去的密钥就
+# 落在容器内，被提示注入的 Agent 一条 cat 就能读到。但"只能在安装向导里填"也不合理，
+# 换密钥、加供应商、改模型清单都得回终端。所以面板是又一个独立容器：
+#
+#   * 它和 broker 共用 data/broker（面板可写，broker 只读），改完 keys.json 由 broker
+#     按 mtime 热加载，两边都不用重启；
+#   * 它只挂 dsh-admin 这一张网络，dsh 容器不在其中。Docker 默认拦掉不同网桥之间的
+#     东西向流量，所以 dsh 容器既解析不到也连不上 dsh-key-admin；
+#   * 宿主端口默认只发布在 127.0.0.1。这一点是安全边界的一部分：发布到 0.0.0.0 的话，
+#     dsh 容器可以经宿主网关回连这个端口，绕过上面那条网络隔离；
+#   * 所有 /api 请求都要 data/broker/admin.token 里的令牌，连续猜错会指数级锁定。
+#
+# 只在 .env 里 DSH_KEY_ADMIN=on 且 DSH_MODEL_BROKER=on 时由安装器叠加：
+#   docker compose -f docker-compose.yml -f docker-compose.keys.yml \
+#     -f docker-compose.keys-admin.yml up -d
+services:
+  dsh-key-admin:
+    image: "${DSH_IMAGE:-dsh:local}"
+    container_name: dsh-key-admin
+    hostname: dsh-key-admin
+    # 非 root、零能力、只读根文件系统。可写的只有两个挂载：密钥配置和 DSH 的家目录。
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    # 服务代码从工程目录挂进来，不是从镜像里取：这样老部署打开面板不需要先重建镜像，
+    # 而且 seed 脚本（写 DSH 侧模型配置的那个）本来就只存在于工程目录里。
+    entrypoint: ["node", "/dsh-bin/dsh-key-admin.mjs"]
+    environment:
+      DSH_KEY_ADMIN_PORT: "8090"
+      DSH_KEY_ADMIN_BIND: "0.0.0.0"
+      DSH_KEY_ADMIN_CONFIG: /etc/dsh-broker/keys.json
+      DSH_KEY_ADMIN_TOKEN: /etc/dsh-broker/admin.token
+      DSH_KEY_ADMIN_DSH_HOME: /data/dsh
+      DSH_KEY_ADMIN_SEED: /dsh-bin/seed-dsh-model-settings.mjs
+      DSH_KEY_ADMIN_WEB: /dsh-bin/dsh-key-admin-web
+      # 写进 DSH settings.yaml 的 base_url 前缀，必须与 broker 的实际地址一致。
+      DSH_KEY_ADMIN_BROKER_BASE: "${DSH_MODEL_BROKER_BASE:-http://dsh-key-broker:8080}"
+      # 镜像里 DSH 的依赖在这里：seed 脚本要用其中的 yaml 库和内置模型目录。
+      DSH_SEED_MODULE_ROOTS: /app/dsh/node_modules
+      NODE_OPTIONS: "--max-old-space-size=192"
+    ports:
+      # 默认只在回环上发布。改成 0.0.0.0 就等于把这个面板暴露给宿主所在的网络，
+      # 也等于让 dsh 容器能经网关回连它——要远程用请走 SSH 隧道。
+      - "${DSH_KEY_ADMIN_BIND_HOST:-127.0.0.1}:${DSH_KEY_ADMIN_HOST_PORT:-3082}:8090"
+    volumes:
+      - ./bin:/dsh-bin:ro
+      # 密钥配置与面板令牌。面板要可写（它就是来改这份文件的），broker 那边是 :ro。
+      - ./data/broker:/etc/dsh-broker
+      # DSH 的家目录：面板保存后顺便把供应商写进 settings.yaml / .credentials.yaml。
+      - ./data/dsh:/data/dsh
+    networks:
+      # 只有这一张网络：dsh 不在上面，所以 Agent 摸不到面板；它自己需要出网，
+      # 因为拉模型列表是面板直连上游（它本来就持有密钥）。
+      - dsh-admin
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/healthz').then((response) => process.exit(response.status === 204 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  dsh-admin:
+    name: "${DSH_ADMIN_NETWORK:-dsh-admin}"

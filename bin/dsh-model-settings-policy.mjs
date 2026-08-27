@@ -35,6 +35,40 @@ export const SUPPORTED_ROUTE_PROTOCOLS = Object.freeze([
 ])
 
 /**
+ * DSH 自带第一方命名空间的上游：这些名字不能再在 llm-pi-ai 里建同名路由。
+ *
+ * WebUI 的「模型」页把每个 provider 路由渲染成一行。llm-deepseek 的
+ * deepseek-official 就是 DSH 自己那行 DeepSeek，也是开箱默认选中的供应商。
+ * 再写一条 llm-pi-ai.providers.deepseek，页面上就会出现两行 DeepSeek：填了密钥
+ * 的是新那行，默认模型却还指着第一方那行——用户看到的正是"两个 DeepSeek，
+ * 填进去的不是默认那个"。所以同名时改为配置第一方命名空间本身：只有一行，
+ * 模型清单沿用它内置的那份，密钥引用还是它默认的 DEEPSEEK_API_KEY
+ * （正好等于 deriveCredentialRef('deepseek')，用户在 WebUI 里填真实密钥时也落这里）。
+ *
+ * 字段口径来自 @deepseek-ai/dsh-llm-deepseek：命名空间 llm-deepseek、profile 就在
+ * 命名空间根上、请求路径是 <baseURL>/chat/completions（密钥代理默认放行）、
+ * apiKeyEnv 默认 DEEPSEEK_API_KEY、models 默认 deepseek-v4-flash 与 deepseek-v4-pro。
+ */
+export const NATIVE_ROUTES = Object.freeze({
+  deepseek: Object.freeze({
+    provider: 'deepseek-official',
+    settingsPath: Object.freeze(['llm-deepseek']),
+    credentialRef: 'DEEPSEEK_API_KEY',
+    models: Object.freeze(['deepseek-v4-flash', 'deepseek-v4-pro']),
+  }),
+})
+
+/** pi-ai 路由在 settings.yaml 里的位置。 */
+export function piAiRoutePath(name) {
+  return ['llm-pi-ai', 'providers', name]
+}
+
+/** 这个 baseURL 是不是指向本部署的密钥代理路由（即安装器自己写出来的那种）。 */
+export function isBrokerRouteBaseUrl(value, name) {
+  return String(value ?? '').replace(/\/+$/, '').endsWith('/u/' + name)
+}
+
+/**
  * 上游名 → 凭据引用名。必须和 WebUI 自己派生的名字一致（大写、非字母数字换成
  * 下划线、加 _API_KEY 后缀），否则用户在页面上改密钥会改到另一个引用上，
  * 页面显示"已配置"而请求仍然用着占位密钥。
@@ -84,6 +118,28 @@ export function planProvider(request) {
   const models = normalizeModelIds(request.models)
   const baseURL = brokerRouteBaseUrl(request.brokerBase, name)
   const apiKeyEnv = deriveCredentialRef(name)
+
+  // 第一方命名空间优先：同名的 pi-ai 路由会在 WebUI 里变成重复的一行。
+  const native = NATIVE_ROUTES[name]
+  if (native) {
+    const nativeWhenMissing = {}
+    // 用户明确列了模型 id 才写 models：不写就沿用第一方内置的那份清单。
+    if (models.length > 0) nativeWhenMissing.models = models.map((id) => ({ id }))
+    return {
+      ok: true,
+      name,
+      source: 'native',
+      provider: native.provider,
+      path: [...native.settingsPath],
+      credentialRef: native.credentialRef,
+      always: { baseURL },
+      whenMissing: nativeWhenMissing,
+      api: '',
+      models: models.length > 0 ? models : [...native.models],
+      // 旧版安装器写过的同名 pi-ai 路由要一起收掉，否则重复那行留在页面上。
+      supersedes: piAiRoutePath(name),
+    }
+  }
   // baseURL / apiKeyEnv 由密钥代理的部署形态决定，用户在 WebUI 里改它们只会让
   // 请求绕开代理或找不到密钥，所以这两项每次都写成当前部署的值；其余字段属于
   // 用户，只在缺失时补。
@@ -98,6 +154,9 @@ export function planProvider(request) {
       ok: true,
       name,
       source: 'catalog',
+      provider: name,
+      path: piAiRoutePath(name),
+      credentialRef: apiKeyEnv,
       always,
       whenMissing,
       api: catalogEntry.api ?? '',
@@ -126,7 +185,18 @@ export function planProvider(request) {
   }
   whenMissing.api = protocol
   whenMissing.models = models.map((id) => ({ id }))
-  return { ok: true, name, source: 'declared', always, whenMissing, api: protocol, models }
+  return {
+    ok: true,
+    name,
+    source: 'declared',
+    provider: name,
+    path: piAiRoutePath(name),
+    credentialRef: apiKeyEnv,
+    always,
+    whenMissing,
+    api: protocol,
+    models,
+  }
 }
 
 /**
@@ -136,8 +206,8 @@ export function planProvider(request) {
  * @param request.brokerBase 密钥代理 base
  * @param request.placeholder 占位密钥字面值
  * @param request.catalog 目录快照
- * @param request.existing { providers: 已有的 llm-pi-ai.providers, refs: 已有的凭据引用名, defaultModel: 已有的 agent-default-model }
- * @returns { entries, skipped, refs, defaultModel }
+ * @param request.existing { providers: 已有的 llm-pi-ai.providers（名字 → profile 对象）, refs: 已有的凭据引用名, defaultModel: 已有的 agent-default-model }
+ * @returns { entries, skipped, refs, defaultModel, removals }
  */
 export function planSeed(request) {
   const existing = request.existing ?? {}
@@ -146,6 +216,7 @@ export function planSeed(request) {
   const entries = []
   const skipped = []
   const refs = {}
+  const removals = []
 
   for (const upstream of request.upstreams ?? []) {
     const plan = planProvider({
@@ -160,9 +231,16 @@ export function planSeed(request) {
       continue
     }
     entries.push(plan)
+    // 只收掉"确实是密钥代理路由"的那条重复配置：baseURL 指向 /u/<同名上游> 的
+    // pi-ai 路由只可能是安装器自己写的。用户手写的同名路由（指向别的地址）不动。
+    if (plan.supersedes !== undefined
+      && Object.prototype.hasOwnProperty.call(existingProviders, plan.name)
+      && isBrokerRouteBaseUrl(existingProviders[plan.name]?.baseURL, plan.name)) {
+      removals.push([...plan.supersedes])
+    }
     // 占位密钥只在这个引用还没有值的时候写：用户要是自己在 WebUI 里填过真实密钥
     // （那是他的选择），占位串盖回去会让请求直接失效。
-    const ref = plan.always.apiKeyEnv
+    const ref = plan.credentialRef
     if (!existingRefs.has(ref)) refs[ref] = request.placeholder
   }
 
@@ -171,8 +249,10 @@ export function planSeed(request) {
   let defaultModel = null
   if (!existing.defaultModel) {
     const seed = entries.find((entry) => entry.models.length > 0)
-    if (seed) defaultModel = { provider: seed.name, model: seed.models[0] }
+    // provider 用的是 WebUI 的路由 id：第一方命名空间那条不叫 deepseek，
+    // 叫 deepseek-official，写错了默认模型就指向一个不存在的路由。
+    if (seed) defaultModel = { provider: seed.provider, model: seed.models[0] }
   }
 
-  return { entries, skipped, refs, defaultModel, existingProviders }
+  return { entries, skipped, refs, defaultModel, removals, existingProviders }
 }

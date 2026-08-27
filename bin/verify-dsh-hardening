@@ -46,6 +46,11 @@ EGRESS_PROXY_URL = os.environ.get("DSH_EGRESS_PROXY_URL", "").strip()
 # 只按名字形态匹配，永远不看值。*_TOKEN 会把 GITHUB_TOKEN 这类也算进来，这是有意的：
 # 启用密钥代理之后，容器里本来就不该再留任何长期凭据形态的环境变量。
 MODEL_KEY_PATTERN = re.compile(r"(?:^|_)(?:API_?KEY|TOKEN)$")
+# 密钥管理面板（dsh-key-admin）持有全部真实模型密钥，它必须在这个容器摸不到的网络上。
+# 这一项不看"面板有没有开"：无论开着还是关着，从 dsh 容器里连不上才是唯一正确的结论，
+# 所以它是无条件的致命检查。面板没启用时这里通常是 DNS 解析失败，同样算通过。
+KEY_ADMIN_PROBE = (os.environ.get("DSH_KEY_ADMIN_HOST", "dsh-key-admin").strip() or "dsh-key-admin", 8090)
+KEY_ADMIN_PROBE_TIMEOUT = 3.0
 # 直连探测目标：不在任何默认白名单里的公网地址。刻意用 IP 字面量而不是域名——
 # internal 网络里连 DNS 都出不去，用域名会把「解析失败」和「路由不通」混成一件事。
 DIRECT_PROBE = ("1.1.1.1", 443)
@@ -499,6 +504,29 @@ def check_broker_mount():
     )
 
 
+def check_key_admin_unreachable():
+    """面板对这个容器必须不可达。
+
+    面板是唯一同时持有全部真实密钥、又能改 DSH 模型配置的地方。密钥代理那一层的意义
+    完全建立在"Agent 打不到它"之上：一旦 dsh 容器能连上 8090，只要再拿到令牌就能把
+    所有密钥读出来，keys.json 没挂进容器也就不再是保护。
+    """
+    host, port = KEY_ADMIN_PROBE
+    try:
+        with socket.create_connection((host, port), timeout=KEY_ADMIN_PROBE_TIMEOUT):
+            record(
+                "key-admin-unreachable",
+                False,
+                f"能连上 {host}:{port}：密钥管理面板对这个容器可达，真实密钥等于没有隔离",
+            )
+    except OSError as error:
+        record(
+            "key-admin-unreachable",
+            True,
+            f"连不上 {host}:{port}（{error.__class__.__name__}）：密钥管理面板不在本容器可达的网络里",
+        )
+
+
 def check_model_broker():
     if MODEL_BROKER != "on":
         record_skip("model-broker", f"DSH_MODEL_BROKER={MODEL_BROKER or 'off'}：未启用模型密钥代理，本项不适用")
@@ -714,6 +742,7 @@ def main():
     # 旁路服务与 namespace：默认部署（broker off + egress open）下这几项报 skip 或
     # warn，退出码不变，安装器的成败判定仍然只看真正的加固失败。
     check_broker_mount()
+    check_key_admin_unreachable()
     check_model_broker()
     check_egress()
     check_user_namespace()

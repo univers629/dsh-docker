@@ -1,0 +1,313 @@
+// DSH 密钥管理面板的前端。
+//
+// 三个约定：
+//   1. 令牌只放 sessionStorage，并且只以 Authorization 头发送。不用 cookie，因此
+//      不存在 CSRF 面；地址栏里带 ?token= 的话会在读到之后立刻从 URL 里抹掉。
+//   2. 页面上的所有文本都用 textContent 写，不拼 HTML 字符串。
+//   3. 任何时候都不显示密钥：后端只回一个指纹，用来回答"这次填的是不是同一把"。
+
+const TOKEN_KEY = 'dsh-key-admin-token'
+const S = { token: '', state: null, editing: '', fetched: [] }
+
+const byId = (id) => document.getElementById(id)
+
+function log(text) {
+  byId('log').textContent = text
+}
+
+function status(node, text, kind) {
+  const target = byId(node)
+  target.textContent = text
+  target.className = 'status' + (kind ? ' ' + kind : '')
+}
+
+async function api(path, body) {
+  const headers = { authorization: 'Bearer ' + S.token }
+  if (body !== undefined) headers['content-type'] = 'application/json'
+  const response = await fetch(path, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: 'no-store',
+  })
+  const text = await response.text()
+  let payload = {}
+  if (text !== '') {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = { message: text.slice(0, 400) }
+    }
+  }
+  if (!response.ok) throw new Error(payload.message || ('HTTP ' + response.status))
+  return payload
+}
+
+function shapeOptions() {
+  const select = byId('shape')
+  select.textContent = ''
+  for (const shape of S.state.apiShapes) {
+    const option = document.createElement('option')
+    option.value = shape.id
+    option.textContent = shape.id + ' — ' + shape.label
+    select.appendChild(option)
+  }
+}
+
+function headerRow(name, value) {
+  const row = document.createElement('div')
+  row.className = 'row'
+  const nameField = document.createElement('label')
+  nameField.className = 'field'
+  const nameInput = document.createElement('input')
+  nameInput.className = 'header-name'
+  nameInput.placeholder = 'originator'
+  nameInput.spellcheck = false
+  nameInput.value = name || ''
+  nameField.appendChild(nameInput)
+  const valueField = document.createElement('label')
+  valueField.className = 'field'
+  const valueInput = document.createElement('input')
+  valueInput.className = 'header-value'
+  valueInput.placeholder = 'codex_cli_rs'
+  valueInput.spellcheck = false
+  valueInput.value = value || ''
+  valueField.appendChild(valueInput)
+  const remove = document.createElement('button')
+  remove.type = 'button'
+  remove.textContent = '删除'
+  remove.addEventListener('click', () => row.remove())
+  row.appendChild(nameField)
+  row.appendChild(valueField)
+  row.appendChild(remove)
+  return row
+}
+
+function renderList() {
+  const list = byId('list')
+  list.textContent = ''
+  if (S.state.upstreams.length === 0) {
+    const empty = document.createElement('p')
+    empty.className = 'hint'
+    empty.textContent = '还没有任何上游。下面填一个：名字、base_url、密钥，其余都有默认值。'
+    list.appendChild(empty)
+    return
+  }
+  for (const view of S.state.upstreams) {
+    const item = document.createElement('div')
+    item.className = 'item'
+    const left = document.createElement('div')
+    const title = document.createElement('strong')
+    title.textContent = view.name
+    const meta = document.createElement('div')
+    meta.className = 'meta'
+    const bits = [view.shape, view.baseUrl]
+    bits.push(view.models.length > 0 ? view.models.length + ' 个模型' : '模型清单沿用 DSH 内置目录')
+    if (view.requestsPerMinute > 0) bits.push(view.requestsPerMinute + ' 次/分钟')
+    if (view.dailyRequestBudget > 0) bits.push(view.dailyRequestBudget + ' 次/天')
+    if (view.extraHeaders.length > 0) bits.push(view.extraHeaders.length + ' 个固定头')
+    bits.push('密钥指纹 ' + (view.keyFingerprint || '无'))
+    meta.textContent = bits.join(' · ')
+    left.appendChild(title)
+    left.appendChild(meta)
+    const edit = document.createElement('button')
+    edit.type = 'button'
+    edit.textContent = '编辑'
+    edit.addEventListener('click', () => fillForm(view))
+    item.appendChild(left)
+    item.appendChild(edit)
+    list.appendChild(item)
+  }
+}
+
+function fillForm(view) {
+  S.editing = view ? view.name : ''
+  S.fetched = []
+  byId('model-list').textContent = ''
+  byId('form-title').textContent = view ? '编辑上游：' + view.name : '新增上游'
+  byId('name').value = view ? view.name : ''
+  byId('shape').value = view ? view.shape : 'any'
+  byId('base-url').value = view ? view.baseUrl : ''
+  byId('key').value = ''
+  byId('rpm').value = view ? String(view.requestsPerMinute) : '0'
+  byId('daily').value = view ? String(view.dailyRequestBudget) : '0'
+  byId('models').value = view ? view.models.join(', ') : ''
+  byId('key-hint').textContent = view && view.hasKey
+    ? '这个上游已有密钥（指纹 ' + view.keyFingerprint + '）。要换密钥就填新的，不换就留空。'
+    : '新上游必须填一次密钥。'
+  const headers = byId('headers')
+  headers.textContent = ''
+  if (view) {
+    for (const header of view.extraHeaders) headers.appendChild(headerRow(header.name, header.value))
+  }
+  status('form-status', '', '')
+  window.scrollTo({ top: byId('form-title').offsetTop - 20, behavior: 'smooth' })
+}
+
+function readForm() {
+  const extraHeaders = []
+  for (const row of byId('headers').querySelectorAll('.row')) {
+    const name = row.querySelector('.header-name').value.trim()
+    const value = row.querySelector('.header-value').value.trim()
+    if (name === '' && value === '') continue
+    extraHeaders.push({ name, value })
+  }
+  return {
+    name: byId('name').value.trim(),
+    shape: byId('shape').value,
+    baseUrl: byId('base-url').value.trim(),
+    key: byId('key').value,
+    rename: S.editing,
+    models: byId('models').value,
+    extraHeaders,
+    requestsPerMinute: byId('rpm').value.trim(),
+    dailyRequestBudget: byId('daily').value.trim(),
+  }
+}
+
+function renderModelChoices(models) {
+  S.fetched = models
+  const box = byId('model-list')
+  box.textContent = ''
+  const chosen = new Set(byId('models').value.split(/[\s,]+/).filter((id) => id !== ''))
+  for (const id of models) {
+    const label = document.createElement('label')
+    const input = document.createElement('input')
+    input.type = 'checkbox'
+    input.value = id
+    input.checked = chosen.has(id)
+    label.appendChild(input)
+    const text = document.createElement('span')
+    text.textContent = id
+    label.appendChild(text)
+    box.appendChild(label)
+  }
+}
+
+function checkedModels() {
+  const out = []
+  for (const input of byId('model-list').querySelectorAll('input')) {
+    if (input.checked) out.push(input.value)
+  }
+  return out
+}
+
+function seedSummary(payload) {
+  const lines = []
+  if (payload.brokerReload) lines.push(payload.brokerReload)
+  if (payload.seed && payload.seed.output) lines.push(payload.seed.output.trim())
+  if (payload.seed && payload.seed.failed) lines.push('[写 DSH 配置失败] ' + payload.seed.error)
+  return lines.join('\n') || '完成。'
+}
+
+async function refresh() {
+  S.state = await api('/api/state')
+  shapeOptions()
+  renderList()
+  status('auth-status', '已连接。密钥代理地址 ' + S.state.brokerBase + '，配置文件 ' + S.state.configPath + '。', 'good')
+}
+
+async function connect() {
+  const value = byId('token').value.trim()
+  if (value === '') {
+    status('auth-status', '先填令牌。', 'bad')
+    return
+  }
+  S.token = value
+  try {
+    await refresh()
+    sessionStorage.setItem(TOKEN_KEY, value)
+    byId('token').value = ''
+    if (S.state.upstreams.length > 0) fillForm(null)
+  } catch (error) {
+    status('auth-status', String(error.message || error), 'bad')
+  }
+}
+
+async function guard(node, action) {
+  try {
+    status(node, '处理中...', '')
+    await action()
+  } catch (error) {
+    status(node, String(error.message || error), 'bad')
+  }
+}
+
+function main() {
+  const query = new URLSearchParams(window.location.search)
+  const fromQuery = query.get('token')
+  const stored = sessionStorage.getItem(TOKEN_KEY)
+  if (fromQuery) {
+    // 令牌不留在地址栏里：浏览器历史、书签和 Referer 都会带走它。
+    window.history.replaceState(null, '', window.location.pathname)
+  }
+  const initial = fromQuery || stored || ''
+  if (initial !== '') {
+    byId('token').value = initial
+    connect()
+  }
+
+  byId('save-token').addEventListener('click', connect)
+  byId('token').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') connect()
+  })
+  byId('forget-token').addEventListener('click', () => {
+    sessionStorage.removeItem(TOKEN_KEY)
+    S.token = ''
+    S.state = null
+    byId('list').textContent = ''
+    status('auth-status', '已忘记令牌。', '')
+  })
+  byId('new').addEventListener('click', () => fillForm(null))
+  byId('add-header').addEventListener('click', () => byId('headers').appendChild(headerRow('', '')))
+  byId('name').addEventListener('blur', () => {
+    const name = byId('name').value.trim()
+    if (!S.state || byId('base-url').value.trim() !== '') return
+    const preset = S.state.defaultBaseUrls[name]
+    if (preset) byId('base-url').value = preset
+    const shape = S.state.defaultShapes[name]
+    if (shape) byId('shape').value = shape
+  })
+  byId('check-all').addEventListener('click', () => {
+    for (const input of byId('model-list').querySelectorAll('input')) input.checked = true
+  })
+  byId('check-none').addEventListener('click', () => {
+    for (const input of byId('model-list').querySelectorAll('input')) input.checked = false
+  })
+  byId('apply-models').addEventListener('click', () => {
+    byId('models').value = checkedModels().join(', ')
+    status('form-status', '已写入 ' + checkedModels().length + ' 个模型 id，别忘了保存。', '')
+  })
+  byId('fetch-models').addEventListener('click', () => guard('form-status', async () => {
+    const payload = await api('/api/models', readForm())
+    renderModelChoices(payload.models)
+    status('form-status', '上游 ' + payload.endpoint + ' 返回了 ' + payload.models.length + ' 个模型，勾选后点"把勾选的写进上面"。', 'good')
+    log(payload.models.join('\n') || '（上游没有返回任何模型 id）')
+  }))
+  byId('save').addEventListener('click', () => guard('form-status', async () => {
+    const payload = await api('/api/upstreams', readForm())
+    await refresh()
+    S.editing = payload.name
+    byId('form-title').textContent = '编辑上游：' + payload.name
+    byId('key').value = ''
+    status('form-status', '已保存 ' + payload.name + '。', 'good')
+    log(seedSummary(payload))
+  }))
+  byId('delete').addEventListener('click', () => guard('form-status', async () => {
+    const name = byId('name').value.trim()
+    if (name === '' || !window.confirm('删除上游 ' + name + ' 的密钥和配置？DSH 侧那条供应商要自己去 WebUI 删。')) return
+    const payload = await api('/api/upstreams/delete', { name })
+    await refresh()
+    fillForm(null)
+    status('form-status', '已删除 ' + name + '。', 'good')
+    log(seedSummary(payload))
+  }))
+  byId('reseed').addEventListener('click', () => guard('auth-status', async () => {
+    const payload = await api('/api/seed', {})
+    await refresh()
+    status('auth-status', '已重新写入 DSH 模型配置。', 'good')
+    log(seedSummary(payload))
+  }))
+}
+
+main()

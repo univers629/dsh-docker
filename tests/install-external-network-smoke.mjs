@@ -30,6 +30,8 @@ if [ "\$1" = clone ]; then
   printf '%s\\n' '#!/bin/sh' 'exit 0' > "\$3/dsh.sh"
   chmod +x "\$3/dsh.sh"
   printf '%s\\n' 'services: {}' > "\$3/docker-compose.keys.yml"
+  mkdir -p "\$3/bin"
+  printf '%s\\n' '// seed stub' > "\$3/bin/seed-dsh-model-settings.mjs"
   printf '%s\\n' 'services: {}' > "\$3/docker-compose.isolated.yml"
   exit 0
 fi

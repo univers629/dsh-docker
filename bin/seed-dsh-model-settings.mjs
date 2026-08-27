@@ -98,6 +98,32 @@ async function validateSection(providers) {
   return { failure: '', protocols: [] }
 }
 
+/**
+ * 第一方 DeepSeek 命名空间也过一遍它自己导出的 Config：写坏这一节的后果比 pi-ai
+ * 更重——它是开箱默认选中的供应商，配置被拒等于装完一个模型都用不了。
+ * @returns 空串表示通过（也包括"这次没加载到这个包"）。
+ */
+async function validateNativeSection(section) {
+  if (section === undefined) return ''
+  for (const root of DSH_ROOTS) {
+    const entry = root + '/@deepseek-ai/dsh-llm-deepseek/lib/index.js'
+    let module
+    try {
+      module = await import(pathToFileURL(entry).href)
+    } catch {
+      continue
+    }
+    if (typeof module.Config !== 'function') return ''
+    try {
+      module.Config(section)
+      return ''
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+  }
+  return ''
+}
+
 function readStdin() {
   return new Promise((resolve, reject) => {
     const chunks = []
@@ -154,8 +180,10 @@ async function runSeed(payload) {
     placeholder: payload.placeholder ?? '',
     catalog,
     existing: {
+      // 传整份 profile（不只是名字）：判断某条同名 pi-ai 路由是不是安装器自己写的
+      // 重复行，要看它的 baseURL 指向哪里。
       providers: existingProviders && yaml.isMap(existingProviders)
-        ? Object.fromEntries(existingProviders.items.map((item) => [String(item.key), true]))
+        ? existingProviders.toJSON?.() ?? {}
         : {},
       // 已经有值的引用不碰：用户自己在 WebUI 里填过真实密钥的话，占位串盖回去
       // 就等于把他的配置弄坏。
@@ -170,7 +198,7 @@ async function runSeed(payload) {
 
   const written = []
   for (const entry of plan.entries) {
-    const base = ['llm-pi-ai', 'providers', entry.name]
+    const base = entry.path
     // baseURL / apiKeyEnv 跟着部署走，每次都覆盖；其余字段属于用户，只补缺。
     for (const [key, value] of Object.entries(entry.always)) settings.setIn([...base, key], value)
     for (const [key, value] of Object.entries(entry.whenMissing)) {
@@ -179,11 +207,24 @@ async function runSeed(payload) {
     written.push({
       name: entry.name,
       source: entry.source,
+      provider: entry.provider,
       api: entry.api,
       models: entry.models,
       baseURL: entry.always.baseURL,
-      apiKeyEnv: entry.always.apiKeyEnv,
+      apiKeyEnv: entry.credentialRef,
     })
+  }
+  // 旧版安装器留下的重复 pi-ai 路由：删掉它，顺带把空掉的容器键也清掉，
+  // 否则 settings.yaml 里会剩一个 providers: {} 这样的空节点。
+  const removed = []
+  for (const path of plan.removals) {
+    if (settings.getIn(path) === undefined) continue
+    settings.deleteIn(path)
+    removed.push(path.join('.'))
+    const parent = settings.getIn(path.slice(0, -1), true)
+    if (parent && yaml.isMap(parent) && parent.items.length === 0) settings.deleteIn(path.slice(0, -1))
+    const grandparent = settings.getIn(path.slice(0, -2), true)
+    if (grandparent && yaml.isMap(grandparent) && grandparent.items.length === 0) settings.deleteIn(path.slice(0, -2))
   }
   if (plan.defaultModel !== null) {
     settings.setIn(['agent-default-model', 'provider'], plan.defaultModel.provider)
@@ -199,17 +240,19 @@ async function runSeed(payload) {
 
   const providersJson = settings.getIn(['llm-pi-ai', 'providers'], true)?.toJSON?.() ?? {}
   const validation = await validateSection(providersJson)
+  const nativeFailure = await validateNativeSection(settings.getIn(['llm-deepseek'], true)?.toJSON?.())
   return {
     settingsText: String(settings),
     credentialsText: String(credentials),
     written,
+    removed,
     skipped: plan.skipped,
     defaultModel: plan.defaultModel,
     credentialRefs: Object.keys(plan.refs),
     catalogAvailable: Object.keys(catalog).length > 0,
     // 空数组表示这次没能加载 llm-pi-ai，validationFailure 为空串也不代表校验过了。
     supportedProtocols: validation.protocols,
-    validationFailure: validation.failure,
+    validationFailure: validation.failure.length > 0 ? validation.failure : nativeFailure,
   }
 }
 
@@ -231,12 +274,17 @@ function applyToHome(home, payload, result) {
     writeAtomic(credentialsFile, result.credentialsText, 0o600)
   }
   for (const entry of result.written) {
-    const models = entry.source === 'catalog' && entry.models.length > 3
+    const models = entry.source !== 'declared' && entry.models.length > 3
       ? entry.models.slice(0, 3).join('、') + ' 等 ' + entry.models.length + ' 个'
       : entry.models.join('、')
-    process.stdout.write('    - ' + entry.name + '：' +
-      (entry.source === 'catalog' ? 'DSH 内置目录路由' : '自定义路由（' + entry.api + '）') +
+    const kind = entry.source === 'native'
+      ? 'DSH 自带的 ' + entry.provider + ' 供应商（不会多出一行）'
+      : entry.source === 'catalog' ? 'DSH 内置目录路由' : '自定义路由（' + entry.api + '）'
+    process.stdout.write('    - ' + entry.name + '：' + kind +
       '，模型 ' + (models.length > 0 ? models : '（目录提供）') + '\n')
+  }
+  for (const path of result.removed) {
+    process.stdout.write('    已删除旧版安装器留下的重复配置：' + path + '\n')
   }
   if (result.defaultModel !== null) {
     process.stdout.write('    默认模型：' + result.defaultModel.provider + ' / ' + result.defaultModel.model + '\n')

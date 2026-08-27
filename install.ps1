@@ -1,6 +1,6 @@
 param(
     [Alias('Action')]
-    [ValidateSet('','install','configure','update','model-key','start','stop','restart','logs','status','delete')]
+    [ValidateSet('','install','configure','update','model-key','key-panel','start','stop','restart','logs','status','delete')]
     [string]$DshAction,
     [ValidateSet('','local','trusted-proxy','basic')]
     [string]$Access = '',
@@ -20,6 +20,10 @@ param(
     [string]$ModelKeysFile = '',
     [switch]$NoModelBroker,
     [switch]$NoModelSettingsSeed,
+    [switch]$KeyAdmin,
+    [switch]$NoKeyAdmin,
+    [string]$KeyAdminBind = '',
+    [string]$KeyAdminPort = '',
     [ValidateSet('','open','allowlist')]
     [string]$Egress = '',
     [string[]]$EgressAllow = @(),
@@ -35,6 +39,7 @@ $ErrorActionPreference = 'Stop'
 # PSNativeCommandUseErrorActionPreference，非零退出会变成终止错误并中断向导。
 if (Test-Path variable:PSNativeCommandUseErrorActionPreference) { $PSNativeCommandUseErrorActionPreference = $false }
 if ($NetworkExternal -and $NetworkInternal) { throw '-NetworkExternal 与 -NetworkInternal 不能同时使用。' }
+if ($KeyAdmin -and $NoKeyAdmin) { throw '-KeyAdmin 与 -NoKeyAdmin 不能同时使用。' }
 $interactive = -not $NonInteractive -and [Environment]::UserInteractive
 $GitHubSshUrl = 'ssh://git@ssh.github.com:443/univers629/dsh-docker.git'
 $GitHubHttpsUrl = 'https://github.com/univers629/dsh-docker.git'
@@ -44,6 +49,14 @@ $DefaultLocalImage = 'dsh:local'
 # 一部分：compose 用它渲染 DSH_MODEL_BROKER_BASE，摘要用它拼出给 Agent 的 base_url。
 $ModelBrokerBase = 'http://dsh-key-broker:8080'
 $ModelBrokerPlaceholderKey = 'dsh-broker-placeholder'
+# 密钥管理面板的默认发布位置。回环是刻意的默认值：发布到 0.0.0.0 之后 dsh 容器能经宿主
+# 网关回连这个端口，网络隔离就白做了。
+$DefaultKeyAdminBindHost = '127.0.0.1'
+$DefaultKeyAdminPort = '3082'
+$KeyAdminOverride = if ($KeyAdmin) { 'on' } elseif ($NoKeyAdmin) { 'off' } else { '' }
+$KeyAdminBindHost = ''
+$KeyAdminPortValue = ''
+$KeyAdminTokenState = ''
 if (-not $ModelKeysFile -and $env:DSH_MODEL_KEYS_FILE) { $ModelKeysFile = $env:DSH_MODEL_KEYS_FILE }
 # 收集到的上游先留在内存里，写盘之后立刻清空（和 $rootPassword 一样的处理）。
 $BrokerUpstreams = New-Object System.Collections.ArrayList
@@ -327,6 +340,12 @@ function Invoke-DshModelSettingsSeed {
         Write-Host '[警告] 不知道该用哪个镜像来写 DSH 模型配置，已跳过。' -ForegroundColor Yellow
         return
     }
+    # model-key 只检查工程存在、不同步源码，所以老部署的工程目录里可能还没有这个脚本。
+    if (-not (Test-Path -LiteralPath 'bin\seed-dsh-model-settings.mjs' -PathType Leaf)) {
+        Write-Host '[警告] 工程目录里没有 bin\seed-dsh-model-settings.mjs，跳过写 DSH 模型配置。' -ForegroundColor Yellow
+        Write-Host '       先更新工程文件（重新跑一次安装或 git pull），再执行 install.ps1 model-key。' -ForegroundColor Yellow
+        return
+    }
     $dshHomeDir = Join-Path (Get-Location) 'data\dsh'
     New-Item -ItemType Directory -Path $dshHomeDir -Force | Out-Null
     $upstreams = @()
@@ -429,6 +448,14 @@ function Read-BrokerUpstreams {
             else { Write-Host '上游名字只允许小写字母、数字、下划线和短横线，且不超过 32 个字符。' -ForegroundColor Red }
         }
         $upstreamBase = ''
+        if (-not (Get-ModelDefaultBaseUrl $upstreamName)) {
+            # 内置表里没有这个名字，说明是自建网关或聚合站：版本段是这里最常漏的一项，
+            # 漏了就是上游 404，而那时候人已经在 WebUI 里找不到原因了。
+            Write-Host ''
+            Write-Host "$upstreamName 不在内置默认表里，base_url 照上游文档原样填，注意带上版本段："
+            Write-Host '    OpenAI 兼容网关一般是 https://<域名>/v1，Anthropic 兼容的一般不带 /v1。'
+            Write-Host '    这里填的是真实上游地址；DSH 容器那边填什么由安装器自己算。'
+        }
         while (-not $upstreamBase) {
             $candidate = Ask "$upstreamName 的 base_url" (Get-ModelDefaultBaseUrl $upstreamName)
             try { Test-UpstreamBaseUrl $candidate; $upstreamBase = $candidate }
@@ -494,13 +521,24 @@ function Read-BrokerUpstreams {
             }
         }
         # 模型 id 决定 WebUI 的模型下拉里能选到什么。内置目录里的上游不用填：安装器
-        # 会沿用 DSH 自带的那份清单；目录里没有的网关，DSH 无从知道它有哪些模型。
+        # 会沿用 DSH 自带的那份清单；目录里没有的网关，DSH 无从知道它有哪些模型，
+        # 空着就等于装完在 WebUI 里一个模型都选不到，所以这里直接挡住。
+        $upstreamInCatalog = [bool](Get-ModelDefaultBaseUrl $upstreamName)
         Write-Host ''
         Write-Host "$upstreamName 要在 DSH 里启用哪些模型："
-        Write-Host '    deepseek、openai、anthropic、google、nvidia 这类 DSH 内置目录里的上游可以直接回车，'
-        Write-Host '    安装器会沿用目录里的整份模型清单；自建网关请至少填一个模型 id。'
-        $upstreamModels = Ask-Optional '模型 id（多个用逗号分隔）'
-        if (-not $upstreamModels) { $upstreamModels = Get-ModelIdOverride $upstreamName }
+        if ($upstreamInCatalog) {
+            Write-Host "    $upstreamName 在 DSH 内置模型目录里，直接回车就沿用目录里的整份模型清单。"
+        } else {
+            Write-Host "    $upstreamName 不在 DSH 内置模型目录里，必须自己列出模型 id，照上游文档原样写。"
+            Write-Host '    例如：claude-opus-5-thinking 或 gpt-5.2,gemini-3-pro。'
+        }
+        $upstreamModels = ''
+        while ($true) {
+            $upstreamModels = Ask-Optional '模型 id（多个用逗号分隔）'
+            if (-not $upstreamModels) { $upstreamModels = Get-ModelIdOverride $upstreamName }
+            if ($upstreamModels -or $upstreamInCatalog) { break }
+            Write-Host "$upstreamName 不在内置目录里，至少要填一个模型 id。" -ForegroundColor Red
+        }
         Add-BrokerUpstream -Name $upstreamName -BaseUrl $upstreamBase -Key $upstreamKey `
             -RequestsPerMinute $upstreamRpm -DailyRequestBudget $upstreamDaily `
             -ApiProfile $upstreamProfile -ExtraHeader $upstreamHeaders -ModelIds $upstreamModels
@@ -539,6 +577,120 @@ function Assert-ModelBroker {
     $brokerEntries = @(& docker exec dsh sh -c 'ls -A /etc/dsh-broker 2>/dev/null' 2>$null | Where-Object { $_ -and $_.ToString().Trim() })
     if ($brokerEntries.Count -gt 0) { throw 'DSH 容器里的 /etc/dsh-broker 不是空的：密钥配置被挂进了 Agent 可读的容器，密钥代理会完全失去意义。请检查 docker-compose.keys.yml 有没有被改过。' }
     Write-Host '==> 已核验 DSH 容器内 /etc/dsh-broker 为空（真实密钥不在 Agent 可达范围内）' -ForegroundColor Green
+}
+
+# ---------------------------------------------------------------------------
+# 模型密钥管理面板（dsh-key-admin）
+#
+# 它补的是"密钥只能在安装向导里填"这个缺口。面板刻意不做进 DSH 自己的 WebUI：那个页面
+# 跑在 dsh 容器里，填进去的密钥就落在 Agent 能读的地方。三条边界缺一条这个面板就成了
+# 新的攻击面：
+#   1. 面板只挂 dsh-admin 网络，dsh 容器不在其中，跨网桥流量被 Docker 自己拦掉；
+#   2. 宿主端口默认只发布在 127.0.0.1：发布到 0.0.0.0 的话 dsh 容器能经网关回连；
+#   3. 所有 /api 都要令牌，令牌写 data\broker\admin.token，不进 .env。
+# ---------------------------------------------------------------------------
+
+function Get-KeyAdminTokenFile { Join-Path (Get-Location) 'data\broker\admin.token' }
+
+function Read-KeyAdminToken {
+    $tokenFile = Get-KeyAdminTokenFile
+    if (-not (Test-Path -LiteralPath $tokenFile -PathType Leaf)) { return '' }
+    return ([IO.File]::ReadAllText($tokenFile)).Trim()
+}
+
+# 面板令牌。48 个十六进制字符（192 bit）。已有令牌就保留：重跑安装不该让人重新去翻一遍。
+function Write-KeyAdminToken {
+    param([bool]$Enabled)
+    if (-not $Enabled) { return }
+    $tokenFile = Get-KeyAdminTokenFile
+    New-Item -ItemType Directory -Path (Split-Path -Parent $tokenFile) -Force | Out-Null
+    if ((Test-Path -LiteralPath $tokenFile -PathType Leaf) -and (Get-Item -LiteralPath $tokenFile).Length -gt 0) {
+        $script:KeyAdminTokenState = 'kept'
+        return
+    }
+    $bytes = New-Object byte[] 24
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $token = (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
+    [IO.File]::WriteAllText($tokenFile, ($token + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    Protect-BrokerConfigFile $tokenFile
+    $script:KeyAdminTokenState = 'new'
+    Write-Host '==> 已生成密钥管理面板令牌：data\broker\admin.token，未写入 .env。' -ForegroundColor Yellow
+}
+
+# 面板要能从零开始：容器先起来，第一把密钥在页面上填。broker 的挂载是一份文件，文件不
+# 存在的话 Docker 会把挂载点建成目录，broker 直接启动失败，所以先落一份空的。空的
+# upstreams 是合法状态：这时 broker 对每个 /u/ 请求都回 503。
+function Initialize-BrokerConfigPlaceholder {
+    param([string]$Path)
+    if ((Test-Path -LiteralPath $Path -PathType Leaf) -and (Get-Item -LiteralPath $Path).Length -gt 0) { return }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    [IO.File]::WriteAllText($Path, "{`n  `"version`": 1,`n  `"upstreams`": []`n}`n", (New-Object System.Text.UTF8Encoding($false)))
+    Protect-BrokerConfigFile $Path
+    Write-Host '==> 已创建空的 data\broker\keys.json：密钥留到面板里填。' -ForegroundColor Yellow
+}
+
+function Resolve-KeyAdmin {
+    param([string]$EnvFile, [bool]$BrokerOn, [bool]$Interactive)
+    $value = Get-ComposeEnvValue $EnvFile 'DSH_KEY_ADMIN' 'off'
+    if ($value -notin @('on','off')) { $value = 'off' }
+    if ($script:KeyAdminOverride) { $value = $script:KeyAdminOverride }
+    if (-not $script:KeyAdminBindHost) {
+        $script:KeyAdminBindHost = if ($KeyAdminBind) { $KeyAdminBind } else { Get-ComposeEnvValue $EnvFile 'DSH_KEY_ADMIN_BIND_HOST' $DefaultKeyAdminBindHost }
+    }
+    if (-not $script:KeyAdminPortValue) {
+        $script:KeyAdminPortValue = if ($KeyAdminPort) { $KeyAdminPort } else { Get-ComposeEnvValue $EnvFile 'DSH_KEY_ADMIN_HOST_PORT' $DefaultKeyAdminPort }
+    }
+    if ($script:KeyAdminPortValue -notmatch '^[0-9]+$') { throw "面板端口必须是数字：$($script:KeyAdminPortValue)" }
+    if ([int]$script:KeyAdminPortValue -lt 1 -or [int]$script:KeyAdminPortValue -gt 65535) { throw "面板端口超出范围：$($script:KeyAdminPortValue)" }
+    # 面板依附密钥代理：它改的就是 broker 那份 keys.json，broker 关着的话面板没有意义。
+    if (-not $BrokerOn -or -not (Test-Path -LiteralPath 'docker-compose.keys-admin.yml' -PathType Leaf)) { return 'off' }
+    if (-not $Interactive -or $script:KeyAdminOverride) { return $value }
+    Write-Host '模型密钥管理面板：'
+    Write-Host '    浏览器里填密钥、按上游拉一次模型列表、设固定请求头（originator / version /'
+    Write-Host '    User-Agent 这些），保存后直接写进 DSH 的模型配置，不用再回终端。'
+    Write-Host "    它是独立容器，默认只发布在 $($script:KeyAdminBindHost):$($script:KeyAdminPortValue)，"
+    Write-Host '    dsh 容器连不到它；访问要一个令牌，令牌在 data\broker\admin.token。'
+    if (Ask-YesNo '启用模型密钥管理面板' $true) { return 'on' }
+    return 'off'
+}
+
+# 面板的核验分两半：它自己活着，以及 dsh 容器确实连不到它。第二条是整个隔离设计的前提
+# ——面板持有全部真实密钥，Agent 一旦能打到它，密钥代理就白搭了。
+function Assert-KeyAdmin {
+    Write-Host '==> 正在核验模型密钥管理面板（dsh-key-admin）...' -ForegroundColor Yellow
+    $healthy = $false
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        & docker exec dsh-key-admin node -e "fetch('http://127.0.0.1:8090/healthz').then((response) => process.exit(response.status === 204 ? 0 : 1)).catch(() => process.exit(1))" *> $null
+        if ($LASTEXITCODE -eq 0) { $healthy = $true; break }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $healthy) { throw 'dsh-key-admin 未在 30 秒内让 /healthz 返回 204。查看原因：docker logs dsh-key-admin（读不到令牌时它会直接退出）。' }
+    Write-Host '==> 已核验 dsh-key-admin /healthz = 204' -ForegroundColor Green
+    & docker exec dsh node -e "const net = require('node:net'); const socket = net.connect(8090, 'dsh-key-admin'); socket.on('connect', () => { socket.destroy(); process.exit(0) }); socket.on('error', () => process.exit(1)); setTimeout(() => process.exit(1), 4000)" *> $null
+    if ($LASTEXITCODE -eq 0) { throw 'dsh 容器能连到 dsh-key-admin:8090：面板对 Agent 可达，真实密钥等于没有隔离。请检查 docker-compose.keys-admin.yml 的 networks 有没有被改过（面板只能在 dsh-admin 上）。' }
+    Write-Host '==> 已核验 dsh 容器连不到 dsh-key-admin（面板不在 Agent 可达的网络里）' -ForegroundColor Green
+    if ($script:KeyAdminBindHost -notin @('127.0.0.1','localhost','[::1]','::1')) {
+        Write-Host "[警告] 面板发布在 $($script:KeyAdminBindHost)，不是回环地址：宿主网络上的人只要拿到令牌就能改密钥，dsh 容器也可能经宿主网关回连这个端口。远程使用请改回 127.0.0.1 并走 SSH 隧道。" -ForegroundColor Yellow
+    }
+}
+
+# 令牌只在本次新生成时回显一次：已有令牌的部署重跑安装时把它再打一遍，等于把长期凭据
+# 抄进终端记录和滚动缓冲区，没有任何必要。
+function Show-KeyAdminAccess {
+    param([bool]$Enabled)
+    if (-not $Enabled) { return }
+    Write-Host "模型密钥面板：http://$($script:KeyAdminBindHost):$($script:KeyAdminPortValue)/" -ForegroundColor Green
+    $token = Read-KeyAdminToken
+    if ($script:KeyAdminTokenState -eq 'new' -and $token) {
+        Write-Host "  访问令牌：$token" -ForegroundColor Green
+        Write-Host "  （只回显这一次；随时可以从 $(Get-KeyAdminTokenFile) 再取）" -ForegroundColor Green
+    } else {
+        Write-Host "  访问令牌：见 $(Get-KeyAdminTokenFile)" -ForegroundColor Green
+    }
+    if ($script:KeyAdminBindHost -in @('127.0.0.1','localhost','[::1]','::1')) {
+        Write-Host "  远程访问：ssh -N -L $($script:KeyAdminPortValue):127.0.0.1:$($script:KeyAdminPortValue) <用户名@宿主地址>" -ForegroundColor Green
+    }
 }
 
 function Assert-EgressIsolation {
@@ -747,6 +899,20 @@ function Test-DshContainer {
     return ($LASTEXITCODE -eq 0)
 }
 
+# 需要"一个带 node 的镜像"时用哪个 tag。model-key 这条路径不重建 dsh，所以本次安装
+# 并没有选过镜像；空字符串直接交给 docker run 只会得到 invalid reference format。
+# 顺序：.env 里记着的 > 现有 dsh 容器实际在用的 > 预构建镜像。
+function Get-NodeToolImage {
+    param([string]$EnvFile)
+    $image = Get-ComposeEnvValue $EnvFile 'DSH_IMAGE' ''
+    if (-not $image) {
+        $inspected = & docker container inspect dsh --format '{{.Config.Image}}' 2>$null
+        if ($LASTEXITCODE -eq 0 -and $inspected) { $image = "$inspected".Trim() }
+    }
+    if (-not $image) { $image = $DefaultPrebuiltImage }
+    return $image
+}
+
 function Confirm-DshDelete {
     if ($env:DSH_DELETE_CONFIRMED -eq '1') { return }
     if ($NonInteractive) { throw '删除是破坏性操作，需要交互确认；请不要使用 -NonInteractive。' }
@@ -813,7 +979,7 @@ function Remove-DshProject {
                 # 密钥代理与出站隔离的叠加文件同样要带上，否则 down 看不到 dsh-key-broker /
                 # dsh-egress / dsh-ingress 这几个服务，它们会连着 dsh-internal 网络一起留下来。
                 # 老部署目录里没有这两个文件，所以必须逐个判断存在性。
-                foreach ($overlay in @('docker-compose.keys.yml','docker-compose.isolated.yml')) {
+                foreach ($overlay in @('docker-compose.keys.yml','docker-compose.keys-admin.yml','docker-compose.isolated.yml')) {
                     if (Test-Path -LiteralPath (Join-Path $resolvedDir $overlay) -PathType Leaf) { $composeArgs += @('-f',$overlay) }
                 }
                 & docker compose @composeArgs down --volumes --remove-orphans | Out-Host
@@ -823,7 +989,7 @@ function Remove-DshProject {
 
     $containerIds = @(& docker container ls -aq --filter "label=com.docker.compose.project=$projectName" 2>$null)
     # 兜底按名字删：叠加文件缺失、或者容器被手工从项目里摘掉时，标签过滤都找不到它们。
-    foreach ($name in @('dsh','dsh-key-broker','dsh-egress','dsh-ingress')) {
+    foreach ($name in @('dsh','dsh-key-broker','dsh-key-admin','dsh-egress','dsh-ingress')) {
         $namedContainer = (& docker container inspect --format '{{.Id}}' $name 2>$null | Select-Object -Last 1)
         if ($namedContainer) { $containerIds += $namedContainer.Trim() }
     }
@@ -858,7 +1024,7 @@ function Remove-DshProject {
         $attached = (& docker network inspect --format '{{ len .Containers }}' $id 2>$null | Select-Object -Last 1)
         if ($attached -and $attached.Trim() -eq '0') { & docker network rm $id *> $null }
     }
-    foreach ($name in @('dsh-private','dsh-internal')) {
+    foreach ($name in @('dsh-private','dsh-internal','dsh-admin')) {
         $defaultNetworkProject = (& docker network inspect --format '{{ index .Labels "com.docker.compose.project" }}' $name 2>$null | Select-Object -Last 1)
         if ($defaultNetworkProject -and $defaultNetworkProject.Trim() -eq $projectName) { & docker network rm $name *> $null }
     }
@@ -1105,11 +1271,12 @@ if ($UsernsPreflight) {
 
 if (-not $DshAction -and $interactive) {
     $installLabel = if (Test-Path $Dir) { '重新配置并重建容器（保留挂载数据）' } else { '全新安装' }
-    Write-Host "1) $installLabel`n2) 在容器内更新 DSH`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态`n8) 删除`n9) 补填模型 API 密钥（只新增密钥代理容器，不重建 dsh）"
+    Write-Host "1) $installLabel`n2) 在容器内更新 DSH`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态`n8) 删除`n9) 补填模型 API 密钥（只新增密钥代理容器，不重建 dsh）`n10) 模型密钥管理面板（浏览器里填密钥、拉模型列表，不重建 dsh）"
     switch (Ask '这次要做什么' '1') {
         '1' { $DshAction = 'install' }; '2' { $DshAction = 'update' }; '3' { $DshAction = 'start' }; '4' { $DshAction = 'stop' }
         '5' { $DshAction = 'restart' }; '6' { $DshAction = 'logs' }; '7' { $DshAction = 'status' }; '8' { $DshAction = 'delete' }
         '9' { $DshAction = 'model-key' }
+        '10' { $DshAction = 'key-panel' }
         default { throw '无效操作。' }
     }
 } elseif (-not $DshAction) { $DshAction = 'install' }
@@ -1167,6 +1334,7 @@ $rootHashFile = Join-Path (Get-Location) 'data\secret\root.hash'
 $brokerConfigFile = Join-Path (Get-Location) 'data\broker\keys.json'
 $modelBroker = Get-ComposeEnvValue $envFile 'DSH_MODEL_BROKER' 'off'
 if ($modelBroker -notin @('on','off')) { $modelBroker = 'off' }
+$keyAdmin = 'off'
 $egressMode = if ($Egress) { $Egress } else { Get-ComposeEnvValue $envFile 'DSH_EGRESS_MODE' 'open' }
 if ($egressMode -notin @('open','allowlist')) { $egressMode = 'open' }
 $egressAllowed = if ($EgressAllow.Count -gt 0) { ($EgressAllow -join ',') } else { Get-ComposeEnvValue $envFile 'DSH_EGRESS_ALLOWED_HOSTS' '' }
@@ -1315,10 +1483,25 @@ if ($DshAction -in @('install','configure')) {
                 # 一个上游都没收集到（密钥处直接回车）就按"本次不启用"处理。以前这里是必填
                 # 死循环，想先把环境装起来的人只能 Ctrl-C，反而更容易把安装打断在一半。
                 if ($BrokerUpstreams.Count -eq 0) {
-                    $modelBroker = 'off'
-                    Show-BrokerSkippedNotice
-                } else {
-                    $modelBroker = 'on'
+                    # 但"没在终端里填"不等于"不想要密钥代理"：先把代理和面板装上、keys.json 留空，
+                    # 剩下的在浏览器里做，这样填错一个 base_url 也不必重跑一遍安装向导。
+                    $offerPanel = (Test-Path -LiteralPath 'docker-compose.keys-admin.yml' -PathType Leaf) -and -not $KeyAdminOverride
+                    $takePanel = $false
+                    if ($offerPanel) {
+                        Write-Host '终端里没填密钥。还有一种填法：'
+                        Write-Host '    启用模型密钥管理面板，装完在浏览器里填密钥、按上游拉一次模型列表、设固定请求头，'
+                        Write-Host '    保存后直接写进 DSH 的模型配置。面板是独立容器，dsh 容器连不到它。'
+                        $takePanel = Ask-YesNo '现在不填密钥，装完在密钥管理面板里填' $true
+                    }
+                    if ($takePanel) {
+                        $modelBroker = 'on'
+                        # 置成 on 后 Resolve-KeyAdmin 会跳过重复提问，直接沿用这个决定。
+                        $KeyAdminOverride = 'on'
+                        Initialize-BrokerConfigPlaceholder $brokerConfigFile
+                    } else {
+                        $modelBroker = 'off'
+                        Show-BrokerSkippedNotice
+                    }
                 }
             } else {
                 $modelBroker = 'off'
@@ -1326,6 +1509,9 @@ if ($DshAction -in @('install','configure')) {
             }
         }
     }
+
+    # ---- 模型密钥管理面板 ----
+    $keyAdmin = Resolve-KeyAdmin -EnvFile $envFile -BrokerOn ($modelBroker -eq 'on') -Interactive ([bool]$interactive)
 
     # ---- 出站模式 ----
     if ($interactive -and -not $Egress) {
@@ -1355,6 +1541,15 @@ if ($DshAction -in @('install','configure')) {
             throw '需要 docker-compose.keys.yml 才能启用模型密钥代理，但工程目录里没有它。请更新工程源码，或用 -NoModelBroker 关闭密钥代理。'
         }
         $composeFileArgs += @('-f','docker-compose.keys.yml')
+        if ($keyAdmin -eq 'on') {
+            if (-not (Test-Path -LiteralPath 'docker-compose.keys-admin.yml' -PathType Leaf)) {
+                throw '需要 docker-compose.keys-admin.yml 才能启用密钥管理面板，但工程目录里没有它。请更新工程源码，或用 -NoKeyAdmin 关闭面板。'
+            }
+            $composeFileArgs += @('-f','docker-compose.keys-admin.yml')
+        }
+    } elseif ($keyAdmin -eq 'on') {
+        Write-Host '[警告] 密钥代理关着，密钥管理面板不会启动（它管理的就是代理那份密钥配置）。' -ForegroundColor Yellow
+        $keyAdmin = 'off'
     }
     if ($egressMode -eq 'allowlist') {
         if (-not (Test-Path -LiteralPath 'docker-compose.isolated.yml' -PathType Leaf)) {
@@ -1417,6 +1612,7 @@ switch ($DshAction) {
             Write-Host '==> 容器 root 密码已用 sha512crypt 哈希保存到 data\secret\root.hash，未写入 .env。' -ForegroundColor Yellow
         }
         Write-BrokerConfig $brokerConfigFile
+        Write-KeyAdminToken ($keyAdmin -eq 'on')
         Invoke-DshModelSettingsSeed -Image $imageRef -BrokerConfig $brokerConfigFile -Enabled ($modelBroker -eq 'on')
         $pendingEnvFile = Join-Path (Get-Location) ('.env.pending.' + $PID + '.' + [guid]::NewGuid().ToString('N'))
         try {
@@ -1433,15 +1629,19 @@ switch ($DshAction) {
             # 这四个键只是开关和地址，真实密钥永远不进 .env。
             Set-ComposeEnvValue $pendingEnvFile 'DSH_MODEL_BROKER' $modelBroker
             Set-ComposeEnvValue $pendingEnvFile 'DSH_MODEL_BROKER_BASE' $ModelBrokerBase
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_KEY_ADMIN' $keyAdmin
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_KEY_ADMIN_BIND_HOST' $KeyAdminBindHost
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_KEY_ADMIN_HOST_PORT' $KeyAdminPortValue
             Set-ComposeEnvValue $pendingEnvFile 'DSH_EGRESS_MODE' $egressMode
             Set-ComposeEnvValue $pendingEnvFile 'DSH_EGRESS_ALLOWED_HOSTS' $egressAllowed
-            $composeKeys = @('DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL','DSH_IMAGE','DSH_IMAGE_SOURCE','DSH_MODEL_BROKER','DSH_MODEL_BROKER_BASE','DSH_EGRESS_MODE','DSH_EGRESS_ALLOWED_HOSTS')
+            $composeKeys = @('DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL','DSH_IMAGE','DSH_IMAGE_SOURCE','DSH_MODEL_BROKER','DSH_MODEL_BROKER_BASE','DSH_KEY_ADMIN','DSH_KEY_ADMIN_BIND_HOST','DSH_KEY_ADMIN_HOST_PORT','DSH_EGRESS_MODE','DSH_EGRESS_ALLOWED_HOSTS')
             $composeExitCode = Invoke-ComposeWithEnvFile -Path $pendingEnvFile -Arguments @('up','-d','--no-build','--force-recreate') -EnvironmentKeys $composeKeys -FileArguments $composeFileArgs
             if ($composeExitCode -ne 0) { throw 'DSH 容器启动失败，原配置未被覆盖。' }
             Move-Item -LiteralPath $pendingEnvFile -Destination $envFile -Force
             $pendingEnvFile = $null
             Assert-DshHardening
             if ($modelBroker -eq 'on') { Assert-ModelBroker }
+            if ($keyAdmin -eq 'on') { Assert-KeyAdmin }
             if ($egressMode -eq 'allowlist') { Assert-EgressIsolation -ProbeHost $bind }
         } finally {
             if ($pendingEnvFile -and (Test-Path -LiteralPath $pendingEnvFile)) {
@@ -1489,15 +1689,66 @@ switch ($DshAction) {
         if (-not (Test-Path -LiteralPath $brokerConfigFile -PathType Leaf)) { throw "$brokerConfigFile 仍然不存在，.env 未改动。" }
         Set-ComposeEnvValue $envFile 'DSH_MODEL_BROKER' 'on'
         Set-ComposeEnvValue $envFile 'DSH_MODEL_BROKER_BASE' $ModelBrokerBase
+        # 面板归 -DshAction key-panel 管，这里不追问；只沿用 .env 里已有的决定，让这次 start
+        # 顺带把已经开着的面板带起来，并在后面把隔离再核验一遍。
+        if (-not $KeyAdminOverride) {
+            $KeyAdminOverride = if ((Get-ComposeEnvValue $envFile 'DSH_KEY_ADMIN' 'off') -eq 'on') { 'on' } else { 'off' }
+        }
+        $keyAdmin = Resolve-KeyAdmin -EnvFile $envFile -BrokerOn $true -Interactive $false
+        Write-KeyAdminToken ($keyAdmin -eq 'on')
+        Set-ComposeEnvValue $envFile 'DSH_KEY_ADMIN' $keyAdmin
+        if ($keyAdmin -eq 'on') {
+            Set-ComposeEnvValue $envFile 'DSH_KEY_ADMIN_BIND_HOST' $KeyAdminBindHost
+            Set-ComposeEnvValue $envFile 'DSH_KEY_ADMIN_HOST_PORT' $KeyAdminPortValue
+        }
         # 只叫 dsh.bat start：它按 .env 算出叠加文件，只把缺失的旁路容器 up 起来，不动 dsh。
         Write-Host '==> 正在启动 dsh-key-broker（不重建 dsh 容器）...' -ForegroundColor Yellow
         & .\dsh.bat start
         if ($LASTEXITCODE -ne 0) { throw '启动失败。密钥已写入 data\broker\keys.json，修好后可以重试。' }
         Assert-ModelBroker
-        Invoke-DshModelSettingsSeed -Image (Get-ComposeEnvValue $envFile 'DSH_IMAGE' '') -BrokerConfig $brokerConfigFile -Enabled $true
+        if ($keyAdmin -eq 'on') { Assert-KeyAdmin }
+        Invoke-DshModelSettingsSeed -Image (Get-NodeToolImage $envFile) -BrokerConfig $brokerConfigFile -Enabled $true
         Write-Host '==> 密钥代理已就绪。DSH 的 settings.yaml 与 .credentials.yaml 都是热加载的，' -ForegroundColor Green
         Write-Host '    刷新一下 WebUI 就能在「设置 → 模型」里看到这些供应商，密钥框里是占位串。' -ForegroundColor Green
         Write-Host '    容器内那份 skill 文档上的 DSH_MODEL_BROKER 仍显示安装时的值，要等下次重建容器才会刷新——那只是说明文字，不影响代理生效。' -ForegroundColor Yellow
+        Show-KeyAdminAccess ($keyAdmin -eq 'on')
+    }
+    'key-panel' {
+        # 给已经装好的部署开或关模型密钥管理面板。和 model-key 同一个理由：
+        # docker-compose.keys-admin.yml 只新增 dsh-key-admin 服务，完全不碰 dsh 服务的定义，
+        # 所以不需要重建 dsh 容器，容器可写层里 apt 装过的东西不会丢。
+        if (-not (Test-Path -LiteralPath 'docker-compose.keys-admin.yml' -PathType Leaf)) {
+            throw '工程目录里没有 docker-compose.keys-admin.yml，请先更新工程文件后重试（在工程目录里 git pull，或重新跑一次安装命令选"重新配置"）。'
+        }
+        if (-not (Test-DshContainer)) { throw '还没有 dsh 容器，请先执行安装。' }
+        if ($KeyAdminOverride -eq 'off') {
+            Set-ComposeEnvValue $envFile 'DSH_KEY_ADMIN' 'off'
+            Write-Host '==> 已在 .env 里关闭面板（DSH_KEY_ADMIN=off），正在移除 dsh-key-admin 容器...' -ForegroundColor Yellow
+            docker rm -f dsh-key-admin *> $null
+            Write-Host '==> 面板已关闭。datarokerkeys.json 与 admin.token 都保持原样，密钥不受影响。' -ForegroundColor Green
+            break
+        }
+        if ($NoModelBroker) { throw '面板管理的就是密钥代理里的密钥，不能和 -NoModelBroker 一起用。' }
+        # 面板离不开 broker：它写的那份 keys.json 就是 broker 的配置。broker 还没开就一起开，
+        # keys.json 允许是空的（这时 broker 对每个 /u/ 请求回 503），第一把密钥在页面上填。
+        Initialize-BrokerConfigPlaceholder $brokerConfigFile
+        $KeyAdminOverride = 'on'
+        $keyAdmin = Resolve-KeyAdmin -EnvFile $envFile -BrokerOn $true -Interactive $false
+        if ($keyAdmin -ne 'on') { throw '无法启用面板，请检查上面的提示。' }
+        Write-KeyAdminToken $true
+        Set-ComposeEnvValue $envFile 'DSH_MODEL_BROKER' 'on'
+        Set-ComposeEnvValue $envFile 'DSH_MODEL_BROKER_BASE' $ModelBrokerBase
+        Set-ComposeEnvValue $envFile 'DSH_KEY_ADMIN' 'on'
+        Set-ComposeEnvValue $envFile 'DSH_KEY_ADMIN_BIND_HOST' $KeyAdminBindHost
+        Set-ComposeEnvValue $envFile 'DSH_KEY_ADMIN_HOST_PORT' $KeyAdminPortValue
+        Write-Host '==> 正在启动 dsh-key-admin（不重建 dsh 容器）...' -ForegroundColor Yellow
+        & .\dsh.bat start
+        if ($LASTEXITCODE -ne 0) { throw '启动失败。.env 已更新，修好后可以重新执行 -DshAction key-panel。' }
+        Assert-ModelBroker
+        Assert-KeyAdmin
+        Write-Host '==> 面板已就绪。在页面上保存上游后它会直接写 data\dsh\settings.yaml 与 .credentials.yaml，' -ForegroundColor Green
+        Write-Host '    DSH 热加载这两份文件，刷新 WebUI 就能在「设置 → 模型」里选到。' -ForegroundColor Green
+        Show-KeyAdminAccess $true
     }
     'update' { & .\dsh.bat update }
     'start' { & .\dsh.bat start }
@@ -1511,6 +1762,9 @@ switch ($DshAction) {
         $statusFileArgs = @('-f','docker-compose.yml')
         if ((Get-ComposeEnvValue '.env' 'DSH_MODEL_BROKER' 'off') -eq 'on' -and (Test-Path -LiteralPath 'docker-compose.keys.yml' -PathType Leaf)) {
             $statusFileArgs += @('-f','docker-compose.keys.yml')
+            if ((Get-ComposeEnvValue '.env' 'DSH_KEY_ADMIN' 'off') -eq 'on' -and (Test-Path -LiteralPath 'docker-compose.keys-admin.yml' -PathType Leaf)) {
+                $statusFileArgs += @('-f','docker-compose.keys-admin.yml')
+            }
         }
         if ((Get-ComposeEnvValue '.env' 'DSH_EGRESS_MODE' 'open') -eq 'allowlist' -and (Test-Path -LiteralPath 'docker-compose.isolated.yml' -PathType Leaf)) {
             $statusFileArgs += @('-f','docker-compose.isolated.yml')
@@ -1528,7 +1782,9 @@ if ($DshAction -in @('install','configure')) {
         foreach ($name in Get-BrokerUpstreamNames $brokerConfigFile) {
             Write-Host "  - ${name}: DSH 侧 base_url = $ModelBrokerBase/u/$name，密钥是占位串 $ModelBrokerPlaceholderKey" -ForegroundColor Green
         }
-        if ($NoModelSettingsSeed) {
+        if (@(Get-BrokerUpstreamNames $brokerConfigFile).Count -eq 0) {
+            Write-Host '还没有任何上游：现在向 DSH 发模型请求会得到 503，请先在下面的面板里填一把密钥。' -ForegroundColor Yellow
+        } elseif ($NoModelSettingsSeed) {
             Write-Host '模型设置：未写入（-NoModelSettingsSeed），请在 WebUI 的「设置 → 模型」里自己加供应商' -ForegroundColor Yellow
         } else {
             Write-Host '模型设置：已写进 data\dsh\settings.yaml，WebUI 的「设置 → 模型」里可直接选模型' -ForegroundColor Green
@@ -1539,6 +1795,7 @@ if ($DshAction -in @('install','configure')) {
     } else {
         Write-Host '模型密钥代理：关（密钥若写进容器内的配置或环境，容器里的 Agent 一条 cat 就能读到）' -ForegroundColor Green
     }
+    Show-KeyAdminAccess ($keyAdmin -eq 'on')
     if ($egressMode -eq 'allowlist') {
         Write-Host '出站模式：allowlist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）' -ForegroundColor Green
         if ($egressAllowed) {

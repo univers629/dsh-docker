@@ -67,14 +67,14 @@ Run `bash install.sh --help` for the full option list; on Windows use `powershel
 ## Daily management
 
 ```text
-Linux:   ./dsh.sh  [start|update|stop|restart|logs [service]|status|shell|root-shell|verify|keys|egress|remove]
-Windows: .\dsh.bat [start|update|stop|restart|logs [service]|status|shell|root-shell|verify|keys|egress|remove]
+Linux:   ./dsh.sh  [start|update|stop|restart|logs [service]|status|shell|root-shell|verify|keys|key-panel|egress|remove]
+Windows: .\dsh.bat [start|update|stop|restart|logs [service]|status|shell|root-shell|verify|keys|key-panel|egress|remove]
 ```
 
 - `start` prepares the image only when the container does not exist and reuses it afterwards; `stop`, `restart`, and in-container `apt install` all keep the writable layer.
 - `update` only reinstalls the DSH npm package inside the container; it is not a project or image update. `remove` deletes the writable layer while bind mounts remain.
 - `shell` enters the unprivileged `dsh` account; `root-shell` is a host-side administration channel that cannot be reached from inside the container.
-- `verify` runs 23 hardening checks inside the container; `keys` and `egress` print the status of the key broker and the egress proxy.
+- `verify` runs 24 hardening checks inside the container; `keys` and `egress` print the status of the key broker and the egress proxy, and `key-panel` prints the key admin panel URL and access token.
 - The healthcheck probes both the Nginx entry and DSH's own port, so a DSH crash loop shows the container as `unhealthy`.
 
 To remove the project completely, run menu item 8 from the project directory or `./install.sh delete` (Windows: `powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`). Deletion targets this project's container, images, mounts, networks, and directory by exact name; it never uses substring matching and never removes external shared networks.
@@ -131,20 +131,24 @@ flowchart LR
     end
 
     broker["dsh-key-broker container<br/>read_only · no published port"]
+    admin["dsh-key-admin container<br/>key admin panel · token auth"]
     egress["dsh-egress container<br/>domain allow-list proxy"]
     upstream["model upstream API"]
     internet["internet"]
 
     client -->|3080| nginx --> agent
+    client -->|3082 loopback + token| admin
     agent -->|placeholder key| broker -->|real key injected| upstream
     agent -->|allowlist mode| egress --> internet
     agent -.->|unix socket| helper
     keys -.->|read-only mount| broker
+    keys -.->|read-write| admin
     hashes -.->|read-only mount| helper
     mounts -.->|bind mount| agent
+    agent x-- different networks, unreachable --x admin
 ```
 
-Real keys move only between the host file and the `dsh-key-broker` container. The two containers share nothing but HTTP, so the key literal does not exist inside the `dsh` container.
+Real keys move only between the host file, `dsh-key-broker`, and `dsh-key-admin`. None of them shares a volume with the `dsh` container, and the panel is not on any Docker network the `dsh` container joins, so the container holds neither the key literal nor a route to the panel that stores it.
 
 Persistent directories:
 
@@ -191,9 +195,21 @@ Real keys are written only to `data/broker/keys.json` (0600) on the host and mou
 - At install time: the wizard reads each upstream key without echoing it and asks for the API shape (OpenAI-compatible / Responses / Chat Completions / Anthropic Messages / native Gemini), any fixed request headers, and the model ids to enable; `--model-keys-file` with a 0600 `keys.json` also works.
 - Non-interactively: `--model-api NAME=PROFILE` and `--model-header NAME=HEADER=VALUE` (repeatable), for example the `originator` / `version` / `User-Agent` trio a Codex client expects. The profile decides the auth header, the allowed endpoints, and the protocol written into DSH; see [docs/security.en.md](docs/security.en.md).
 - Model list: upstream names that match DSH's built-in catalog (`deepseek`, `openai`, `anthropic`, `google`, `nvidia`, and others) reuse the catalog's full model list; a self-hosted gateway needs `--model-id NAME=ID[,ID]` or the model ids typed into the wizard. `--no-model-settings-seed` skips writing the configuration and leaves it to the WebUI.
+- A `deepseek` upstream configures DSH's own DeepSeek provider (`llm-deepseek`), so the Models page does not gain a second row; a duplicate `llm-pi-ai.providers.deepseek` left by an older installer is removed on the next write.
+- base_url: type the real upstream address including its version segment (an OpenAI-compatible gateway is usually `https://<host>/v1`; Anthropic-compatible ones usually have none). The DSH-side URL is derived by the installer, so adding the segment on both sides produces `/v1/v1/...`. Built-in catalog upstreams can just accept the default.
 - Afterwards: `./install.sh model-key` (Windows: `.\install.ps1 -DshAction model-key`) adds the broker container without recreating `dsh`.
 - Status: `./dsh.sh keys` prints upstreams, quotas, today's usage, and allow/deny counters, never the keys.
-- The keys themselves cannot be moved into the WebUI: the WebUI runs inside the DSH container, so a key entered there is stored in the container where the agent can read the file directly. Entering keys in the WebUI still works when the broker is skipped, at the cost of this protection.
+
+### Key admin panel
+
+The panel is the browser alternative to typing keys in a terminal: add or remove upstreams, enter keys, pick the API shape, list model ids, set fixed request headers, and fetch an upstream's model list once. Saving writes both `data/broker/keys.json` and DSH's `settings.yaml` and `.credentials.yaml`; both sides hot-reload, so no container restart is needed.
+
+- Enable: the fresh-install wizard asks. An existing deployment runs `./install.sh key-panel` (Windows: `.\install.ps1 -DshAction key-panel`), which adds the `dsh-key-admin` container without recreating `dsh`. `--no-key-admin` turns it off.
+- Access: `http://127.0.0.1:3082/` by default, with the token in `data/broker/admin.token` (0600). For remote use, tunnel it: `ssh -N -L 3082:127.0.0.1:3082 <user@host>`. `DSH_KEY_ADMIN_BIND_HOST` and `DSH_KEY_ADMIN_HOST_PORT` control the published address.
+- The panel deliberately is not part of DSH's WebUI: that page runs inside the DSH container, so anything typed into it lands where the agent can read it. The panel is a separate container joined only to the `dsh-admin` network, which `dsh` is not on, and the installer proves from inside `dsh` that the connection fails before it reports success.
+- Repeated wrong tokens trigger incremental delay and lockout. The panel container itself is `read_only`, `cap_drop: ALL`, runs as 1000:1000, and can only touch `data/broker` and `data/dsh`.
+- An empty `keys.json` is a valid state: install without any key, accept 503 for model requests in the meantime, and enter the first key in the panel.
+- With both the broker and the panel skipped, entering keys in the WebUI still works, at the cost of this protection.
 
 ## Outbound modes
 

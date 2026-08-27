@@ -134,6 +134,42 @@ assert.equal(upstream.dailyRequestBudget, 2000)
 }
 
 # ---------------------------------------------------------------------------
+# 目录里没有的上游必须给模型 id：空回车要重问，不能放过去
+# 放过去的后果是 DSH 侧那条供应商一个模型都没有，用户装完在 WebUI 里选不到东西。
+# ---------------------------------------------------------------------------
+$script:BrokerUpstreams.Clear()
+$script:BrokerProfiles = @{}
+$script:BrokerModels = @{}
+@(
+    'gatewaytest',                        # 上游名字（不在内置目录里）
+    'https://api.gatewaytest.invalid/v1', # base_url
+    '1',                                  # API 形态：OpenAI 兼容
+    'sk-gatewaytest',                     # 密钥
+    'sk-gatewaytest',                     # 密钥确认
+    '0',                                  # 每分钟上限
+    '0',                                  # 每日配额
+    'n',                                  # 不需要固定请求头
+    '',                                   # 模型 id：空回车 → 必须重问
+    'only-model-1',                       # 重问后填上
+    'n'                                   # 不再添加上游
+) | ForEach-Object { $script:Answers.Enqueue($_) }
+Read-BrokerUpstreams
+if ($script:Answers.Count -ne 0) { throw "目录外上游的向导没问完预置答案，剩余 $($script:Answers.Count) 条" }
+Assert-Equal 'only-model-1' $script:BrokerModels['gatewaytest'] '重问之后记下的模型 id'
+
+# 内置目录里的上游相反：空回车是合法答案，安装器沿用目录里的整份清单。
+$script:BrokerUpstreams.Clear()
+$script:BrokerProfiles = @{}
+$script:BrokerModels = @{}
+@('deepseek', 'https://api.deepseek.com', '1', 'sk-deepseek', 'sk-deepseek', '0', '0', 'n', '', 'n') |
+    ForEach-Object { $script:Answers.Enqueue($_) }
+Read-BrokerUpstreams
+if ($script:Answers.Count -ne 0) { throw "目录内上游的向导没问完预置答案，剩余 $($script:Answers.Count) 条" }
+if ($script:BrokerModels.ContainsKey('deepseek') -and $script:BrokerModels['deepseek']) {
+    throw '目录内上游空回车不应记下模型 id'
+}
+
+# ---------------------------------------------------------------------------
 # -ModelApi / -ModelHeader：非交互路径
 # ---------------------------------------------------------------------------
 $script:BrokerUpstreams.Clear()
