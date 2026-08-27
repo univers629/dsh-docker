@@ -15,11 +15,15 @@ import {
   normalizeExtraHeaders,
   normalizeModelIds,
   normalizeName,
+  normalizeThinkingLevels,
   normalizeUpstreamInput,
   readDocument,
   removeUpstream,
   seedPayload,
+  baseUrlLooksUnversioned,
   serializeDocument,
+  suggestBaseUrlFix,
+  THINKING_LEVELS,
   toBrokerEntry,
   toUpstreamView,
 } from '../bin/dsh-key-admin-policy.mjs'
@@ -187,7 +191,7 @@ assert.throws(() => readDocument('not json'), AdminInputError)
 
 // 交给 seed 脚本的载荷里不能有密钥：那个脚本写的是 dsh 容器能读到的文件。
 const payload = seedPayload(twice, 'http://dsh-key-broker:8080', 'dsh-broker-placeholder')
-assert.deepEqual(payload.upstreams, [{ name: 'b-ai', shape: 'responses', models: ['x'] }])
+assert.deepEqual(payload.upstreams, [{ name: 'b-ai', shape: 'responses', models: ['x'], reasoningEfforts: [] }])
 assert.equal(JSON.stringify(payload).includes('sk-secret-value'), false)
 
 // --- 模型列表 ---
@@ -237,5 +241,68 @@ for (const good of ['deepseek', 'b-ai', 'my-gateway-2']) {
 assert.equal(looksLikeCatalogRoute('deepseek'), true)
 assert.equal(looksLikeCatalogRoute('google'), true)
 assert.equal(looksLikeCatalogRoute('b-ai'), false)
+
+// --- base_url 的版本段 ---
+//
+// 这是“面板里能拉到模型清单、DSH 网页里一发请求就 403 / API key is invalid”的根因：
+// 拉清单时面板会同时试 <base>/models 和 <base>/v1/models，第二个成了就显示成功；
+// 而 pi-ai 的 OpenAI 兼容客户端一个版本段都不补，所以请求全落在上游根路径上。
+const unversioned = normalizeUpstreamInput({
+  name: 'b-ai', shape: 'responses', baseUrl: 'https://api.example.com', key: 'k', models: 'x',
+})
+assert.equal(
+  suggestBaseUrlFix(unversioned, 'https://api.example.com/v1/models'),
+  'https://api.example.com/v1',
+  '清单只在 /v1/models 上有，就说明 base_url 少了 /v1',
+)
+assert.equal(suggestBaseUrlFix(unversioned, 'https://api.example.com/models'), '', '裸 /models 成功时不用改')
+assert.equal(suggestBaseUrlFix(record, 'https://api.justwoker.icu/v1/models'), '', 'base_url 已带版本段')
+// 页面上的告警走同一个判定：不然用户只能靠“再保存一次”碰运气。
+assert.equal(baseUrlLooksUnversioned('responses', 'https://api.example.com'), true)
+assert.equal(baseUrlLooksUnversioned('responses', 'https://api.example.com/v1'), false)
+assert.equal(baseUrlLooksUnversioned('messages', 'https://api.anthropic.com'), false)
+assert.equal(toUpstreamView(toBrokerEntry(unversioned)).needsVersionSegment, true)
+assert.equal(toUpstreamView(toBrokerEntry(record)).needsVersionSegment, false)
+// Anthropic 和 Gemini 的客户端自己会发 /v1/messages、/v1beta/models：再补一次就是 /v1/v1。
+for (const name of ['anthropic', 'google']) {
+  const catalogRecord = normalizeUpstreamInput({ name, key: 'k' })
+  assert.equal(
+    suggestBaseUrlFix(catalogRecord, catalogRecord.baseUrl + '/v1/models'),
+    '',
+    name + ' 的客户端自己补版本段，base_url 不能再带一次',
+  )
+}
+
+// --- 推理强度档位 ---
+//
+// pi-ai 对手写声明的模型一律报告“不提供任何档位”，所以不声明就没有强度菜单；
+// 反过来给不吃 reasoning_effort 的模型声明档位会被上游 400，因此这是显式选择项。
+assert.deepEqual(normalizeThinkingLevels('high, off, low, low'), ['off', 'low', 'high'], '按升级顺序去重')
+assert.deepEqual(normalizeThinkingLevels(''), [], '留空 = 不声明')
+assert.deepEqual(normalizeThinkingLevels(['medium']), ['medium'])
+assert.throws(() => normalizeThinkingLevels('turbo'), AdminInputError, '不认识的档位要拒绝')
+assert.throws(() => normalizeThinkingLevels('off'), AdminInputError, '只写 off 会被 pi-ai 判成配置错误')
+assert.deepEqual([...THINKING_LEVELS], ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+
+const reasoning = normalizeUpstreamInput({
+  name: 'b-ai',
+  shape: 'responses',
+  baseUrl: 'https://api.justwoker.icu/v1',
+  key: 'k',
+  models: 'claude-opus-5-thinking',
+  reasoningEfforts: 'off, low, high',
+})
+const reasoningEntry = toBrokerEntry(reasoning)
+assert.deepEqual(reasoningEntry.dsh.reasoningEfforts, ['off', 'low', 'high'])
+assert.deepEqual(toUpstreamView(reasoningEntry).reasoningEfforts, ['off', 'low', 'high'])
+// 空数组不写：“没声明”和“声明了空”在 pi-ai 那边不是一回事。
+assert.equal(Object.prototype.hasOwnProperty.call(toBrokerEntry(record).dsh, 'reasoningEfforts'), false)
+// 缺字段沿用已存的档位：面板改别的字段时不该把它清掉。
+assert.deepEqual(
+  normalizeUpstreamInput({ name: 'b-ai', shape: 'responses', baseUrl: 'https://api.justwoker.icu/v1', models: 'x' }, reasoningEntry).reasoningEfforts,
+  ['off', 'low', 'high'],
+)
+// keys.json 被手改坏也不能让面板打不开。
+assert.deepEqual(toUpstreamView({ name: 'x', dsh: { api: 'chat', reasoningEfforts: ['turbo'] } }).reasoningEfforts, [])
 
 console.log('key-admin policy smoke: ok')

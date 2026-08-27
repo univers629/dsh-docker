@@ -197,7 +197,7 @@ Real keys are written only to `data/broker/keys.json` (0600) on the host and mou
 - Model list: upstream names that match DSH's built-in catalog (`deepseek`, `openai`, `anthropic`, `google`, `nvidia`, and others) reuse the catalog's full model list. An upstream outside the catalog must carry at least one model id, otherwise DSH rejects the whole provider entry and the Models page shows no card, so the installer queries the upstream's `/models` with the key and fills the list automatically; if that fails it prints the reason and the ids can be supplied with `--model-id NAME=ID[,ID]` or in the admin panel. `--no-model-settings-seed` skips writing the configuration and leaves it to the WebUI.
 - A `deepseek` upstream configures DSH's own DeepSeek provider (`llm-deepseek`), so the Models page does not gain a second row; a duplicate `llm-pi-ai.providers.deepseek` left by an older installer is removed on the next write.
 - Upstream name: must start with a lowercase letter and may then contain lowercase letters, digits, and single hyphens, up to 32 characters — the same rule as DSH's "Add custom provider". A non-conforming name is dropped silently, which looks like a missing card on the Models page.
-- base_url: type the real upstream address including its version segment (an OpenAI-compatible gateway is usually `https://<host>/v1`; Anthropic-compatible ones usually have none). The DSH-side URL is derived by the installer, so adding the segment on both sides produces `/v1/v1/...`. Built-in catalog upstreams can just accept the default.
+- base_url: type the real upstream address including its version segment (an OpenAI-compatible gateway is usually `https://<host>/v1`; Anthropic-compatible ones usually have none). The DSH-side URL is derived by the installer, so adding the segment on both sides produces `/v1/v1/...`. Built-in catalog upstreams can just accept the default. A missing version segment is detected and repaired while the model list is queried — OpenAI-compatible clients never add it themselves, so without it every request lands on the upstream root path.
 - Afterwards: `./install.sh model-key` (Windows: `.\install.ps1 -DshAction model-key`) adds the broker container without recreating `dsh`.
 - Status: `./dsh.sh keys` prints upstreams, quotas, today's usage, and allow/deny counters, never the keys.
 
@@ -209,6 +209,7 @@ The panel is the browser alternative to typing keys in a terminal: add or remove
 - Access: `http://127.0.0.1:3082/` by default, with the token in `data/broker/admin.token` (0600). For remote use, tunnel it: `ssh -N -L 3082:127.0.0.1:3082 <user@host>`. `DSH_KEY_ADMIN_BIND_HOST` and `DSH_KEY_ADMIN_HOST_PORT` control the published address.
 - The panel deliberately is not part of DSH's WebUI: that page runs inside the DSH container, so anything typed into it lands where the agent can read it. The panel is a separate container joined only to the `dsh-admin` network, which `dsh` is not on, and the installer proves from inside `dsh` that the connection fails before it reports success.
 - Repeated wrong tokens trigger incremental delay and lockout. The panel container itself is `read_only`, `cap_drop: ALL`, runs as 1000:1000, and can only touch `data/broker` and `data/dsh`.
+- Reasoning efforts: DSH shows the reasoning-effort menu only for models that declare the levels they offer, so leaving that field empty means no menu. Values such as `off, low, medium, high` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) apply to every model of that upstream; declaring levels for a model that does not accept `reasoning_effort` makes the upstream reject the request, so match what the upstream actually supports.
 - An empty `keys.json` is a valid state: install without any key, accept 503 for model requests in the meantime, and enter the first key in the panel.
 - With both the broker and the panel skipped, entering keys in the WebUI still works, at the cost of this protection.
 
@@ -221,6 +222,13 @@ DSH renders only providers that actually exist in its configuration, and a rejec
 3. A non-conforming name (uppercase, underscore, leading digit) is dropped too. Rename and save again.
 4. The DeepSeek card comes from DSH's own first-party provider and is always there; it is not something the installer added.
 5. If the key field already contains something when the settings page opens and it matches a key entered elsewhere, that is the browser's password manager autofilling. DSH never echoes a stored key; the field starts empty.
+
+### 403 or "API key is invalid" in chat
+
+Models are selectable and the panel fetches the model list fine, yet every chat fails with 403 or an invalid key: the base_url is usually missing its version segment. The panel tries both `<base>/models` and `<base>/v1/models` and reports success on either, while DSH adds no version segment, so its requests land on the upstream root path.
+
+- The panel's upstream list flags such an upstream; open it, save once, and the base_url is repaired automatically.
+- To tell which side returned the 403: `docker logs dsh-key-broker` — `event:"deny"` is the broker rejecting a path, `event:"forward"` carries the `status` the upstream returned.
 
 ## Outbound modes
 

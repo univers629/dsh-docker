@@ -223,6 +223,38 @@ export function normalizeExtraHeaders(raw, shape) {
   return out
 }
 
+/**
+ * pi-ai 认的推理强度档位，按升级顺序。
+ *
+ * 为什么要在这里出现：DSH 的模型页只对"带推理元数据的模型"显示强度菜单，而安装器和面板
+ * 写进 settings.yaml 的模型全是手写声明的——pi-ai 对手写模型一律报告"不提供任何档位"，
+ * 于是页面上就没有那个下拉。想要菜单，必须在每个模型上显式声明 reasoningEfforts。
+ * 这不能默认开：给一个不吃 reasoning_effort 的模型声明档位，请求会被上游 400。
+ */
+export const THINKING_LEVELS = Object.freeze(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+
+/**
+ * 逗号或换行分隔的档位 -> 规范顺序的数组。空 = 不声明（沿用目录能力，手写模型则没有菜单）。
+ * 只有 off 是不合法的：pi-ai 要求至少给出一个 off 之外的档位。
+ */
+export function normalizeThinkingLevels(raw) {
+  const text = Array.isArray(raw) ? raw.join(',') : String(raw ?? '')
+  const wanted = new Set()
+  for (const piece of text.split(/[\s,]+/)) {
+    const level = piece.trim().toLowerCase()
+    if (level === '') continue
+    if (!THINKING_LEVELS.includes(level)) {
+      throw new AdminInputError('推理强度档位只能是 ' + THINKING_LEVELS.join('、') + '，收到：' + level)
+    }
+    wanted.add(level)
+  }
+  const levels = THINKING_LEVELS.filter((level) => wanted.has(level))
+  if (levels.length > 0 && levels.every((level) => level === 'off')) {
+    throw new AdminInputError('推理强度只写 off 没有意义，至少再给一个 low / medium / high 这样的档位')
+  }
+  return levels
+}
+
 export function normalizeQuota(raw, field, fallback = 0) {
   if (raw === undefined || raw === null) return fallback
   const text = String(raw).trim()
@@ -249,6 +281,10 @@ export function normalizeUpstreamInput(raw, existingEntry) {
   const baseUrl = normalizeBaseUrl(raw?.baseUrl, name)
   const models = normalizeModelIds(raw?.models)
   const extraHeaders = normalizeExtraHeaders(raw?.extraHeaders, shape)
+  // 缺字段沿用已存的值，和限额同一个理由：页面上不一定每次都把它填一遍。
+  const reasoningEfforts = raw?.reasoningEfforts === undefined
+    ? normalizeThinkingLevels(existingEntry?.dsh?.reasoningEfforts)
+    : normalizeThinkingLevels(raw.reasoningEfforts)
   // 面板不再提供限额输入框（DSH 官方的供应商卡片也没有），但已经设过的值要留住：
   // 缺字段一律沿用 keys.json 里那条的现值，只有显式写 0 才是"取消限制"。
   const requestsPerMinute = normalizeQuota(
@@ -261,7 +297,7 @@ export function normalizeUpstreamInput(raw, existingEntry) {
   const key = typed !== '' ? typed : String(existingEntry?.key ?? '')
   if (key === '') throw new AdminInputError('上游 ' + name + ' 还没有密钥，请填一次（之后修改其它字段可以留空）')
   if (key.length > 4096) throw new AdminInputError('密钥超过 4096 个字符')
-  return { name, shape, baseUrl, key, models, extraHeaders, requestsPerMinute, dailyRequestBudget }
+  return { name, shape, baseUrl, key, models, extraHeaders, reasoningEfforts, requestsPerMinute, dailyRequestBudget }
 }
 
 /**
@@ -287,6 +323,8 @@ export function toBrokerEntry(record) {
   if (record.requestsPerMinute > 0) entry.requestsPerMinute = record.requestsPerMinute
   if (record.dailyRequestBudget > 0) entry.dailyRequestBudget = record.dailyRequestBudget
   entry.dsh = { api: record.shape, models: [...record.models] }
+  // 空数组不写："没声明"和"声明了空"在 pi-ai 那边不是一回事，后者会被判成配置错误。
+  if (record.reasoningEfforts.length > 0) entry.dsh.reasoningEfforts = [...record.reasoningEfforts]
   return entry
 }
 
@@ -321,11 +359,21 @@ export function toUpstreamView(entry) {
   } catch {
     models = []
   }
+  let reasoningEfforts = []
+  try {
+    reasoningEfforts = normalizeThinkingLevels(entry?.dsh?.reasoningEfforts)
+  } catch {
+    reasoningEfforts = []
+  }
   return {
     name: String(entry?.name ?? ''),
     baseUrl: String(entry?.baseUrl ?? ''),
     shape,
     models,
+    reasoningEfforts,
+    // 页面上要能直接看出这条上游为什么在 DSH 里 403：面板自己拉清单时会容错地试
+    // /v1/models，所以缺版本段在面板这边完全看不出来。
+    needsVersionSegment: baseUrlLooksUnversioned(shape, entry?.baseUrl),
     extraHeaders,
     requestsPerMinute: Number(entry?.requestsPerMinute ?? 0) || 0,
     dailyRequestBudget: Number(entry?.dailyRequestBudget ?? 0) || 0,
@@ -407,6 +455,48 @@ export function modelsRequestCandidates(record) {
   return candidates
 }
 
+/**
+ * 这个形态下，DSH 客户端会不会自己往路径里补版本段。
+ *
+ * 这件事决定 base_url 该不该带 /v1，而它以前是个隐藏的坑：pi-ai 的 OpenAI 兼容实现直接
+ * 往 base_url 后面接 /responses、/chat/completions、/models，一个版本段都不补，所以
+ * base_url 必须自带 /v1。可 modelsRequestCandidates 为了兼容会同时试 /models 和
+ * /v1/models——于是 base_url 少写一个 /v1 时，面板里"拉取模型列表"照样成功，而 DSH 走
+ * 代理发的每一个请求都落在上游的根路径上，换回来 403 或 404。表现就是"面板能拉到模型，
+ * 网页里一用就说密钥无效"。Anthropic 和 Gemini 相反：它们的客户端自己发 /v1/messages、
+ * /v1beta/models，base_url 再带一次就成了 /v1/v1。
+ */
+const CLIENT_ADDS_VERSION_SEGMENT = Object.freeze({
+  any: false,
+  chat: false,
+  responses: false,
+  messages: true,
+  gemini: true,
+})
+
+/** 这个形态下，base_url 必须自带版本段（客户端不会补）。 */
+export function baseUrlMustCarryVersion(shape) {
+  return CLIENT_ADDS_VERSION_SEGMENT[shape] === false
+}
+
+/** base_url 该带版本段却没带：这条上游在 DSH 里发的每个请求都会落到上游根路径上。 */
+export function baseUrlLooksUnversioned(shape, baseUrl) {
+  return baseUrlMustCarryVersion(shape) && !/\/v\d[a-z0-9]*$/i.test(String(baseUrl ?? ''))
+}
+
+/**
+ * 拉模型列表成功的那个端点，反过来说明 base_url 缺了版本段吗？
+ *
+ * @returns 补好版本段的 base_url；不需要改就返回空串。
+ */
+export function suggestBaseUrlFix(record, endpoint) {
+  if (!baseUrlMustCarryVersion(record.shape)) return ''
+  const suffix = String(endpoint ?? '').slice(String(record.baseUrl ?? '').length)
+  const match = /^\/(v\d[a-z0-9]*)\//i.exec(suffix)
+  if (match === null) return ''
+  return record.baseUrl + '/' + match[1]
+}
+
 /** 上游的模型列表响应 -> 模型 id 数组。OpenAI、Anthropic、Gemini 三种形状都认。 */
 export function extractModelIds(payload) {
   const list = Array.isArray(payload)
@@ -440,7 +530,12 @@ export function seedPayload(document, brokerBase, placeholder) {
     placeholder,
     upstreams: document.upstreams.map((entry) => {
       const view = toUpstreamView(entry)
-      return { name: view.name, shape: view.shape, models: view.models }
+      return {
+        name: view.name,
+        shape: view.shape,
+        models: view.models,
+        reasoningEfforts: view.reasoningEfforts,
+      }
     }),
   }
 }

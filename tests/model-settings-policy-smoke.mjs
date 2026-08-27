@@ -6,10 +6,13 @@ import {
   brokerRouteBaseUrl,
   deriveCredentialRef,
   isBrokerRouteBaseUrl,
+  modelEntry,
   normalizeModelIds,
+  normalizeThinkingLevels,
   piAiRoutePath,
   planProvider,
   planSeed,
+  thinkingLevelMap,
 } from '../bin/dsh-model-settings-policy.mjs'
 
 // 目录快照的最小替身：只要 id 命中就算"目录路由"，字段结构和 seed 脚本从 pi-ai
@@ -201,5 +204,53 @@ const allSkipped = planSeed({
 assert.deepEqual(allSkipped.entries, [])
 assert.equal(allSkipped.defaultModel, null)
 assert.deepEqual(allSkipped.refs, {})
+
+// ---------------------------------------------------------------------------
+// 推理强度档位：pi-ai 对手写声明的模型一律报告“不提供任何档位”，WebUI 的强度菜单
+// 因此不出现。声明了 reasoningEfforts 才有菜单；off 的 wire 值必须是 null
+// （“不思考时什么参数都不发”），其余档位用档位名当 wire 值。
+// ---------------------------------------------------------------------------
+assert.deepEqual(modelEntry('m', []), { id: 'm' }, '没声明档位时不能写这个字段')
+assert.deepEqual(modelEntry('m', ['high', 'off', 'low']), {
+  id: 'm',
+  reasoningEfforts: { off: null, low: 'low', high: 'high' },
+})
+assert.equal(thinkingLevelMap([]), null)
+// keys.json 被手改坏时不能让整份种子配置写不下去：不认识的档位直接丢掉。
+assert.deepEqual(normalizeThinkingLevels('high, turbo'), ['high'])
+// 只有 off 会被 pi-ai 判成“没有 off 之外的档位”，当成没声明。
+assert.deepEqual(normalizeThinkingLevels('off'), [])
+
+const withEfforts = planProvider({
+  name: 'justwoker',
+  shape: 'responses',
+  models: ['claude-opus-5-thinking'],
+  reasoningEfforts: ['off', 'low', 'high'],
+  brokerBase: 'http://b:8080',
+  catalog,
+})
+assert.deepEqual(withEfforts.whenMissing.models, [
+  { id: 'claude-opus-5-thinking', reasoningEfforts: { off: null, low: 'low', high: 'high' } },
+])
+// plan 上单独带一份档位字典：models 已经写过的路由靠它把档位补到每条模型上。
+assert.deepEqual(withEfforts.reasoningEfforts, { off: null, low: 'low', high: 'high' })
+assert.equal(planProvider({ name: 'justwoker', shape: 'responses', models: ['x'], brokerBase: 'http://b:8080', catalog }).reasoningEfforts, null)
+// 目录路由和第一方路由同样支持声明档位。
+assert.deepEqual(
+  planProvider({ name: 'google', shape: 'any', models: ['gemini-3-pro'], reasoningEfforts: 'medium', brokerBase: 'http://b:8080', catalog }).whenMissing.models,
+  [{ id: 'gemini-3-pro', reasoningEfforts: { medium: 'medium' } }],
+)
+assert.deepEqual(
+  planProvider({ name: 'deepseek', shape: 'any', models: ['deepseek-v4-pro'], reasoningEfforts: 'low', brokerBase: 'http://b:8080', catalog }).whenMissing.models,
+  [{ id: 'deepseek-v4-pro', reasoningEfforts: { low: 'low' } }],
+)
+// planSeed 要把档位透传到 planProvider，否则面板里填了也不生效。
+const seeded = planSeed({
+  upstreams: [{ name: 'justwoker', shape: 'responses', models: ['claude-opus-5-thinking'], reasoningEfforts: ['low'] }],
+  brokerBase: 'http://b:8080',
+  placeholder: 'p',
+  catalog,
+})
+assert.deepEqual(seeded.entries[0].whenMissing.models, [{ id: 'claude-opus-5-thinking', reasoningEfforts: { low: 'low' } }])
 
 console.log('model-settings policy smoke: ok')

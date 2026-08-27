@@ -204,6 +204,21 @@ async function runSeed(payload) {
     for (const [key, value] of Object.entries(entry.whenMissing)) {
       if (settings.getIn([...base, key]) === undefined) settings.setIn([...base, key], value)
     }
+    // 推理强度档位要能补到"上一次已经写过 models"的路由上：models 是 whenMissing 字段，
+    // 已经存在就整块跳过，那样在面板里新声明的档位永远不会生效。所以逐条模型补 —— 只给
+    // 这次声明过的 id、且那条模型还没有 reasoningEfforts 的（用户自己写过 false 或别的
+    // 档位就不动，缺这个字段在 pi-ai 那边表示"沿用目录能力"，不是用户的选择）。
+    if (entry.reasoningEfforts !== null) {
+      const seq = settings.getIn([...base, 'models'], true)
+      if (seq && yaml.isSeq(seq)) {
+        seq.items.forEach((item, index) => {
+          if (!yaml.isMap(item)) return
+          if (!entry.models.includes(String(item.get('id') ?? ''))) return
+          if (item.get('reasoningEfforts') !== undefined) return
+          settings.setIn([...base, 'models', index, 'reasoningEfforts'], entry.reasoningEfforts)
+        })
+      }
+    }
     written.push({
       name: entry.name,
       source: entry.source,

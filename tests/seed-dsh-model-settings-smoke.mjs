@@ -220,6 +220,53 @@ try {
   assert.match(foreign.settingsText, /https:\/\/my-own-proxy\.example/)
 
   // -------------------------------------------------------------------------
+  // 推理强度档位：没声明就没有菜单（pi-ai 对手写模型一律报告"不提供任何档位"），
+  // 声明了就要落到每条模型上——包括"上一次已经写过 models"的路由，那时 models 是
+  // whenMissing 字段会被整块跳过，档位必须逐条补进去。
+  // -------------------------------------------------------------------------
+  const reasoningUpstreams = [{
+    name: 'justwoker',
+    shape: 'responses',
+    models: ['claude-opus-5-thinking'],
+    reasoningEfforts: ['off', 'low', 'high'],
+  }]
+  const reasoned = transform({ brokerBase, placeholder, upstreams: reasoningUpstreams, settingsText: '', credentialsText: '' })
+  assert.equal(reasoned.validationFailure, '', reasoned.validationFailure)
+  assert.match(reasoned.settingsText, /reasoningEfforts:/)
+  assert.match(reasoned.settingsText, /^ {12}off: null$/m)
+  assert.match(reasoned.settingsText, /^ {12}high: high$/m)
+  // 上一次没声明档位、这次声明了：models 已经在文档里，档位仍要补上去。
+  const noEfforts = transform({
+    brokerBase,
+    placeholder,
+    upstreams: [{ name: 'justwoker', shape: 'responses', models: ['claude-opus-5-thinking'] }],
+    settingsText: '',
+    credentialsText: '',
+  })
+  assert.doesNotMatch(noEfforts.settingsText, /reasoningEfforts/)
+  const patched = transform({
+    brokerBase,
+    placeholder,
+    upstreams: reasoningUpstreams,
+    settingsText: noEfforts.settingsText,
+    credentialsText: noEfforts.credentialsText,
+  })
+  assert.equal(patched.validationFailure, '', patched.validationFailure)
+  assert.match(patched.settingsText, /reasoningEfforts:/)
+  // 用户自己写过 reasoningEfforts: false（"这不是推理模型"）就不能被改回来。
+  const userChoice = transform({
+    brokerBase,
+    placeholder,
+    upstreams: reasoningUpstreams,
+    settingsText: noEfforts.settingsText.replace(
+      '- id: claude-opus-5-thinking',
+      '- id: claude-opus-5-thinking\n          reasoningEfforts: false',
+    ),
+    credentialsText: '',
+  })
+  assert.match(userChoice.settingsText, /reasoningEfforts: false/)
+
+  // -------------------------------------------------------------------------
   // --home 模式：落盘 + 中文摘要；顶层不是映射时一个字都不写
   // -------------------------------------------------------------------------
   const home = join(sandbox, 'dsh-home')
