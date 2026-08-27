@@ -196,6 +196,8 @@ function seedSummary(payload) {
   const lines = []
   if (payload.brokerReload) lines.push(payload.brokerReload)
   if (payload.seed && payload.seed.output) lines.push(payload.seed.output.trim())
+  // 警告要显示：退出码为 0 但某个上游被跳过时，只有这里说得出"DSH 那边没多出这条"。
+  if (payload.seed && payload.seed.warnings) lines.push(payload.seed.warnings)
   if (payload.seed && payload.seed.failed) lines.push('[写 DSH 配置失败] ' + payload.seed.error)
   return lines.join('\n') || '完成。'
 }

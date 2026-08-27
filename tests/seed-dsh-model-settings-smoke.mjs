@@ -140,7 +140,9 @@ try {
   assert.equal(again.credentialsText, fresh.credentialsText)
   // 默认模型只在缺失时设：用户选过之后每次重新配置都改回来就是骚扰。
   assert.equal(again.defaultModel, null)
-  assert.deepEqual(again.credentialRefs, [])
+  // 引用每次都写，但值和已有的一样，所以文本不变（上面那两条断言）。
+  assert.deepEqual(again.credentialRefs.slice().sort(), ['DEEPSEEK_API_KEY', 'JUSTWOKER_API_KEY'])
+  assert.deepEqual(again.reclaimedRefs, [])
 
   // -------------------------------------------------------------------------
   // 已有配置：注释、无关的键、用户自己选的默认模型都必须原样留下
@@ -175,9 +177,12 @@ try {
   // 用户已经选过默认模型，不改。
   assert.match(merged.settingsText, /model: my-model/)
   assert.equal(merged.defaultModel, null)
-  // 已经有真实密钥的引用不写占位串，否则等于把用户的配置弄坏。
-  assert.deepEqual(merged.credentialRefs, ['JUSTWOKER_API_KEY'])
-  assert.match(merged.credentialsText, /DEEPSEEK_API_KEY: sk-real-user-key/)
+  // 引用里那把真实密钥要换回占位串：这个上游由密钥代理托管，容器里留一把真的既没用
+  // （代理转发时会换成自己那把）又是泄漏——WebUI 的供应商卡片会把它明文显示出来。
+  assert.deepEqual(merged.credentialRefs.slice().sort(), ['DEEPSEEK_API_KEY', 'JUSTWOKER_API_KEY'])
+  assert.doesNotMatch(merged.credentialsText, /sk-real-user-key/)
+  assert.ok(merged.credentialsText.includes('DEEPSEEK_API_KEY: ' + placeholder))
+  assert.deepEqual(merged.reclaimedRefs, ['DEEPSEEK_API_KEY'])
 
   // -------------------------------------------------------------------------
   // 旧版安装器写下的重复 deepseek 路由：收掉它，只留第一方那一行

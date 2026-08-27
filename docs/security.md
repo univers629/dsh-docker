@@ -129,7 +129,8 @@
 - 两份文件 DSH 都在热加载，写完刷新页面即可，不重启容器。
 - 上游名命中 DSH 内置模型目录（`deepseek`、`openai`、`anthropic`、`google`、`nvidia`、`openrouter`、`groq`、`xai`、`moonshotai` 等）时，协议和整份模型清单由目录提供，安装器只写 `baseURL` 与 `apiKeyEnv`，WebUI 里立刻有一整排可选模型。
 - 目录里没有的自建网关必须显式给模型 id：向导会问，非交互用 `--model-id NAME=ID[,ID]`（PowerShell：`-ModelId`）。少了它 DSH 会拒绝整个 `llm-pi-ai` 命名空间，结果是所有供应商一起消失，所以安装器在写入前先用 DSH 自己的校验函数过一遍，不通过就一个字都不写，并在输出里说明原因。
-- `baseURL` 与 `apiKeyEnv` 每次重新配置都按当前部署重写（改了地址不重写就会绕开代理）；`api`、`models`、`agent-default-model` 和已经有值的凭据引用只在缺失时补，不覆盖用户在 WebUI 里的选择。
+- `baseURL`、`apiKeyEnv` 和凭据引用的值每次都按当前部署重写；`api`、`models`、`agent-default-model` 只在缺失时补，不覆盖用户在 WebUI 里的选择。
+- 凭据引用被写死成占位串，不是"缺失时才补"：这个上游的真实密钥在代理手里，代理转发时会把认证头换成自己那把，所以容器里留一把真的既不起作用，又会被 WebUI 的供应商卡片明文显示、被 Agent 直接读走。写入前发现引用里存的不是占位串时，会换回占位串并在输出里点明，此时应当认为那把密钥已经进过容器，到上游控制台轮换它。
 - `--no-model-settings-seed`（PowerShell：`-NoModelSettingsSeed`）关闭这一步，供应商与模型改为在 WebUI 里自行添加。
 
 合并动作在镜像里的 node 中执行（那里才有 yaml 库、DSH 内置模型目录和校验函数），配置经 stdin 传入，因此模型密钥和上游清单都不会出现在 `ps` 里。

@@ -40,6 +40,10 @@ services:
       DSH_KEY_ADMIN_WEB: /dsh-bin/dsh-key-admin-web
       # 写进 DSH settings.yaml 的 base_url 前缀，必须与 broker 的实际地址一致。
       DSH_KEY_ADMIN_BROKER_BASE: "${DSH_MODEL_BROKER_BASE:-http://dsh-key-broker:8080}"
+      # 写进 DSH .credentials.yaml 的占位密钥。必须与 install.sh 的
+      # MODEL_BROKER_PLACEHOLDER_KEY 一字不差：面板每次都把代理托管上游的引用写成
+      # 这个值，两边不一致会让每次保存都误报"引用里存着真实密钥"。
+      DSH_KEY_ADMIN_PLACEHOLDER: "dsh-broker-placeholder"
       # 镜像里 DSH 的依赖在这里：seed 脚本要用其中的 yaml 库和内置模型目录。
       DSH_SEED_MODULE_ROOTS: /app/dsh/node_modules
       NODE_OPTIONS: "--max-old-space-size=192"

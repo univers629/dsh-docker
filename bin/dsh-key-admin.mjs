@@ -257,6 +257,7 @@ function runSeed(document) {
       skipped: true,
       failed: false,
       output: '',
+      warnings: '',
       error: '找不到 ' + SEED_SCRIPT + '，这次只改了密钥配置，没有写 DSH 侧的模型设置。',
     })
   }
@@ -265,7 +266,7 @@ function runSeed(document) {
   try {
     assertSeedTargetsSane()
   } catch (error) {
-    return Promise.resolve({ skipped: true, failed: true, output: '', error: error.message })
+    return Promise.resolve({ skipped: true, failed: true, output: '', warnings: '', error: error.message })
   }
   const payload = JSON.stringify(seedPayload(document, BROKER_BASE, PLACEHOLDER))
   return new Promise((resolve) => {
@@ -288,7 +289,10 @@ function runSeed(document) {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve({ skipped: false, failed, output: stdout, error })
+      // stderr 即使退出码为 0 也要带回去：seed 脚本把"这个上游没写进 DSH 配置"
+      // （例如自建网关一个模型 id 都没填）当成警告，退出码仍然是 0。只看 failed
+      // 的话，页面会显示"已保存"而 DSH 那边根本没多出这条供应商。
+      resolve({ skipped: false, failed, output: stdout, warnings: stderr.trim(), error })
     }
     child.on('error', (error) => finish(true, error.message))
     child.on('close', (code) => finish(code !== 0, code === 0 ? '' : (stderr.trim() || ('seed 退出码 ' + code))))

@@ -206,16 +206,17 @@ export function planProvider(request) {
  * @param request.brokerBase 密钥代理 base
  * @param request.placeholder 占位密钥字面值
  * @param request.catalog 目录快照
- * @param request.existing { providers: 已有的 llm-pi-ai.providers（名字 → profile 对象）, refs: 已有的凭据引用名, defaultModel: 已有的 agent-default-model }
- * @returns { entries, skipped, refs, defaultModel, removals }
+ * @param request.existing { providers: 已有的 llm-pi-ai.providers（名字 → profile 对象）, refValues: 已有的凭据引用（名字 → 当前值）, defaultModel: 已有的 agent-default-model }
+ * @returns { entries, skipped, refs, reclaimed, defaultModel, removals }
  */
 export function planSeed(request) {
   const existing = request.existing ?? {}
   const existingProviders = existing.providers ?? {}
-  const existingRefs = new Set(existing.refs ?? [])
+  const existingRefValues = existing.refValues ?? {}
   const entries = []
   const skipped = []
   const refs = {}
+  const reclaimed = []
   const removals = []
 
   for (const upstream of request.upstreams ?? []) {
@@ -238,10 +239,18 @@ export function planSeed(request) {
       && isBrokerRouteBaseUrl(existingProviders[plan.name]?.baseURL, plan.name)) {
       removals.push([...plan.supersedes])
     }
-    // 占位密钥只在这个引用还没有值的时候写：用户要是自己在 WebUI 里填过真实密钥
-    // （那是他的选择），占位串盖回去会让请求直接失效。
+    // 这个上游的真实密钥在密钥代理手里，所以 DSH 侧的引用必须是占位串，而且是
+    // 每次都写死——不是"缺失时才补"。曾经是后者，结果很难看：用户在 WebUI 的
+    // 供应商卡片里手填过一次真实密钥之后，那把密钥就永久留在 dsh 容器的
+    // .credentials.yaml 里，Agent 一条 cat 就能读到，而代理转发时本来就会把请求头
+    // 换成自己那把——留着它既没用又是泄漏。发现值不是占位串时记一笔，让摘要能提醒
+    // 用户去上游轮换那把已经进过容器的密钥。
     const ref = plan.credentialRef
-    if (!existingRefs.has(ref)) refs[ref] = request.placeholder
+    const current = String(existingRefValues[ref] ?? '')
+    refs[ref] = request.placeholder
+    if (current !== '' && current !== request.placeholder && !reclaimed.includes(ref)) {
+      reclaimed.push(ref)
+    }
   }
 
   // 默认模型只在还没有的时候设：这是"装完就能对话"的最后一步，但用户选过之后
@@ -254,5 +263,5 @@ export function planSeed(request) {
     if (seed) defaultModel = { provider: seed.provider, model: seed.models[0] }
   }
 
-  return { entries, skipped, refs, defaultModel, removals, existingProviders }
+  return { entries, skipped, refs, reclaimed, defaultModel, removals, existingProviders }
 }
