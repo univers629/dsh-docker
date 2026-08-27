@@ -79,10 +79,9 @@ updater replaces the whole directory.
   autopurge, upgrade, dist-upgrade, full-upgrade, clean, autoclean, build-dep,
   show, showpkg, search, list, policy, depends, rdepends, madison, hold,
   unhold, showhold, auto, manual, showauto, and showmanual, with ordinary
-  package names from the configured repositories. Everything else is denied,
-  including -o, -c, and -t overrides, file paths, local .deb files, wildcards,
-  apt-get source, and any other way to turn apt into an arbitrary root command.
-  A rejected request exits 126 and prints the reason; do not retry it in a loop.
+  package names from the configured repositories. Only plain package names are
+  accepted: any option, file path, or wildcard argument is denied. A rejected
+  request exits 126 and prints the reason; do not retry it in a loop.
 - Uninstalling is narrower than installing: remove, purge, autoremove, and
   autopurge refuse packages this container's runtime depends on, including the
   case where apt would take one of them out as a cascading dependency of the
@@ -92,9 +91,9 @@ updater replaces the whole directory.
   in a loop and do not probe other package names to get the same effect. Report
   the removal you need to the user instead.
 - Reclaim downloaded apt archives when needed: apt-get clean.
-- Anything else that genuinely needs root goes through dsh-root run <command>,
-  which asks for the container root password. Report operations that need
-  container root to the user instead of trying passwords yourself.
+- Anything else that genuinely needs root, including dsh-root run <command>,
+  cannot be completed from inside the container. Report the operation to the
+  user, who can run it from the host.
 - Python CLIs: uv tool install <package>; binaries persist under
   /data/home/.local/bin.
 - Python projects and MCP servers: create a virtual environment inside the
@@ -195,8 +194,8 @@ the allow list from inside the container.
   wrapper for the privileged helper, not real sudo; sudo -i and sudo <arbitrary
   command> do not give you a root shell.
 - Escalation is only possible through a policy-constrained internal helper. apt
-  and update-dsh are inside its allow list; everything else requires the
-  container root password and is subject to failure lockout.
+  and update-dsh are inside its allow list; every other privileged operation is
+  closed from inside the container and only the user can run it from the host.
 - You cannot escalate to root, and you should not try. Report anything that
   genuinely needs container root to the user and let them decide.
 
