@@ -253,4 +253,55 @@ const seeded = planSeed({
 })
 assert.deepEqual(seeded.entries[0].whenMissing.models, [{ id: 'claude-opus-5-thinking', reasoningEfforts: { low: 'low' } }])
 
+// ---------------------------------------------------------------------------
+// 孤儿凭据引用：上游已经从 keys.json 里删掉了，但 settings.yaml 里那条代理路由和
+// .credentials.yaml 里那条引用还在。里面存着的真密钥必须被换回占位串——浏览器会往
+// WebUI 的密钥框里自动填值，用户随手一保存就把真东西留在容器里给 Agent 读。
+// ---------------------------------------------------------------------------
+const orphan = planSeed({
+  upstreams: [],
+  brokerBase: 'http://b:8080',
+  placeholder: 'dsh-broker-placeholder',
+  catalog,
+  existing: {
+    providers: {
+      // 已经没有对应上游的代理路由：引用要回收。
+      ghost: { baseURL: 'http://b:8080/u/ghost', apiKeyEnv: 'GHOST_API_KEY' },
+      // 用户自己加的直连供应商：真密钥是他自己要的，不能动。
+      mine: { baseURL: 'https://api.example.com/v1', apiKeyEnv: 'MINE_API_KEY' },
+      // 名字对得上但指向别处（用户改过 baseURL）：也不动。
+      moved: { baseURL: 'https://api.example.com/u/moved', apiKeyEnv: 'MOVED_API_KEY' },
+    },
+    natives: { deepseek: { baseURL: 'http://b:8080/u/deepseek', apiKeyEnv: 'DEEPSEEK_API_KEY' } },
+    refValues: {
+      GHOST_API_KEY: 'sk-real-ghost',
+      MINE_API_KEY: 'sk-real-mine',
+      MOVED_API_KEY: 'sk-real-moved',
+      DEEPSEEK_API_KEY: 'sk-real-deepseek',
+    },
+  },
+})
+assert.deepEqual(orphan.refs, {
+  GHOST_API_KEY: 'dsh-broker-placeholder',
+  DEEPSEEK_API_KEY: 'dsh-broker-placeholder',
+})
+assert.deepEqual(orphan.reclaimed.slice().sort(), ['DEEPSEEK_API_KEY', 'GHOST_API_KEY'])
+// 已经是占位串（或空）的引用不该被记成"回收"，否则每次保存都提醒用户去轮换。
+const quiet = planSeed({
+  upstreams: [],
+  brokerBase: 'http://b:8080',
+  placeholder: 'dsh-broker-placeholder',
+  catalog,
+  existing: {
+    providers: { ghost: { baseURL: 'http://b:8080/u/ghost', apiKeyEnv: 'GHOST_API_KEY' } },
+    refValues: { GHOST_API_KEY: 'dsh-broker-placeholder' },
+  },
+})
+assert.deepEqual(quiet.reclaimed, [])
+// 给了 brokerBase 就按整条地址比：别的部署的代理地址不算本部署的路由。
+assert.equal(isBrokerRouteBaseUrl('http://b:8080/u/ghost', 'ghost', 'http://b:8080'), true)
+assert.equal(isBrokerRouteBaseUrl('http://b:8080/u/ghost/', 'ghost', 'http://b:8080'), true)
+assert.equal(isBrokerRouteBaseUrl('http://other:8080/u/ghost', 'ghost', 'http://b:8080'), false)
+assert.equal(isBrokerRouteBaseUrl('http://other:8080/u/ghost', 'ghost'), true)
+
 console.log('model-settings policy smoke: ok')

@@ -18,7 +18,7 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { planSeed } from './dsh-model-settings-policy.mjs'
+import { NATIVE_ROUTES, planSeed } from './dsh-model-settings-policy.mjs'
 
 const DSH_ROOTS = (process.env.DSH_SEED_MODULE_ROOTS ?? '/app/dsh/node_modules:/opt/dsh-docker-control/node_modules')
   .split(':')
@@ -164,6 +164,16 @@ function writeAtomic(file, text, mode) {
   renameSync(temporary, file)
 }
 
+/** 第一方命名空间当前写着什么：上游名 → profile 对象（没配置就不出现）。 */
+function nativeProfiles(yaml, settings) {
+  const profiles = {}
+  for (const [name, native] of Object.entries(NATIVE_ROUTES)) {
+    const node = settings.getIn(native.settingsPath, true)
+    if (node && yaml.isMap(node)) profiles[name] = node.toJSON?.() ?? {}
+  }
+  return profiles
+}
+
 async function runSeed(payload) {
   const yaml = loadPackage('yaml')
   if (yaml === undefined || typeof yaml.parseDocument !== 'function') {
@@ -185,6 +195,8 @@ async function runSeed(payload) {
       providers: existingProviders && yaml.isMap(existingProviders)
         ? existingProviders.toJSON?.() ?? {}
         : {},
+      // 第一方命名空间（llm-deepseek）的 profile：回收孤儿凭据引用同样要看它的 baseURL。
+      natives: nativeProfiles(yaml, settings),
       // 传引用的当前值：策略层要能分辨"已经是占位串"和"这里存着一把真实密钥"。
       // 后者会被换回占位串（代理托管的上游在容器里不需要真密钥），并在摘要里点出来。
       refValues: existingRefs && yaml.isMap(existingRefs)
