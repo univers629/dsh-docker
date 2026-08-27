@@ -226,7 +226,13 @@ function normalizeUpstream(raw, index) {
   }
 }
 
-export function parseBrokerConfig(raw) {
+/**
+ * @param options.allowEmpty 允许 upstreams 是空数组。密钥管理面板要能从零开始：
+ *   容器先起来、页面上再填第一把密钥，所以运行中的 broker 必须接受"还没有上游"
+ *   这个状态（此时它对每个 /u/ 请求都回 503）。命令行和测试仍按严格模式用，
+ *   一份空配置在那些场合只可能是写错了。
+ */
+export function parseBrokerConfig(raw, { allowEmpty = false } = {}) {
   let document = raw
   if (typeof raw === 'string') {
     try {
@@ -241,7 +247,10 @@ export function parseBrokerConfig(raw) {
   if (document.version !== undefined && document.version !== 1) {
     throw new BrokerConfigError(`不支持的密钥配置版本：${document.version}`)
   }
-  if (!Array.isArray(document.upstreams) || document.upstreams.length === 0) {
+  if (!Array.isArray(document.upstreams)) {
+    throw new BrokerConfigError('密钥配置必须包含非空的 upstreams 数组')
+  }
+  if (document.upstreams.length === 0 && !allowEmpty) {
     throw new BrokerConfigError('密钥配置必须包含非空的 upstreams 数组')
   }
   if (document.upstreams.length > 32) {

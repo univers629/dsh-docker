@@ -39,6 +39,15 @@ USERNS_PREFLIGHT=false
 PENDING_MODEL_BROKER=off
 PENDING_EGRESS_MODE=open
 PENDING_EGRESS_ALLOWED_HOSTS=""
+# 密钥管理面板（dsh-key-admin）：装完之后在浏览器里填密钥、拉模型列表、写 DSH 配置。
+# 默认只发布在宿主回环上，端口和绑定地址都记在 .env 里，令牌记在 data/broker/admin.token。
+KEY_ADMIN_OVERRIDE=""
+PENDING_KEY_ADMIN=off
+PENDING_KEY_ADMIN_BIND_HOST=""
+PENDING_KEY_ADMIN_PORT=""
+KEY_ADMIN_TOKEN_STATE=""
+DEFAULT_KEY_ADMIN_BIND_HOST="127.0.0.1"
+DEFAULT_KEY_ADMIN_PORT="3082"
 # 收集到的上游用几个下标对齐的数组存。密钥只在 BROKER_KEYS 里短暂停留，写盘之后
 # 立刻清空，和 PENDING_ROOT_PASSWORD 一样的处理。
 BROKER_NAMES=()
@@ -67,6 +76,7 @@ usage() {
 用法：install.sh [操作] [选项]
 
 操作：install（默认）、configure、update（容器内更新 DSH）、model-key（给已装好的部署补填模型密钥）、
+      key-panel（给已装好的部署开/关模型密钥管理面板）、
       start、stop、restart、logs、status、delete（删除）
 选项：
   --access local|trusted-proxy|basic
@@ -86,6 +96,9 @@ usage() {
   --no-model-settings-seed        不替 DSH 写模型配置（供应商与模型要自己在 WebUI 里填）
   --model-keys-file PATH          导入一份完整的 keys.json（也可用 DSH_MODEL_KEYS_FILE）
   --no-model-broker               关闭模型密钥代理，并清空 data/broker/keys.json
+  --key-admin / --no-key-admin    模型密钥管理面板（浏览器里填密钥、拉模型列表、写 DSH 配置）
+  --key-admin-bind ADDRESS        面板发布地址（默认 127.0.0.1，改成别的等于把面板暴露出去）
+  --key-admin-port PORT           面板宿主端口（默认 3082）
   --egress open|allowlist         容器出站模式（allowlist 只放行白名单域名）
   --egress-allow HOSTS            allowlist 下额外放行的域名（可重复，逗号分隔，支持 *.example.com）
   --userns-preflight              只做宿主 userns-remap 预检并退出，不安装
@@ -100,7 +113,7 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    install|configure|update|model-key|start|stop|restart|logs|status|delete)
+    install|configure|update|model-key|key-panel|start|stop|restart|logs|status|delete)
       ACTION="$1"
       ;;
     --action)
@@ -190,6 +203,20 @@ while [ "$#" -gt 0 ]; do
       ;;
     --model-keys-file=*) MODEL_KEYS_FILE="${1#*=}" ;;
     --no-model-broker) NO_MODEL_BROKER=true ;;
+    --key-admin) KEY_ADMIN_OVERRIDE=on ;;
+    --no-key-admin) KEY_ADMIN_OVERRIDE=off ;;
+    --key-admin-bind)
+      [ "$#" -ge 2 ] || { echo "[错误] --key-admin-bind 缺少值。" >&2; exit 2; }
+      shift
+      PENDING_KEY_ADMIN_BIND_HOST="$1"
+      ;;
+    --key-admin-bind=*) PENDING_KEY_ADMIN_BIND_HOST="${1#*=}" ;;
+    --key-admin-port)
+      [ "$#" -ge 2 ] || { echo "[错误] --key-admin-port 缺少值。" >&2; exit 2; }
+      shift
+      PENDING_KEY_ADMIN_PORT="$1"
+      ;;
+    --key-admin-port=*) PENDING_KEY_ADMIN_PORT="${1#*=}" ;;
     --egress)
       [ "$#" -ge 2 ] || { echo "[错误] --egress 缺少值。" >&2; exit 2; }
       shift
@@ -227,7 +254,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$ACTION" in
-  ''|install|configure|update|model-key|start|stop|restart|logs|status|delete) ;;
+  ''|install|configure|update|model-key|key-panel|start|stop|restart|logs|status|delete) ;;
   *) echo "[错误] 未知操作：$ACTION" >&2; exit 2 ;;
 esac
 case "$ACCESS_MODE_OVERRIDE" in
@@ -323,6 +350,7 @@ if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
     echo "7) 查看状态"
     echo "8) 删除"
     echo "9) 补填模型 API 密钥（只新增密钥代理容器，不重建 dsh）"
+    echo "10) 模型密钥管理面板（浏览器里填密钥、拉模型列表，不重建 dsh）"
     prompt "这次要做什么" "1"
     case "$PROMPT_RESULT" in
       1) ACTION=install ;;
@@ -334,6 +362,7 @@ if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
       7) ACTION=status ;;
       8) ACTION=delete ;;
       9) ACTION=model-key ;;
+      10) ACTION=key-panel ;;
       *) echo "[错误] 无效选项。" >&2; exit 2 ;;
     esac
   else
@@ -575,6 +604,7 @@ delete_project() {
       # dsh-egress / dsh-ingress 这几个服务，它们会连着 dsh-internal 网络一起留下来。
       # 老部署目录里没有这两个文件，所以必须逐个判断存在性。
       [ -f docker-compose.keys.yml ] && compose_files+=( -f docker-compose.keys.yml )
+      [ -f docker-compose.keys-admin.yml ] && compose_files+=( -f docker-compose.keys-admin.yml )
       [ -f docker-compose.isolated.yml ] && compose_files+=( -f docker-compose.isolated.yml )
       DOCKER compose -p "$project_name" "${compose_files[@]}" down --volumes --remove-orphans
     ) || true
@@ -585,7 +615,7 @@ delete_project() {
     [ -n "$id" ] && DOCKER container rm -f "$id" >/dev/null 2>&1 || true
   done <<< "$container_ids"
   # 兜底按名字删：叠加文件缺失、或者容器被手工从项目里摘掉时，标签过滤都找不到它们。
-  for container_name in dsh dsh-key-broker dsh-egress dsh-ingress; do
+  for container_name in dsh dsh-key-broker dsh-key-admin dsh-egress dsh-ingress; do
     DOCKER container rm -f "$container_name" >/dev/null 2>&1 || true
   done
   # 预构建安装用的引用不叫 dsh:*，而且多架构清单未必带上项目标签，所以要按
@@ -624,7 +654,7 @@ delete_project() {
       DOCKER network rm "$id" >/dev/null 2>&1 || true
     fi
   done <<< "$network_ids"
-  for container_name in dsh-private dsh-internal; do
+  for container_name in dsh-private dsh-internal dsh-admin; do
     network_project="$(DOCKER network inspect --format '{{ index .Labels "com.docker.compose.project" }}' "$container_name" 2>/dev/null || true)"
     if [ "$network_project" = "$project_name" ]; then
       DOCKER network rm "$container_name" >/dev/null 2>&1 || true
@@ -739,6 +769,18 @@ set_compose_args() {
       exit 1
     fi
     COMPOSE_ARGS+=(-f docker-compose.keys.yml)
+    # 面板依附密钥代理：它改的就是 broker 那份 keys.json，broker 关着的话面板没有意义。
+    if [ "$PENDING_KEY_ADMIN" = on ]; then
+      if [ ! -f docker-compose.keys-admin.yml ]; then
+        echo "[错误] 需要 docker-compose.keys-admin.yml 才能启用密钥管理面板，但工程目录里没有它。" >&2
+        echo "       请更新工程源码，或用 --no-key-admin 关闭面板。" >&2
+        exit 1
+      fi
+      COMPOSE_ARGS+=(-f docker-compose.keys-admin.yml)
+    fi
+  elif [ "$PENDING_KEY_ADMIN" = on ]; then
+    echo "[警告] 密钥代理关着，密钥管理面板不会启动（它管理的就是代理那份密钥配置）。" >&2
+    PENDING_KEY_ADMIN=off
   fi
   if [ "$PENDING_EGRESS_MODE" = allowlist ]; then
     if [ ! -f docker-compose.isolated.yml ]; then
@@ -1085,14 +1127,28 @@ process.stdin.on("end", () => {
 })
 '
 
+# 需要"一个带 node 的镜像"时用哪个 tag。model-key 这条路径不走 obtain_dsh_image，
+# 所以 PENDING_IMAGE 是空的，直接拿它去 docker run 只会得到 invalid reference format。
+# 顺序：本次安装选定的 > .env 里记着的 > 现有 dsh 容器实际在用的 > 预构建镜像。
+node_tool_image() {
+  local image="$PENDING_IMAGE"
+  [ -n "$image" ] || image="$(get_compose_env DSH_IMAGE "")"
+  [ -n "$image" ] || image="$(DOCKER container inspect dsh --format '{{.Config.Image}}' 2>/dev/null || true)"
+  [ -n "$image" ] || image="$DEFAULT_PREBUILT_IMAGE"
+  printf '%s' "$image"
+}
+
 merge_broker_config() {
-  local incoming="$1" payload
+  local incoming="$1" payload image
   payload="$(printf '{"existing": %s, "incoming": %s}' \
     "$(json_string "$(cat data/broker/keys.json)")" "$incoming")"
   if command -v node >/dev/null 2>&1; then
     printf '%s' "$payload" | node -e "$BROKER_MERGE_SCRIPT"
   else
-    printf '%s' "$payload" | DOCKER run --rm -i --entrypoint node "$PENDING_IMAGE" -e "$BROKER_MERGE_SCRIPT"
+    # 故意不用 docker exec 进 dsh：合并的输入里带着真实密钥，让它流经 Agent 那个容器
+    # 就等于白搭一个密钥代理。这里起的是一次性容器，只借它的 node，用完即弃。
+    image="$(node_tool_image)"
+    printf '%s' "$payload" | DOCKER run --rm -i --entrypoint node "$image" -e "$BROKER_MERGE_SCRIPT"
   fi
 }
 
@@ -1134,6 +1190,154 @@ broker_config_chown() {
   echo "       sudo chown 1000:1000 data/broker/keys.json" >&2
 }
 
+
+# ---------------------------------------------------------------------------
+# 模型密钥管理面板（dsh-key-admin）
+#
+# 它补的是"密钥只能在安装向导里填"这个缺口：换密钥、加供应商、改模型清单都不该
+# 只能回终端，但也不能挪到 DSH 自己的 WebUI 里——那个页面跑在 dsh 容器内，填进去的
+# 密钥就落在 Agent 能读的地方。所以面板是又一个独立容器，写的仍然是同一份
+# data/broker/keys.json，broker 按 mtime 热加载。
+#
+# 三条边界（缺一条这个面板就成了新的攻击面）：
+#   1. 面板只挂 dsh-admin 网络，dsh 容器不在其中，跨网桥流量被 Docker 自己拦掉；
+#   2. 宿主端口默认只发布在 127.0.0.1：发布到 0.0.0.0 的话 dsh 容器能经网关回连；
+#   3. 所有 /api 都要令牌，令牌写 data/broker/admin.token（0600），不进 .env。
+# ---------------------------------------------------------------------------
+
+# 面板令牌。48 个十六进制字符（192 bit），只从 /dev/urandom 取，不经过任何外部命令的
+# 命令行。已有令牌就保留：重跑安装不该让人重新去翻一遍新令牌。
+write_key_admin_token() {
+  local temporary
+  [ "$PENDING_KEY_ADMIN" = on ] || return 0
+  mkdir -p data/broker
+  if [ -s data/broker/admin.token ]; then
+    KEY_ADMIN_TOKEN_STATE=kept
+  else
+    if [ ! -r /dev/urandom ]; then
+      echo "[错误] 读不到 /dev/urandom，无法生成面板令牌。" >&2
+      exit 1
+    fi
+    temporary="$(mktemp data/broker/admin.token.tmp.XXXXXX)"
+    chmod 600 "$temporary"
+    od -An -tx1 -N24 /dev/urandom | tr -d '[:space:]' > "$temporary"
+    printf '\n' >> "$temporary"
+    mv "$temporary" data/broker/admin.token
+    KEY_ADMIN_TOKEN_STATE=new
+    echo "==> 已生成密钥管理面板令牌：data/broker/admin.token（0600），未写入 .env。"
+  fi
+  # 面板容器以 UID 1000 读它，属主不对就读不到，进程会直接退出。
+  if ! chown 1000:1000 data/broker/admin.token 2>/dev/null; then
+    echo "[警告] 无法把 data/broker/admin.token 的属主改成 1000:1000。" >&2
+    echo "       面板容器以 UID 1000 读它；如果容器报读不到令牌，请执行：" >&2
+    echo "       sudo chown 1000:1000 data/broker/admin.token" >&2
+  fi
+}
+
+read_key_admin_token() {
+  [ -s data/broker/admin.token ] || return 1
+  tr -d '[:space:]' < data/broker/admin.token
+}
+
+# 面板的访问方式。令牌只在本次新生成时回显一次：已有令牌的部署重跑安装时把它再打一遍，
+# 等于把长期凭据抄进终端记录和滚动缓冲区，没有任何必要。
+print_key_admin_access() {
+  local token
+  [ "$PENDING_KEY_ADMIN" = on ] || return 0
+  echo "    模型密钥面板: http://$PENDING_KEY_ADMIN_BIND_HOST:$PENDING_KEY_ADMIN_PORT/"
+  if [ "$KEY_ADMIN_TOKEN_STATE" = new ] && token="$(read_key_admin_token)"; then
+    echo "      访问令牌: $token"
+    echo "      （只回显这一次；随时可以从 $(pwd)/data/broker/admin.token 再取）"
+  else
+    echo "      访问令牌: 见 $(pwd)/data/broker/admin.token（cat 一下粘到页面上）"
+  fi
+  case "$PENDING_KEY_ADMIN_BIND_HOST" in
+    127.0.0.1|localhost|'[::1]'|::1)
+      echo "      远程访问: ssh -N -L $PENDING_KEY_ADMIN_PORT:127.0.0.1:$PENDING_KEY_ADMIN_PORT <用户名@宿主地址>"
+      ;;
+  esac
+}
+
+# 面板要能从零开始：容器先起来，第一把密钥在页面上填。broker 的挂载是一份文件，
+# 文件不存在的话 Docker 会把挂载点建成目录，broker 会直接启动失败，所以先落一份空的。
+# 空的 upstreams 是合法状态：这时 broker 对每个 /u/ 请求都回 503。
+ensure_broker_config_placeholder() {
+  [ ! -s data/broker/keys.json ] || return 0
+  mkdir -p data/broker
+  printf '{\n  "version": 1,\n  "upstreams": []\n}\n' > data/broker/keys.json
+  chmod 600 data/broker/keys.json
+  broker_config_chown
+  echo "==> 已创建空的 data/broker/keys.json（0600）：密钥留到面板里填。"
+}
+
+configure_key_admin() {
+  PENDING_KEY_ADMIN="$(get_compose_env DSH_KEY_ADMIN off)"
+  case "$PENDING_KEY_ADMIN" in on|off) ;; *) PENDING_KEY_ADMIN=off ;; esac
+  [ -z "$KEY_ADMIN_OVERRIDE" ] || PENDING_KEY_ADMIN="$KEY_ADMIN_OVERRIDE"
+  [ -n "$PENDING_KEY_ADMIN_BIND_HOST" ] || PENDING_KEY_ADMIN_BIND_HOST="$(get_compose_env DSH_KEY_ADMIN_BIND_HOST "$DEFAULT_KEY_ADMIN_BIND_HOST")"
+  [ -n "$PENDING_KEY_ADMIN_PORT" ] || PENDING_KEY_ADMIN_PORT="$(get_compose_env DSH_KEY_ADMIN_HOST_PORT "$DEFAULT_KEY_ADMIN_PORT")"
+  case "$PENDING_KEY_ADMIN_PORT" in
+    ''|*[!0-9]*) echo "[错误] 面板端口必须是数字：$PENDING_KEY_ADMIN_PORT" >&2; exit 2 ;;
+  esac
+  if [ "$PENDING_KEY_ADMIN_PORT" -lt 1 ] || [ "$PENDING_KEY_ADMIN_PORT" -gt 65535 ]; then
+    echo "[错误] 面板端口超出范围：$PENDING_KEY_ADMIN_PORT" >&2
+    exit 2
+  fi
+  if [ "$PENDING_MODEL_BROKER" != on ] || [ ! -f docker-compose.keys-admin.yml ]; then
+    PENDING_KEY_ADMIN=off
+    return 0
+  fi
+  if [ "$INTERACTIVE" != true ] || [ -n "$KEY_ADMIN_OVERRIDE" ]; then
+    return 0
+  fi
+  echo
+  echo "模型密钥管理面板："
+  echo "    浏览器里填密钥、按上游拉一次模型列表、设固定请求头（originator / version /"
+  echo "    User-Agent 这些），保存后直接写进 DSH 的模型配置，不用再回终端。"
+  echo "    它是独立容器，默认只发布在 $PENDING_KEY_ADMIN_BIND_HOST:$PENDING_KEY_ADMIN_PORT，"
+  echo "    dsh 容器连不到它；访问要一个令牌，令牌在 data/broker/admin.token。"
+  prompt_yes_no "启用模型密钥管理面板" y
+  if [ "$PROMPT_RESULT" = true ]; then
+    PENDING_KEY_ADMIN=on
+  else
+    PENDING_KEY_ADMIN=off
+  fi
+}
+
+# 面板的核验分两半：它自己活着，以及 dsh 容器确实连不到它。第二条是整个隔离设计的
+# 前提——面板持有全部真实密钥，Agent 一旦能打到它，密钥代理就白搭了。
+assert_key_admin() {
+  local attempt state="" probe
+  [ "$PENDING_KEY_ADMIN" = on ] || return 0
+  echo "==> 正在核验模型密钥管理面板（dsh-key-admin）..."
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    if DOCKER exec dsh-key-admin node -e "fetch('http://127.0.0.1:8090/healthz').then((response) => process.exit(response.status === 204 ? 0 : 1)).catch(() => process.exit(1))" >/dev/null 2>&1; then
+      state=ok
+      break
+    fi
+    sleep 1
+  done
+  if [ "$state" != ok ]; then
+    echo "[错误] dsh-key-admin 未在 30 秒内让 /healthz 返回 204。" >&2
+    echo "       查看原因：docker logs dsh-key-admin（读不到令牌时它会直接退出）。" >&2
+    return 1
+  fi
+  echo "==> 已核验 dsh-key-admin /healthz = 204"
+  probe="const net = require('node:net'); const socket = net.connect(8090, 'dsh-key-admin'); socket.on('connect', () => { socket.destroy(); process.exit(0) }); socket.on('error', () => process.exit(1)); setTimeout(() => process.exit(1), 4000)"
+  if DOCKER exec dsh node -e "$probe" >/dev/null 2>&1; then
+    echo "[错误] dsh 容器能连到 dsh-key-admin:8090：面板对 Agent 可达，真实密钥等于没有隔离。" >&2
+    echo "       请检查 docker-compose.keys-admin.yml 的 networks 有没有被改过（面板只能在 dsh-admin 上）。" >&2
+    return 1
+  fi
+  echo "==> 已核验 dsh 容器连不到 dsh-key-admin（面板不在 Agent 可达的网络里）"
+  case "$PENDING_KEY_ADMIN_BIND_HOST" in
+    127.0.0.1|localhost|'[::1]'|::1) ;;
+    *)
+      echo "[警告] 面板发布在 $PENDING_KEY_ADMIN_BIND_HOST，不是回环地址：宿主网络上的人只要拿到令牌就能改密钥，" >&2
+      echo "       dsh 容器也可能经宿主网关回连这个端口。远程使用请改回 127.0.0.1 并走 SSH 隧道。" >&2
+      ;;
+  esac
+}
 
 # 列出可以作为反向代理网络的候选，排除 Docker 内置网络和 DSH 自己管理的网络。
 list_proxy_network_candidates() {
@@ -1287,6 +1491,14 @@ prompt_broker_upstreams() {
     done
     while :; do
       base="$(model_default_base_url "$name" 2>/dev/null || true)"
+      if [ -z "$base" ]; then
+        # 内置表里没有这个名字，说明是自建网关或聚合站：版本段是这里最常漏的一项，
+        # 漏了就是上游 404，而那时候人已经在 WebUI 里找不到原因了。
+        echo > /dev/tty
+        echo "$name 不在内置默认表里，base_url 照上游文档原样填，注意带上版本段：" > /dev/tty
+        echo "    OpenAI 兼容网关一般是 https://<域名>/v1，Anthropic 兼容的一般不带 /v1。" > /dev/tty
+        echo "    这里填的是真实上游地址；DSH 容器那边填什么由安装器自己算。" > /dev/tty
+      fi
       prompt "$name 的 base_url" "$base"
       base="$PROMPT_RESULT"
       validate_upstream_base_url "$base" && break
@@ -1358,14 +1570,23 @@ prompt_broker_upstreams() {
       done
     fi
     # 模型 id 决定 WebUI 的模型下拉里能选到什么。内置目录里的上游不用填：安装器
-    # 会沿用 DSH 自带的那份清单；目录里没有的网关，DSH 无从知道它有哪些模型。
+    # 会沿用 DSH 自带的那份清单；目录里没有的网关，DSH 无从知道它有哪些模型，
+    # 空着就等于装完在 WebUI 里一个模型都选不到，所以这里直接挡住。
     echo > /dev/tty
     echo "$name 要在 DSH 里启用哪些模型：" > /dev/tty
-    echo "    deepseek、openai、anthropic、google、nvidia 这类 DSH 内置目录里的上游可以直接回车，" > /dev/tty
-    echo "    安装器会沿用目录里的整份模型清单；自建网关请至少填一个模型 id。" > /dev/tty
-    prompt_optional "模型 id（多个用逗号分隔）"
-    models="$PROMPT_RESULT"
-    [ -n "$models" ] || models="$(model_id_override "$name")"
+    if model_default_base_url "$name" >/dev/null 2>&1; then
+      echo "    $name 在 DSH 内置模型目录里，直接回车就沿用目录里的整份模型清单。" > /dev/tty
+    else
+      echo "    $name 不在 DSH 内置模型目录里，必须自己列出模型 id，照上游文档原样写。" > /dev/tty
+      echo "    例如：claude-opus-5-thinking 或 gpt-5.2,gemini-3-pro。" > /dev/tty
+    fi
+    while :; do
+      prompt_optional "模型 id（多个用逗号分隔）"
+      models="$PROMPT_RESULT"
+      [ -n "$models" ] || models="$(model_id_override "$name")"
+      if [ -n "$models" ] || model_default_base_url "$name" >/dev/null 2>&1; then break; fi
+      echo "$name 不在内置目录里，至少要填一个模型 id。" > /dev/tty
+    done
     add_broker_upstream "$name" "$base" "$key" "$rpm" "$daily" "$profile" "$headers" "$models" || continue
     key=""
     prompt_yes_no "再添加一个上游" n
@@ -1381,6 +1602,7 @@ print_broker_skipped_notice() {
   echo "    就落在容器内，容器里的 Agent（以及在容器内拿到 root 的人）一条 cat 就能读到。"
   echo "    想改成真实密钥不进容器：cd 到工程目录后执行 ./install.sh model-key 补填，"
   echo "    它只新增 dsh-key-broker 容器，不重建 dsh，容器里 apt 装过的东西不会丢。"
+  echo "    不想在终端里填就执行 ./install.sh key-panel，在浏览器里填（同样不重建 dsh）。"
 }
 
 configure_model_broker() {
@@ -1447,6 +1669,22 @@ configure_model_broker() {
   # 一个上游都没收集到（密钥处直接回车）就按"本次不启用"处理。以前这里是必填死循环，
   # 想先把环境装起来的人只能 Ctrl-C，反而更容易把安装打断在一半。
   if [ "${#BROKER_NAMES[@]}" -eq 0 ]; then
+    # 但"没在终端里填"不等于"不想要密钥代理"：先把代理和面板装上、keys.json 留空，
+    # 剩下的在浏览器里做，这样填错一个 base_url 也不必重跑一遍安装向导。
+    if [ -f docker-compose.keys-admin.yml ] && [ -z "$KEY_ADMIN_OVERRIDE" ]; then
+      echo
+      echo "终端里没填密钥。还有一种填法："
+      echo "    启用模型密钥管理面板，装完在浏览器里填密钥、按上游拉一次模型列表、设固定请求头，"
+      echo "    保存后直接写进 DSH 的模型配置。面板是独立容器，dsh 容器连不到它。"
+      prompt_yes_no "现在不填密钥，装完在密钥管理面板里填" y
+      if [ "$PROMPT_RESULT" = true ]; then
+        PENDING_MODEL_BROKER=on
+        # 置成 on 后 configure_key_admin 会跳过重复提问，直接沿用这个决定。
+        KEY_ADMIN_OVERRIDE=on
+        ensure_broker_config_placeholder
+        return 0
+      fi
+    fi
     PENDING_MODEL_BROKER=off
     print_broker_skipped_notice
     return 0
@@ -1690,6 +1928,7 @@ configure_dsh() {
   fi
 
   configure_model_broker
+  configure_key_admin
   configure_egress_mode
 
   PENDING_ACCESS_MODE="$access_mode"
@@ -1783,6 +2022,8 @@ write_broker_config() {
   if [ -s data/broker/keys.json ]; then
     if ! document="$(merge_broker_config "$upstreams")"; then
       echo "[错误] 无法与现有 data/broker/keys.json 合并，原文件未改动。" >&2
+      echo "       合并需要 node：宿主上没有就借 $(node_tool_image) 里的那个，" >&2
+      echo "       请确认这个镜像在本机可用（docker image inspect 能查到，或者能拉到）。" >&2
       exit 1
     fi
   else
@@ -1852,6 +2093,12 @@ seed_dsh_model_settings() {
     echo "[警告] 不知道该用哪个镜像来写 DSH 模型配置，已跳过。" >&2
     return 0
   fi
+  # model-key 只 require_project、不同步源码，所以老部署的工程目录里可能还没有这个脚本。
+  if [ ! -f bin/seed-dsh-model-settings.mjs ]; then
+    echo "[警告] 工程目录里没有 bin/seed-dsh-model-settings.mjs，跳过写 DSH 模型配置。" >&2
+    echo "       先更新工程文件（重新跑一次安装或 git pull），再执行 ./install.sh model-key。" >&2
+    return 0
+  fi
   mkdir -p data/dsh
   for name in $names; do
     upstreams="${upstreams:+$upstreams, }{\"name\": $(json_string "$name"), \"shape\": $(json_string "$(broker_upstream_profile "$name")"), \"models\": $(broker_models_json "$(broker_upstream_models "$name")")}"
@@ -1883,6 +2130,9 @@ prepare_pending_env() {
   # 这四个键只是开关和地址，真实密钥永远不进 .env。
   set_compose_env DSH_MODEL_BROKER "$PENDING_MODEL_BROKER" "$PENDING_ENV_FILE"
   set_compose_env DSH_MODEL_BROKER_BASE "$MODEL_BROKER_BASE" "$PENDING_ENV_FILE"
+  set_compose_env DSH_KEY_ADMIN "$PENDING_KEY_ADMIN" "$PENDING_ENV_FILE"
+  set_compose_env DSH_KEY_ADMIN_BIND_HOST "$PENDING_KEY_ADMIN_BIND_HOST" "$PENDING_ENV_FILE"
+  set_compose_env DSH_KEY_ADMIN_HOST_PORT "$PENDING_KEY_ADMIN_PORT" "$PENDING_ENV_FILE"
   set_compose_env DSH_EGRESS_MODE "$PENDING_EGRESS_MODE" "$PENDING_ENV_FILE"
   set_compose_env DSH_EGRESS_ALLOWED_HOSTS "$PENDING_EGRESS_ALLOWED_HOSTS" "$PENDING_ENV_FILE"
 }
@@ -1892,6 +2142,7 @@ compose_up_with_pending_env() {
     unset DSH_ACCESS_MODE DSH_BIND_HOST DSH_TRUSTED_HOSTS
     unset DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL DSH_IMAGE DSH_IMAGE_SOURCE
     unset DSH_MODEL_BROKER DSH_MODEL_BROKER_BASE DSH_EGRESS_MODE DSH_EGRESS_ALLOWED_HOSTS
+    unset DSH_KEY_ADMIN DSH_KEY_ADMIN_BIND_HOST DSH_KEY_ADMIN_HOST_PORT
     DOCKER compose --env-file "$PENDING_ENV_FILE" "${COMPOSE_ARGS[@]}" up -d --no-build --force-recreate
   )
 }
@@ -2033,7 +2284,9 @@ print_config_summary() {
     for upstream_name in $(broker_upstream_names); do
       echo "      - $upstream_name: DSH 侧 base_url = $MODEL_BROKER_BASE/u/$upstream_name，密钥是占位串 $MODEL_BROKER_PLACEHOLDER_KEY"
     done
-    if [ "$NO_MODEL_SETTINGS_SEED" = true ]; then
+    if [ -z "$(broker_upstream_names)" ]; then
+      echo "      还没有任何上游：现在向 DSH 发模型请求会得到 503，请先在下面的面板里填一把密钥。"
+    elif [ "$NO_MODEL_SETTINGS_SEED" = true ]; then
       echo "    模型设置: 未写入（--no-model-settings-seed），请在 WebUI 的「设置 → 模型」里自己加供应商"
     else
       echo "    模型设置: 已写进 data/dsh/settings.yaml，WebUI 的「设置 → 模型」里可直接选模型"
@@ -2044,6 +2297,7 @@ print_config_summary() {
   else
     echo "    模型密钥代理: 关（密钥若写进容器内的配置或环境，容器里的 Agent 一条 cat 就能读到）"
   fi
+  print_key_admin_access
   if [ "$PENDING_EGRESS_MODE" = allowlist ]; then
     echo "    出站模式: allowlist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）"
     if [ -n "$PENDING_EGRESS_ALLOWED_HOSTS" ]; then
@@ -2101,6 +2355,18 @@ add_model_key() {
   PENDING_MODEL_BROKER=on
   set_compose_env DSH_MODEL_BROKER on
   set_compose_env DSH_MODEL_BROKER_BASE "$MODEL_BROKER_BASE"
+  # 面板归 ./install.sh key-panel 管，这里不追问；只沿用 .env 里已有的决定，让这次 start
+  # 顺带把已经开着的面板带起来，并在后面把隔离再核验一遍。
+  if [ -z "$KEY_ADMIN_OVERRIDE" ]; then
+    case "$(get_compose_env DSH_KEY_ADMIN off)" in on) KEY_ADMIN_OVERRIDE=on ;; *) KEY_ADMIN_OVERRIDE=off ;; esac
+  fi
+  configure_key_admin
+  write_key_admin_token
+  set_compose_env DSH_KEY_ADMIN "$PENDING_KEY_ADMIN"
+  if [ "$PENDING_KEY_ADMIN" = on ]; then
+    set_compose_env DSH_KEY_ADMIN_BIND_HOST "$PENDING_KEY_ADMIN_BIND_HOST"
+    set_compose_env DSH_KEY_ADMIN_HOST_PORT "$PENDING_KEY_ADMIN_PORT"
+  fi
   # 只叫 dsh.sh start：它按 .env 算出叠加文件，只把缺失的旁路容器 up 起来，不动 dsh。
   echo "==> 正在启动 dsh-key-broker（不重建 dsh 容器）..."
   if ! ./dsh.sh start; then
@@ -2108,12 +2374,67 @@ add_model_key() {
     exit 1
   fi
   assert_model_broker
+  assert_key_admin
   echo
-  seed_dsh_model_settings "$(get_compose_env DSH_IMAGE "")"
+  seed_dsh_model_settings "$(node_tool_image)"
   echo "==> 密钥代理已就绪。DSH 的 settings.yaml 与 .credentials.yaml 都是热加载的，"
   echo "    刷新一下 WebUI 就能在「设置 → 模型」里看到这些供应商，密钥框里是占位串。"
   echo "    容器内那份 skill 文档上的 DSH_MODEL_BROKER 仍显示安装时的值，要等下次重建容器"
   echo "    才会刷新——那只是说明文字，不影响代理生效。"
+  print_key_admin_access
+}
+
+# 给已经装好的部署开或关模型密钥管理面板。和 model-key 同一个理由：docker-compose.keys-admin.yml
+# 只新增 dsh-key-admin 服务，完全不碰 dsh 服务的定义，所以不需要重建 dsh 容器，
+# 容器可写层里 apt 装过的东西不会丢。
+manage_key_admin() {
+  if [ ! -f docker-compose.keys-admin.yml ]; then
+    echo "[错误] 工程目录里没有 docker-compose.keys-admin.yml，请先更新工程文件后重试。" >&2
+    echo "       更新办法：在工程目录里 git pull，或重新跑一次安装命令选\"重新配置\"。" >&2
+    exit 1
+  fi
+  if ! container_exists; then
+    echo "[错误] 还没有 dsh 容器，请先执行安装。" >&2
+    exit 1
+  fi
+  if [ "$KEY_ADMIN_OVERRIDE" = off ]; then
+    set_compose_env DSH_KEY_ADMIN off
+    echo "==> 已在 .env 里关闭面板（DSH_KEY_ADMIN=off），正在移除 dsh-key-admin 容器..."
+    DOCKER rm -f dsh-key-admin >/dev/null 2>&1 || true
+    echo "==> 面板已关闭。data/broker/keys.json 与 admin.token 都保持原样，密钥不受影响。"
+    return 0
+  fi
+  if [ "$NO_MODEL_BROKER" = true ]; then
+    echo "[错误] 面板管理的就是密钥代理里的密钥，不能和 --no-model-broker 一起用。" >&2
+    exit 2
+  fi
+  # 面板离不开 broker：它写的那份 keys.json 就是 broker 的配置。broker 还没开就一起开，
+  # keys.json 允许是空的（这时 broker 对每个 /u/ 请求回 503），第一把密钥在页面上填。
+  PENDING_MODEL_BROKER=on
+  ensure_broker_config_placeholder
+  KEY_ADMIN_OVERRIDE=on
+  configure_key_admin
+  if [ "$PENDING_KEY_ADMIN" != on ]; then
+    echo "[错误] 无法启用面板，请检查上面的提示。" >&2
+    exit 1
+  fi
+  write_key_admin_token
+  set_compose_env DSH_MODEL_BROKER on
+  set_compose_env DSH_MODEL_BROKER_BASE "$MODEL_BROKER_BASE"
+  set_compose_env DSH_KEY_ADMIN on
+  set_compose_env DSH_KEY_ADMIN_BIND_HOST "$PENDING_KEY_ADMIN_BIND_HOST"
+  set_compose_env DSH_KEY_ADMIN_HOST_PORT "$PENDING_KEY_ADMIN_PORT"
+  echo "==> 正在启动 dsh-key-admin（不重建 dsh 容器）..."
+  if ! ./dsh.sh start; then
+    echo "[错误] 启动失败。.env 已更新，修好后可以重新执行 ./install.sh key-panel。" >&2
+    exit 1
+  fi
+  assert_model_broker
+  assert_key_admin
+  echo
+  echo "==> 面板已就绪。在页面上保存上游后它会直接写 data/dsh/settings.yaml 与"
+  echo "    .credentials.yaml，DSH 热加载这两份文件，刷新 WebUI 就能在「设置 → 模型」里选到。"
+  print_key_admin_access
 }
 
 cleanup_pending_env() {
@@ -2128,6 +2449,7 @@ case "$ACTION" in
     write_basic_auth
     write_root_password
     write_broker_config
+    write_key_admin_token
     seed_dsh_model_settings "$PENDING_IMAGE"
     prepare_pending_env
     echo "==> 正在启动 DSH..."
@@ -2139,10 +2461,12 @@ case "$ACTION" in
     PENDING_ENV_FILE=""
     assert_dsh_hardening
     assert_model_broker
+    assert_key_admin
     assert_egress_isolation
     print_config_summary
     ;;
   model-key) add_model_key ;;
+  key-panel) manage_key_admin ;;
   update) ./dsh.sh update ;;
   start) ./dsh.sh start ;;
   stop) ./dsh.sh stop ;;

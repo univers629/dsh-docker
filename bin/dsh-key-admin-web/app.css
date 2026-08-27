@@ -1,0 +1,31 @@
+:root { color-scheme: dark; --bg: #14161a; --panel: #1c1f26; --line: #2c313b; --text: #e6e8eb; --muted: #9aa3af; --accent: #4c8dff; --bad: #ff6b6b; --good: #4ade80; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 system-ui, "Segoe UI", "Noto Sans SC", sans-serif; }
+#app { max-width: 1000px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 20px; margin: 0 0 6px; }
+h2 { font-size: 15px; margin: 18px 0 10px; }
+h2:first-child { margin-top: 0; }
+code { font-family: ui-monospace, Consolas, monospace; color: #cbd5e1; }
+.hint { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 10px; }
+.field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 240px; min-width: 0; }
+.field span { color: var(--muted); font-size: 12px; }
+input, select, textarea { background: #101216; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; font: inherit; width: 100%; }
+textarea { min-height: 68px; resize: vertical; font-family: ui-monospace, Consolas, monospace; }
+button { background: #262b34; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #08101f; font-weight: 600; }
+button.danger { color: var(--bad); }
+.list { display: flex; flex-direction: column; gap: 8px; }
+.item { display: flex; gap: 12px; align-items: center; justify-content: space-between; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.item .meta { color: var(--muted); font-size: 12px; }
+.headers .row { align-items: center; margin-bottom: 0; }
+.models { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 2px 12px; margin-top: 10px; max-height: 280px; overflow: auto; }
+.models label { display: flex; gap: 6px; align-items: center; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.models input { width: auto; }
+pre { background: #101216; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; max-height: 320px; white-space: pre-wrap; margin: 0; font-size: 12px; }
+.status { min-height: 22px; margin: 10px 0 0; }
+.status.bad { color: var(--bad); }
+.status.good { color: var(--good); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }

@@ -41,7 +41,7 @@
 
 ## 自检
 
-`./dsh.sh verify` 在容器内运行 `verify-dsh-hardening`，共 23 项，覆盖运行 UID、能力集、`no-new-privileges`、特权代理 socket、启动链文件是否 root 独占写（`boot-chain-immutable`）、Supervisor / Nginx 主进程 / 特权代理与 `dsh` 的 UID 分离（`signal-isolation`）、apt 卸载保护是否生效（`apt-removal-guard`）、root 密码状态，以及 `/proc`、`/sys` 与 cgroup 的挂载情况。任一项不合格即以非零码退出。
+`./dsh.sh verify` 在容器内运行 `verify-dsh-hardening`，共 24 项，覆盖运行 UID、能力集、`no-new-privileges`、特权代理 socket、启动链文件是否 root 独占写（`boot-chain-immutable`）、Supervisor / Nginx 主进程 / 特权代理与 `dsh` 的 UID 分离（`signal-isolation`）、apt 卸载保护是否生效（`apt-removal-guard`）、root 密码状态，以及 `/proc`、`/sys` 与 cgroup 的挂载情况。任一项不合格即以非零码退出。
 
 ## 模型密钥代理
 
@@ -121,10 +121,11 @@
 
 | 文件 | 写入内容 |
 | --- | --- |
-| `data/dsh/settings.yaml` | `llm-pi-ai.providers.<上游名>` 的 `baseURL` / `apiKeyEnv`，必要时补 `api` 与 `models`；`agent-default-model`（仅在还没设过时） |
+| `data/dsh/settings.yaml` | `llm-pi-ai.providers.<上游名>` 的 `baseURL` / `apiKeyEnv`，必要时补 `api` 与 `models`；上游名叫 `deepseek` 时改写 `llm-deepseek.baseURL`；`agent-default-model`（仅在还没设过时） |
 | `data/dsh/.credentials.yaml` | `refs.<上游名大写>_API_KEY` = 占位串 `dsh-broker-placeholder`（0600） |
 
 - 凭据引用名与 WebUI 自己派生的一致（上游名大写、非字母数字换成下划线、加 `_API_KEY`），所以之后在页面上改密钥改的是同一个引用。
+- `deepseek` 走 DSH 第一方命名空间 `llm-deepseek`（路由 id `deepseek-official`），而不是再建一条同名 `llm-pi-ai` 路由：WebUI 的「模型」页按路由渲染，两条都在就会显示两行 DeepSeek，而默认模型只指其中一行。第一方那条的凭据引用名本来就是 `DEEPSEEK_API_KEY`，模型清单也沿用它内置的那份。旧版安装器写下的重复路由，在下次写配置时会被删掉（只删 `baseURL` 指向本部署代理的那条）。
 - 两份文件 DSH 都在热加载，写完刷新页面即可，不重启容器。
 - 上游名命中 DSH 内置模型目录（`deepseek`、`openai`、`anthropic`、`google`、`nvidia`、`openrouter`、`groq`、`xai`、`moonshotai` 等）时，协议和整份模型清单由目录提供，安装器只写 `baseURL` 与 `apiKeyEnv`，WebUI 里立刻有一整排可选模型。
 - 目录里没有的自建网关必须显式给模型 id：向导会问，非交互用 `--model-id NAME=ID[,ID]`（PowerShell：`-ModelId`）。少了它 DSH 会拒绝整个 `llm-pi-ai` 命名空间，结果是所有供应商一起消失，所以安装器在写入前先用 DSH 自己的校验函数过一遍，不通过就一个字都不写，并在输出里说明原因。
@@ -135,7 +136,25 @@
 
 ### 补填密钥
 
+`./install.sh key-panel`（Windows：`.\install.ps1 -DshAction key-panel`）为已有部署开启密钥管理面板，`--no-key-admin` 关闭它并移除面板容器（`keys.json` 与 `admin.token` 保持原样）。它和 `model-key` 一样只新增旁路容器，不重建 `dsh`。
+
 `./install.sh model-key`（Windows：`.\install.ps1 -DshAction model-key`）为已有部署写入 `data/broker/keys.json`、把 `.env` 的开关翻成 `on`，再启动 `dsh-key-broker` 并核验 `/healthz`。`docker-compose.keys.yml` 只新增 broker 服务、不修改 `dsh` 的定义，因此不重建容器、不丢失 apt 安装的工具链。唯一残留是容器内 skill 文档上的 `DSH_MODEL_BROKER` 仍显示安装时的值（环境变量在容器创建时固定），下次重建容器才会刷新，不影响代理生效。
+
+### 密钥管理面板
+
+`.env` 中 `DSH_KEY_ADMIN=on` 时，安装器再叠加 `docker-compose.keys-admin.yml`，运行独立容器 `dsh-key-admin`：一个只做模型密钥配置的小面板（增删上游、填密钥、选 API 形态、写模型 id、设固定请求头、按上游拉一次模型列表），保存时同时写 `data/broker/keys.json` 与 DSH 的 `settings.yaml`、`.credentials.yaml`。
+
+它填的是「密钥只能在安装向导里填」这个缺口，同时不能变成新的攻击面。面板持有全部真实密钥，所以以下三条边界缺一条它就比 WebUI 直填更糟：
+
+1. **网络**：面板只接入 `dsh-admin` 网络，`dsh` 容器不在其上，跨网桥的流量由 Docker 自己拦掉。安装器在报告成功前会从 `dsh` 容器内执行一次 `net.connect(8090, 'dsh-key-admin')`，这次连接必须失败，否则安装失败。容器自检里的 `key-admin-unreachable` 做同一件事，且不看面板有没有开——面板关着时这里通常是 DNS 解析失败，同样算通过。
+2. **发布地址**：宿主端口默认只发布在 `127.0.0.1:3082`。发布到 `0.0.0.0` 时 `dsh` 容器能经宿主网关回连这个端口，第 1 条就被绕开了，因此非回环绑定会给出警告，远程访问应当走 SSH 隧道。
+3. **鉴权**：除 `/healthz` 与静态资源外，所有 `/api` 都要 Bearer 令牌。令牌是 192 bit 随机值，写 `data/broker/admin.token`（0600），不进 `.env`；比较走定长摘要，连续失败触发与容器 root 口令同一套递增延迟与锁定。
+
+面板自身的收敛与 broker 一致：非 root（1000:1000）、`cap_drop: ALL`、`no-new-privileges`、只读根文件系统、`pids_limit`，可写范围只有 `data/broker` 与 `data/dsh` 两个挂载。另外两点值得单独说明：
+
+- 服务代码从工程目录的 `./bin` 只读挂载进容器，不打进镜像，所以老部署开面板不需要重建镜像。
+- 写 DSH 配置前会 `lstat` 目标文件，`settings.yaml` 或 `.credentials.yaml` 是符号链接或目录时拒绝写入。`dsh` 容器对 `data/dsh` 有写权限，没有这道检查的话它可以把这两个路径换成指向别处的符号链接，诱导面板把 `keys.json` 的内容写进 Agent 能读的位置。这种情况只按「写 DSH 配置失败」处理，不影响密钥本身保存。
+- 空的 `upstreams` 是合法状态：面板要能从零开始，所以安装时可以先不填密钥。这期间 broker 对每个 `/u/` 请求返回 503。
 
 ### 边界
 

@@ -13,6 +13,7 @@ unset DSH_IMAGE DSH_IMAGE_SOURCE
 # shell 里残留的值，就会出现「叠加了 keys/isolated 文件，但服务拿到的还是旧模式」
 # 这种最难查的半启用状态。
 unset DSH_MODEL_BROKER DSH_MODEL_BROKER_BASE DSH_EGRESS_MODE DSH_EGRESS_ALLOWED_HOSTS
+unset DSH_KEY_ADMIN DSH_KEY_ADMIN_BIND_HOST DSH_KEY_ADMIN_HOST_PORT
 
 ACTION="${1:-start}"
 
@@ -46,6 +47,7 @@ env_value() {
 #
 # 密钥代理和出站代理都是独立容器，各自定义在一个叠加文件里，开关写在 .env：
 #   DSH_MODEL_BROKER=on        → 叠加 docker-compose.keys.yml（dsh-key-broker）
+#   DSH_KEY_ADMIN=on           → 叠加 docker-compose.keys-admin.yml（dsh-key-admin）
 #   DSH_EGRESS_MODE=allowlist  → 叠加 docker-compose.isolated.yml（dsh-egress + dsh-ingress）
 # 顺序不能反：isolated 里的 !reset / !override 要作用在前面两个文件合并出来的结果上。
 #
@@ -54,6 +56,7 @@ env_value() {
 COMPOSE_ARGS=(-f docker-compose.yml)
 SIDECAR_SERVICES=()
 BROKER_ENABLED=false
+KEY_ADMIN_ENABLED=false
 EGRESS_ENABLED=false
 
 if [ "$(env_value DSH_MODEL_BROKER off)" = on ]; then
@@ -63,6 +66,19 @@ if [ "$(env_value DSH_MODEL_BROKER off)" = on ]; then
     BROKER_ENABLED=true
   else
     echo "[警告] .env 里 DSH_MODEL_BROKER=on，但目录里没有 docker-compose.keys.yml，已按未启用处理。" >&2
+  fi
+fi
+# 面板依附密钥代理：它写的就是 broker 那份 keys.json。broker 没启用时面板既没有配置可改，
+# 也会让人误以为密钥已经搬出容器，所以这里按未启用处理并说明原因。
+if [ "$(env_value DSH_KEY_ADMIN off)" = on ]; then
+  if [ "$BROKER_ENABLED" != true ]; then
+    echo "[警告] .env 里 DSH_KEY_ADMIN=on，但密钥代理没启用，面板已按未启用处理。" >&2
+  elif [ -f docker-compose.keys-admin.yml ]; then
+    COMPOSE_ARGS+=(-f docker-compose.keys-admin.yml)
+    SIDECAR_SERVICES+=(dsh-key-admin)
+    KEY_ADMIN_ENABLED=true
+  else
+    echo "[警告] .env 里 DSH_KEY_ADMIN=on，但目录里没有 docker-compose.keys-admin.yml，已按未启用处理。" >&2
   fi
 fi
 if [ "$(env_value DSH_EGRESS_MODE open)" = allowlist ]; then
@@ -219,6 +235,7 @@ case "$ACTION" in
       echo "不会重建 dsh，容器里 apt 装过的东西不会丢。它还会把供应商按 DSH 官方格式写进"
       echo "data/dsh/settings.yaml（base_url = http://dsh-key-broker:8080/u/<上游名字>，密钥是占位串），"
       echo "settings.yaml 是热加载的，刷新 WebUI 就能在「设置 → 模型」里选模型。"
+      echo "不想在终端里填就运行 ./install.sh key-panel，在浏览器里填（同样不重建 dsh）。"
       exit 0
     fi
     require_sidecar dsh-key-broker
@@ -230,6 +247,21 @@ case "$ACTION" in
     echo
     echo "说明：这里只显示上游名字与用量，密钥只存在于 data/broker/keys.json 与 broker 容器内存中。"
     echo "      它不会出现在这条输出、DSH 容器、compose 文件或 broker 的审计日志里。"
+    ;;
+  key-panel)
+    if [ "$KEY_ADMIN_ENABLED" != true ]; then
+      echo "模型密钥管理面板未启用（.env 里 DSH_KEY_ADMIN 不是 on）。"
+      echo "启用方法：在这个目录里运行 ./install.sh key-panel，它只新增 dsh-key-admin 容器，不重建 dsh。"
+      exit 0
+    fi
+    require_sidecar dsh-key-admin
+    echo "==> 模型密钥管理面板: http://$(env_value DSH_KEY_ADMIN_BIND_HOST 127.0.0.1):$(env_value DSH_KEY_ADMIN_HOST_PORT 3082)/"
+    if [ -s data/broker/admin.token ]; then
+      echo "    访问令牌: $(tr -d '[:space:]' < data/broker/admin.token)"
+    else
+      echo "[警告] 找不到 data/broker/admin.token，面板会拒绝所有请求；重新运行 ./install.sh key-panel 生成。" >&2
+    fi
+    echo "    远程访问请走 SSH 隧道，不要把这个端口暴露到公网。"
     ;;
   egress)
     if [ "$EGRESS_ENABLED" != true ]; then
@@ -265,13 +297,15 @@ case "$ACTION" in
     echo
     echo "==> 旁路容器："
     report_sidecar dsh-key-broker "模型密钥代理" "$BROKER_ENABLED" DSH_MODEL_BROKER=on
+    report_sidecar dsh-key-admin "密钥管理面板" "$KEY_ADMIN_ENABLED" DSH_KEY_ADMIN=on
     report_sidecar dsh-egress "出站白名单代理" "$EGRESS_ENABLED" DSH_EGRESS_MODE=allowlist
     report_sidecar dsh-ingress "宿主 3080 入口" "$EGRESS_ENABLED" DSH_EGRESS_MODE=allowlist
     ;;
   *)
-    echo "用法: $0 [start|update|stop|restart|logs [服务]|status|shell|root-shell|verify|keys|egress|remove]"
-    echo "  keys    显示模型密钥代理（dsh-key-broker）的上游与用量，不显示密钥"
-    echo "  egress  显示出站白名单代理（dsh-egress）的白名单规模与放行/拒绝计数"
+    echo "用法: $0 [start|update|stop|restart|logs [服务]|status|shell|root-shell|verify|keys|key-panel|egress|remove]"
+    echo "  keys      显示模型密钥代理（dsh-key-broker）的上游与用量，不显示密钥"
+    echo "  key-panel 显示模型密钥管理面板（dsh-key-admin）的地址与访问令牌"
+    echo "  egress    显示出站白名单代理（dsh-egress）的白名单规模与放行/拒绝计数"
     exit 1
     ;;
 esac

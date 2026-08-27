@@ -20,6 +20,9 @@ set "DSH_MODEL_BROKER="
 set "DSH_MODEL_BROKER_BASE="
 set "DSH_EGRESS_MODE="
 set "DSH_EGRESS_ALLOWED_HOSTS="
+set "DSH_KEY_ADMIN="
+set "DSH_KEY_ADMIN_BIND_HOST="
+set "DSH_KEY_ADMIN_HOST_PORT="
 
 rem 旁路容器的状态探针。broker 和 egress 容器都是 read_only + 非 root，所以只能用
 rem node -e 打回环上的 /status，绝不能依赖写临时文件。这两段源码和 dsh.sh 里的
@@ -55,19 +58,22 @@ if /i "%ACTION%"=="shell" goto :shell
 if /i "%ACTION%"=="root-shell" goto :root_shell
 if /i "%ACTION%"=="verify" goto :verify
 if /i "%ACTION%"=="keys" goto :keys
+if /i "%ACTION%"=="key-panel" goto :key_panel
 if /i "%ACTION%"=="egress" goto :egress
 if /i "%ACTION%"=="remove" goto :remove
 if /i "%ACTION%"=="down" goto :remove
 
-echo 用法: %~nx0 [start^|update^|stop^|restart^|logs [服务]^|status^|shell^|root-shell^|verify^|keys^|egress^|remove]
-echo   keys    显示模型密钥代理（dsh-key-broker）的上游与用量，不显示密钥
-echo   egress  显示出站白名单代理（dsh-egress）的白名单规模与放行/拒绝计数
+echo 用法: %~nx0 [start^|update^|stop^|restart^|logs [服务]^|status^|shell^|root-shell^|verify^|keys^|key-panel^|egress^|remove]
+echo   keys      显示模型密钥代理（dsh-key-broker）的上游与用量，不显示密钥
+echo   key-panel 显示模型密钥管理面板（dsh-key-admin）的地址与访问令牌
+echo   egress    显示出站白名单代理（dsh-egress）的白名单规模与放行/拒绝计数
 exit /b 1
 
 rem --- Compose 叠加文件与旁路容器 ---
 rem
 rem 密钥代理和出站代理都是独立容器，各自定义在一个叠加文件里，开关写在 .env：
 rem   DSH_MODEL_BROKER=on        叠加 docker-compose.keys.yml（dsh-key-broker）
+rem   DSH_KEY_ADMIN=on           叠加 docker-compose.keys-admin.yml（dsh-key-admin）
 rem   DSH_EGRESS_MODE=allowlist  叠加 docker-compose.isolated.yml（dsh-egress + dsh-ingress）
 rem 顺序不能反：isolated 里的 !reset / !override 要作用在前面两个文件合并出来的结果上。
 rem
@@ -78,6 +84,7 @@ rem 只读操作都会一起废掉。
 set "COMPOSE_FILES=-f docker-compose.yml"
 set "SIDECARS="
 set "BROKER_ENABLED="
+set "KEY_ADMIN_ENABLED="
 set "EGRESS_ENABLED="
 call :read_env DSH_MODEL_BROKER
 if /i "%ENV_VALUE%"=="on" (
@@ -87,6 +94,20 @@ if /i "%ENV_VALUE%"=="on" (
     set "BROKER_ENABLED=1"
   ) else (
     echo [警告] .env 里 DSH_MODEL_BROKER=on，但目录里没有 docker-compose.keys.yml，已按未启用处理。
+  )
+)
+rem 面板依附密钥代理：它写的就是 broker 那份 keys.json，broker 没启用时面板既没有配置
+rem 可改，也会让人误以为密钥已经搬出容器，所以按未启用处理并说明原因。
+call :read_env DSH_KEY_ADMIN
+if /i "%ENV_VALUE%"=="on" (
+  if not "%BROKER_ENABLED%"=="1" (
+    echo [警告] .env 里 DSH_KEY_ADMIN=on，但密钥代理没启用，面板已按未启用处理。
+  ) else if exist "docker-compose.keys-admin.yml" (
+    set "COMPOSE_FILES=%COMPOSE_FILES% -f docker-compose.keys-admin.yml"
+    set "SIDECARS=%SIDECARS% dsh-key-admin"
+    set "KEY_ADMIN_ENABLED=1"
+  ) else (
+    echo [警告] .env 里 DSH_KEY_ADMIN=on，但目录里没有 docker-compose.keys-admin.yml，已按未启用处理。
   )
 )
 call :read_env DSH_EGRESS_MODE
@@ -234,6 +255,7 @@ if not "%BROKER_ENABLED%"=="1" (
   echo 容器里 apt 装过的东西不会丢。它还会把供应商按 DSH 官方格式写进
   echo data\dsh\settings.yaml（base_url = http://dsh-key-broker:8080/u/^<上游名字^>，密钥是占位串），
   echo settings.yaml 是热加载的，刷新 WebUI 就能在「设置 → 模型」里选模型。
+  echo 不想在终端里填就运行 install.ps1 -DshAction key-panel，在浏览器里填（同样不重建 dsh）。
   exit /b 0
 )
 call :require_sidecar dsh-key-broker
@@ -247,6 +269,33 @@ if errorlevel 1 (
 echo.
 echo 说明：这里只显示上游名字与用量，密钥只存在于 data/broker/keys.json 与 broker 容器内存中。
 echo       它不会出现在这条输出、DSH 容器、compose 文件或 broker 的审计日志里。
+exit /b 0
+
+:key_panel
+if not "%KEY_ADMIN_ENABLED%"=="1" (
+  echo 模型密钥管理面板未启用（.env 里 DSH_KEY_ADMIN 不是 on）。
+  echo 启用方法：在这个目录里运行 install.ps1 -DshAction key-panel，它只新增 dsh-key-admin 容器，不重建 dsh。
+  exit /b 0
+)
+call :require_sidecar dsh-key-admin
+if errorlevel 1 exit /b 1
+call :read_env DSH_KEY_ADMIN_BIND_HOST
+set "PANEL_HOST=%ENV_VALUE%"
+if "%PANEL_HOST%"=="" set "PANEL_HOST=127.0.0.1"
+call :read_env DSH_KEY_ADMIN_HOST_PORT
+set "PANEL_PORT=%ENV_VALUE%"
+if "%PANEL_PORT%"=="" set "PANEL_PORT=3082"
+echo ==^> 模型密钥管理面板: http://%PANEL_HOST%:%PANEL_PORT%/
+set "PANEL_TOKEN="
+if exist "data\broker\admin.token" (
+  for /f "usebackq delims=" %%i in ("data\broker\admin.token") do set "PANEL_TOKEN=%%i"
+)
+if "%PANEL_TOKEN%"=="" (
+  echo [警告] 找不到 data\broker\admin.token，面板会拒绝所有请求；重新运行 install.ps1 -DshAction key-panel 生成。
+) else (
+  echo     访问令牌: %PANEL_TOKEN%
+)
+echo     远程访问请走 SSH 隧道，不要把这个端口暴露到公网。
 exit /b 0
 
 :egress
@@ -275,6 +324,7 @@ docker compose %COMPOSE_FILES% ps
 echo.
 echo ==^> 旁路容器：
 call :report_sidecar dsh-key-broker "模型密钥代理" "%BROKER_ENABLED%" "DSH_MODEL_BROKER=on"
+call :report_sidecar dsh-key-admin "密钥管理面板" "%KEY_ADMIN_ENABLED%" "DSH_KEY_ADMIN=on"
 call :report_sidecar dsh-egress "出站白名单代理" "%EGRESS_ENABLED%" "DSH_EGRESS_MODE=allowlist"
 call :report_sidecar dsh-ingress "宿主 3080 入口" "%EGRESS_ENABLED%" "DSH_EGRESS_MODE=allowlist"
 exit /b 0

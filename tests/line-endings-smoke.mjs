@@ -44,6 +44,14 @@ const lfFiles = [
   'nginx/dsh-ingress.conf',
   'docker-compose.keys.yml',
   'docker-compose.isolated.yml',
+  // 密钥管理面板：策略、进程和三个静态资源都从 ./bin 挂进容器，CRLF 会让 node 读到的
+  // 模板字符串和 CSS 里多出 \r，令牌比对也会跟着失配。
+  'bin/dsh-key-admin-policy.mjs',
+  'bin/dsh-key-admin.mjs',
+  'bin/dsh-key-admin-web/index.html',
+  'bin/dsh-key-admin-web/app.css',
+  'bin/dsh-key-admin-web/app.js',
+  'docker-compose.keys-admin.yml',
   'dsh.sh',
   'install.sh',
   'install.ps1',

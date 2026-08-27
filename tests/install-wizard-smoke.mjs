@@ -88,7 +88,7 @@ assert.match(nginx, /^user dsh;$/m)
 assert.match(nginx, /location = \/healthz/)
 assert.match(nginx, /healthz \{\s+auth_basic off/s)
 
-for (const action of ['install', 'configure', 'update', 'model-key', 'start', 'stop', 'restart', 'logs', 'status', 'delete']) {
+for (const action of ['install', 'configure', 'update', 'model-key', 'key-panel', 'start', 'stop', 'restart', 'logs', 'status', 'delete']) {
   assert.ok(installSh.includes(action), `install.sh missing ${action}`)
   assert.ok(installPs1.includes(action), `install.ps1 missing ${action}`)
 }
@@ -200,6 +200,10 @@ for (const [shellFlag, powershellParameter] of [
   ['--userns-preflight', '$UsernsPreflight'],
   ['--model-id', '$ModelId'],
   ['--no-model-settings-seed', '$NoModelSettingsSeed'],
+  ['--key-admin', '$KeyAdmin'],
+  ['--no-key-admin', '$NoKeyAdmin'],
+  ['--key-admin-bind', '$KeyAdminBind'],
+  ['--key-admin-port', '$KeyAdminPort'],
 ]) {
   assert.ok(installSh.includes(shellFlag), `install.sh missing ${shellFlag}`)
   assert.ok(installPs1.includes(powershellParameter), `install.ps1 missing ${powershellParameter}`)
@@ -220,9 +224,15 @@ for (const option of [
   '5) Gemini 原生（认证头 x-goog-api-key，端点 /v1beta/models）',
   '一行一个 name=value，回车结束。示例：user-agent=codex_cli_rs/0.101.0',
   // 模型 id 那一问决定 WebUI 的模型下拉里有什么，两边必须一字不差。
-  '    deepseek、openai、anthropic、google、nvidia 这类 DSH 内置目录里的上游可以直接回车，',
-  '    安装器会沿用目录里的整份模型清单；自建网关请至少填一个模型 id。',
+  '在 DSH 内置模型目录里，直接回车就沿用目录里的整份模型清单。',
+  '不在 DSH 内置模型目录里，必须自己列出模型 id，照上游文档原样写。',
+  '    例如：claude-opus-5-thinking 或 gpt-5.2,gemini-3-pro。',
+  '不在内置目录里，至少要填一个模型 id。',
   '模型 id（多个用逗号分隔）',
+  // 自建网关的 base_url 忘了版本段就是上游 404，提示也必须两边一致。
+  '不在内置默认表里，base_url 照上游文档原样填，注意带上版本段：',
+  '    OpenAI 兼容网关一般是 https://<域名>/v1，Anthropic 兼容的一般不带 /v1。',
+  '    这里填的是真实上游地址；DSH 容器那边填什么由安装器自己算。',
 ]) {
   assert.ok(installSh.includes(option), `install.sh 缺少形态问答：${option}`)
   assert.ok(installPs1.includes(option), `install.ps1 缺少形态问答：${option}`)
@@ -258,6 +268,12 @@ for (const file of ['bin/dsh-model-settings-policy.mjs', 'bin/seed-dsh-model-set
 }
 assert.ok(installSh.includes('seed_dsh_model_settings'), 'install.sh 必须调用写配置的那一步')
 assert.ok(installPs1.includes('Invoke-DshModelSettingsSeed'), 'install.ps1 必须调用写配置的那一步')
+// 借镜像里的 node 之前必须先算出镜像引用：model-key 动作没走过 obtain_dsh_image，
+// 空字符串交给 docker run 只会得到 invalid reference format。
+assert.match(installSh, /^node_tool_image\(\) \{$/m)
+assert.match(installPs1, /^function Get-NodeToolImage \{$/m)
+assert.ok(installSh.includes('seed_dsh_model_settings "$(node_tool_image)"'), 'install.sh 的 model-key 没走 node_tool_image')
+assert.ok(installPs1.includes('Invoke-DshModelSettingsSeed -Image (Get-NodeToolImage $envFile)'), 'install.ps1 的 model-key 没走 Get-NodeToolImage')
 // 写盘位置是 DSH 官方那两份文件，路径不能各写一套。
 for (const [label, source] of [['install.sh', installSh], ['install.ps1', installPs1]]) {
   assert.match(source, /data[\\/]dsh[\\/]settings\.yaml/, `${label} 必须指名 data/dsh/settings.yaml`)
@@ -341,11 +357,11 @@ assert.match(installPs1, /^function Read-BrokerUpstreams \{$/m)
 assert.match(installSh, /^print_broker_skipped_notice\(\) \{$/m)
 assert.match(installPs1, /^function Show-BrokerSkippedNotice \{$/m)
 // 补填动作绝不能重建 dsh：那会丢掉容器可写层里 apt 装的工具链。
-const shellModelKey = installSh.slice(installSh.indexOf('add_model_key() {'), installSh.indexOf('cleanup_pending_env() {'))
+const shellModelKey = installSh.slice(installSh.indexOf('add_model_key() {'), installSh.indexOf('manage_key_admin() {'))
 assert.ok(shellModelKey.includes('./dsh.sh start'), 'install.sh model-key must start the sidecar through dsh.sh')
 assert.ok(!shellModelKey.includes('force-recreate'), 'install.sh model-key must never recreate the dsh container')
 assert.ok(shellModelKey.includes('set_compose_env DSH_MODEL_BROKER on'), 'install.sh model-key must flip the switch in .env')
-const powershellModelKey = installPs1.slice(installPs1.indexOf("    'model-key' {"), installPs1.indexOf("    'update' {"))
+const powershellModelKey = installPs1.slice(installPs1.indexOf("    'model-key' {"), installPs1.indexOf("    'key-panel' {"))
 assert.ok(powershellModelKey.includes('.\\dsh.bat start'), 'install.ps1 model-key must start the sidecar through dsh.bat')
 assert.ok(!powershellModelKey.includes('force-recreate'), 'install.ps1 model-key must never recreate the dsh container')
 assert.ok(
@@ -355,6 +371,71 @@ assert.ok(
 for (const readme of [readmeZh, readmeEn]) {
   assert.ok(readme.includes('model-key'), 'README must document the model-key action')
 }
+
+// ---------------------------------------------------------------------------
+// 模型密钥管理面板（dsh-key-admin）：两个安装器的开关、问答与核验必须一致
+// ---------------------------------------------------------------------------
+assert.match(installSh, /^configure_key_admin\(\) \{$/m)
+assert.match(installPs1, /^function Resolve-KeyAdmin \{$/m)
+assert.match(installSh, /^write_key_admin_token\(\) \{$/m)
+assert.match(installPs1, /^function Write-KeyAdminToken \{$/m)
+assert.match(installSh, /^assert_key_admin\(\) \{$/m)
+assert.match(installPs1, /^function Assert-KeyAdmin \{$/m)
+assert.match(installSh, /^ensure_broker_config_placeholder\(\) \{$/m)
+assert.match(installPs1, /^function Initialize-BrokerConfigPlaceholder \{$/m)
+// 面板的问答文案是用户唯一能看到的策略说明，两边必须一字不差。
+for (const line of [
+  '模型密钥管理面板：',
+  '    浏览器里填密钥、按上游拉一次模型列表、设固定请求头（originator / version /',
+  '    User-Agent 这些），保存后直接写进 DSH 的模型配置，不用再回终端。',
+  '启用模型密钥管理面板',
+  '终端里没填密钥。还有一种填法：',
+  '    启用模型密钥管理面板，装完在浏览器里填密钥、按上游拉一次模型列表、设固定请求头，',
+  '    保存后直接写进 DSH 的模型配置。面板是独立容器，dsh 容器连不到它。',
+  '现在不填密钥，装完在密钥管理面板里填',
+]) {
+  assert.ok(installSh.includes(line), `install.sh 缺少面板问答：${line}`)
+  assert.ok(installPs1.includes(line), `install.ps1 缺少面板问答：${line}`)
+}
+// 叠加顺序：keys.yml → keys-admin.yml → isolated.yml。面板服务复用 broker 的网络定义，
+// 反过来叠加的话 dsh-admin 网络还不存在。
+assert.ok(
+  installSh.indexOf('COMPOSE_ARGS+=(-f docker-compose.keys.yml)') < installSh.indexOf('COMPOSE_ARGS+=(-f docker-compose.keys-admin.yml)')
+    && installSh.indexOf('COMPOSE_ARGS+=(-f docker-compose.keys-admin.yml)') < installSh.indexOf('COMPOSE_ARGS+=(-f docker-compose.isolated.yml)'),
+  'install.sh must add the key-admin overlay between the keys and isolated overlays',
+)
+assert.ok(
+  installPs1.indexOf("@('-f','docker-compose.keys.yml')") < installPs1.indexOf("@('-f','docker-compose.keys-admin.yml')")
+    && installPs1.indexOf("@('-f','docker-compose.keys-admin.yml')") < installPs1.indexOf("@('-f','docker-compose.isolated.yml')"),
+  'install.ps1 must add the key-admin overlay between the keys and isolated overlays',
+)
+// 面板持有全部真实密钥，所以"dsh 容器连不到它"是必须实测的前提，不能只写在文档里。
+for (const [label, source] of [['install.sh', installSh], ['install.ps1', installPs1]]) {
+  assert.ok(source.includes('8090/healthz'), `${label} must probe the panel health endpoint`)
+  assert.ok(source.includes("net.connect(8090, 'dsh-key-admin')"), `${label} must prove dsh cannot reach the panel`)
+  assert.ok(source.includes('dsh-key-admin'), `${label} delete flow must know about dsh-key-admin`)
+}
+// 令牌不进 .env，只落 data/broker/admin.token。
+assert.match(installSh, /data\/broker\/admin\.token/)
+assert.match(installPs1, /data\\broker\\admin\.token/)
+assert.doesNotMatch(installSh, /set_compose_env \S*ADMIN_TOKEN/)
+assert.doesNotMatch(installPs1, /Set-ComposeEnvValue [^\n]*'DSH_KEY_ADMIN_TOKEN'/)
+assert.doesNotMatch(envExample, /ADMIN_TOKEN/)
+assert.match(envExample, /^DSH_KEY_ADMIN=off$/m)
+assert.match(envExample, /^DSH_KEY_ADMIN_BIND_HOST=127\.0\.0\.1$/m)
+assert.match(envExample, /^DSH_KEY_ADMIN_HOST_PORT=3082$/m)
+// 补填面板同样不许重建 dsh。
+const shellKeyPanel = installSh.slice(installSh.indexOf('manage_key_admin() {'), installSh.indexOf('cleanup_pending_env() {'))
+assert.ok(shellKeyPanel.includes('./dsh.sh start'), 'install.sh key-panel must start the sidecar through dsh.sh')
+assert.ok(!shellKeyPanel.includes('force-recreate'), 'install.sh key-panel must never recreate the dsh container')
+const powershellKeyPanel = installPs1.slice(installPs1.indexOf("    'key-panel' {"), installPs1.indexOf("    'update' {"))
+assert.ok(powershellKeyPanel.includes('.\\dsh.bat start'), 'install.ps1 key-panel must start the sidecar through dsh.bat')
+assert.ok(!powershellKeyPanel.includes('force-recreate'), 'install.ps1 key-panel must never recreate the dsh container')
+// 运行脚本两边都要按 .env 叠加面板，并在 status 里报告它。
+assert.match(dshSh, /COMPOSE_ARGS\+=\(-f docker-compose\.keys-admin\.yml\)/)
+assert.match(dshSh, /report_sidecar dsh-key-admin/)
+assert.match(dshBat, /-f docker-compose\.keys-admin\.yml/)
+assert.match(dshBat, /report_sidecar dsh-key-admin/)
 
 // 叠加文件在老部署目录里不存在，删除流程必须容忍。
 assert.match(installSh, /\[ -f docker-compose\.keys\.yml \] && compose_files\+=\( -f docker-compose\.keys\.yml \)/)

@@ -78,7 +78,10 @@ function loadConfig({ initial = false } = {}) {
 
   let next
   try {
-    next = parseBrokerConfig(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    // allowEmpty：密钥管理面板可以在容器起来之后才填第一把密钥，所以"upstreams 是
+    // 空数组"是一个合法状态，不该让 broker 崩在启动上。没有上游时下面每个 /u/
+    // 请求都会拿到 503。
+    next = parseBrokerConfig(fs.readFileSync(CONFIG_PATH, 'utf8'), { allowEmpty: true })
   } catch (error) {
     // 轮换时写坏了配置不应该让代理跟着崩：保留旧配置，只报错。
     log({ event: 'config-error', message: error.message })
@@ -290,6 +293,11 @@ const server = http.createServer((request, response) => {
 
   if (!config) {
     deny(response, 503, '密钥代理还没有可用配置', { path: pathname })
+    request.resume()
+    return
+  }
+  if (config.upstreams.size === 0) {
+    deny(response, 503, '密钥代理里还没有任何上游：请在密钥管理面板或 ./install.sh model-key 里填一把模型密钥', { path: pathname })
     request.resume()
     return
   }

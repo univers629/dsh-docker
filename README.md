@@ -67,14 +67,14 @@ DSH_ROOT_PASSWORD='至少12位的密码' bash install.sh install --access local 
 ## 日常管理
 
 ```text
-Linux:   ./dsh.sh  [start|update|stop|restart|logs [服务]|status|shell|root-shell|verify|keys|egress|remove]
-Windows: .\dsh.bat [start|update|stop|restart|logs [服务]|status|shell|root-shell|verify|keys|egress|remove]
+Linux:   ./dsh.sh  [start|update|stop|restart|logs [服务]|status|shell|root-shell|verify|keys|key-panel|egress|remove]
+Windows: .\dsh.bat [start|update|stop|restart|logs [服务]|status|shell|root-shell|verify|keys|key-panel|egress|remove]
 ```
 
 - `start` 只在容器不存在时准备镜像，之后复用同一个容器；`stop`、`restart` 与容器内的 `apt install` 都保留可写层。
 - `update` 只在容器内重装 DSH 的 npm 包，不是项目或镜像更新；`remove` 会删除容器可写层，绑定挂载保留。
 - `shell` 进入非特权 `dsh` 账户，`root-shell` 是宿主机侧的管理通道（容器内部无法以此提权）。
-- `verify` 在容器内运行 23 项加固自检，`keys` 与 `egress` 打印密钥代理和出站代理的状态。
+- `verify` 在容器内运行 24 项加固自检，`keys` 与 `egress` 打印密钥代理和出站代理的状态，`key-panel` 打印密钥管理面板的地址与访问令牌。
 - 健康检查同时探测 Nginx 入口与 DSH 自身端口，DSH 崩溃循环时容器状态为 `unhealthy`。
 
 彻底清空本项目：在工程目录运行菜单第 8 项，或执行 `./install.sh delete`（Windows：`powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`）。删除按精确名称清理本项目的容器、镜像、挂载、网络和工程目录，不使用子串匹配，也不会删除外部共享网络。
@@ -131,20 +131,24 @@ flowchart LR
     end
 
     broker["dsh-key-broker 容器<br/>read_only · 无端口发布"]
+    admin["dsh-key-admin 容器<br/>密钥管理面板 · 令牌鉴权"]
     egress["dsh-egress 容器<br/>域名白名单正向代理"]
     upstream["模型上游 API"]
     internet["公网"]
 
     client -->|3080| nginx --> agent
+    client -->|3082 回环 + 令牌| admin
     agent -->|占位密钥| broker -->|注入真实密钥| upstream
     agent -->|allowlist 模式| egress --> internet
     agent -.->|unix socket| helper
     keys -.->|只读挂载| broker
+    keys -.->|读写| admin
     hashes -.->|只读挂载| helper
     mounts -.->|绑定挂载| agent
+    agent x-- 不同网络，不可达 --x admin
 ```
 
-真实密钥只在宿主文件与 `dsh-key-broker` 容器之间流动，两个容器之间只有 HTTP，没有共享卷，因此 `dsh` 容器内不存在密钥字面值。
+真实密钥只在宿主文件、`dsh-key-broker` 与 `dsh-key-admin` 之间流动，这三者和 `dsh` 容器之间没有共享卷；面板与 `dsh` 也不在同一个 Docker 网络上，因此 `dsh` 容器内既没有密钥字面值，也打不到持有密钥的面板。
 
 持久化目录：
 
@@ -191,9 +195,21 @@ Debian 系统目录留在容器可写层，不使用 overlay 覆盖，因此同�
 - 安装时配置：向导逐个输入上游密钥（不回显），并逐个询问 API 形态（OpenAI 兼容 / Responses / Chat Completions / Anthropic Messages / Gemini 原生）、固定请求头与模型 id；也可以用 `--model-keys-file` 指向一份 0600 的 `keys.json`。
 - 非交互指定形态与请求头：`--model-api NAME=PROFILE`、`--model-header NAME=HEADER=VALUE`（可重复），例如 Codex 客户端需要的 `originator` / `version` / `User-Agent`。形态决定认证头、放行端点，以及写进 DSH 的协议，详见 [docs/security.md](docs/security.md)。
 - 模型清单：上游名命中 DSH 内置目录（`deepseek`、`openai`、`anthropic`、`google`、`nvidia` 等）时自动沿用目录里的整份清单；自建网关要用 `--model-id NAME=ID[,ID]` 或在向导里给出模型 id。`--no-model-settings-seed` 可以跳过写配置，改为在 WebUI 里自己加。
+- `deepseek` 上游配置的是 DSH 自带的 DeepSeek 供应商（`llm-deepseek`），模型页上不会多出一行；旧版安装器写下的重复 `llm-pi-ai.providers.deepseek` 会在下次写配置时自动删掉。
+- base_url：填真实上游地址，带上版本段（OpenAI 兼容网关一般是 `https://<域名>/v1`，Anthropic 兼容的一般不带）。DSH 侧填什么由安装器自己算，两边都补一次会变成 `/v1/v1/...`。内置目录里的上游直接回车用默认值即可。
 - 装完后补填：`./install.sh model-key`（Windows：`.\install.ps1 -DshAction model-key`），只新增代理容器，不重建 `dsh`。
 - 查看状态：`./dsh.sh keys` 输出上游、配额、今日用量与放行/拒绝计数，不输出密钥。
-- 密钥本身不能改到 WebUI 里填：WebUI 运行在 DSH 容器内，填入的密钥就落在容器内，容器内的 Agent 可以直接读取文件。跳过密钥代理后 WebUI 直填仍然可用，代价是失去这一层保护。
+
+### 密钥管理面板
+
+不想在终端里填密钥就用管理面板：浏览器里增删上游、填密钥、选 API 形态、写模型 id、设固定请求头，还能按上游拉一次模型列表；保存后同时写 `data/broker/keys.json` 与 DSH 的 `settings.yaml`、`.credentials.yaml`，两边都是热加载，不用重启任何容器。
+
+- 开启：新装向导会问；已有部署执行 `./install.sh key-panel`（Windows：`.\install.ps1 -DshAction key-panel`），它只新增 `dsh-key-admin` 容器，不重建 `dsh`。关闭用 `--no-key-admin`。
+- 访问：默认 `http://127.0.0.1:3082/`，访问令牌在 `data/broker/admin.token`（0600）。远程用 SSH 隧道：`ssh -N -L 3082:127.0.0.1:3082 <用户名@宿主地址>`。地址与端口由 `DSH_KEY_ADMIN_BIND_HOST`、`DSH_KEY_ADMIN_HOST_PORT` 决定。
+- 面板刻意不做进 DSH 的 WebUI：那个页面运行在 DSH 容器内，填进去的密钥就落在 Agent 能读的地方。面板作为独立容器只接入 `dsh-admin` 网络，`dsh` 容器不在其上；安装器会从 `dsh` 容器内实测这条连接必须失败，否则安装失败。
+- 令牌连续输错会触发递增延迟与锁定；面板容器自身 `read_only`、`cap_drop: ALL`、以 1000:1000 运行，只能读写 `data/broker` 与 `data/dsh`。
+- 空的 `keys.json` 是合法状态：安装时可以先不填密钥，这期间模型请求返回 503，等在面板里填完第一把密钥即可。
+- 跳过密钥代理和面板时，WebUI 直填密钥仍然可用，代价是失去这一层保护。
 
 ## 出站模式
 
