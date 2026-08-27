@@ -7,10 +7,10 @@ import { spawnSync } from 'node:child_process'
 import { parseBrokerConfig } from '../bin/dsh-key-broker-policy.mjs'
 
 const read = async (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
-const [compose, dockerfile, entrypoint, authConfig, nginx, installSh, installPs1, envExample, dshSh, dshBat, readmeZh, readmeEn, isolatedCompose] = await Promise.all([
+const [compose, dockerfile, entrypoint, authConfig, nginx, installSh, installPs1, envExample, dshSh, dshBat, readmeZh, readmeEn, isolatedCompose, keyAdminCompose] = await Promise.all([
   'docker-compose.yml', 'Dockerfile', 'bin/entrypoint.sh', 'bin/configure-nginx-auth', 'nginx/dsh-nginx.conf',
   'install.sh', 'install.ps1', '.env.example', 'dsh.sh', 'dsh.bat', 'README.md', 'README.en.md',
-  'docker-compose.isolated.yml',
+  'docker-compose.isolated.yml', 'docker-compose.keys-admin.yml',
 ].map(read))
 
 assert.match(compose, /DSH_ACCESS_MODE: "\$\{DSH_ACCESS_MODE:-local\}"/)
@@ -424,6 +424,18 @@ assert.doesNotMatch(envExample, /ADMIN_TOKEN/)
 assert.match(envExample, /^DSH_KEY_ADMIN=off$/m)
 assert.match(envExample, /^DSH_KEY_ADMIN_BIND_HOST=127\.0\.0\.1$/m)
 assert.match(envExample, /^DSH_KEY_ADMIN_HOST_PORT=3082$/m)
+// 占位密钥两边必须一字不差：面板每次都把代理托管上游的引用写成这个值，两边不一致
+// 会让每次保存都误报"这个引用里存着真实密钥"，还会反复改写 .credentials.yaml。
+const placeholderKey = /MODEL_BROKER_PLACEHOLDER_KEY="([^"]+)"/.exec(installSh)?.[1] ?? ''
+assert.ok(placeholderKey.length > 0, 'install.sh must define MODEL_BROKER_PLACEHOLDER_KEY')
+assert.ok(
+  keyAdminCompose.includes('DSH_KEY_ADMIN_PLACEHOLDER: "' + placeholderKey + '"'),
+  'docker-compose.keys-admin.yml must pin the same placeholder key as install.sh',
+)
+assert.ok(
+  installPs1.includes("$ModelBrokerPlaceholderKey = '" + placeholderKey + "'"),
+  'install.ps1 must use the same placeholder key as install.sh',
+)
 // 补填面板同样不许重建 dsh。
 const shellKeyPanel = installSh.slice(installSh.indexOf('manage_key_admin() {'), installSh.indexOf('cleanup_pending_env() {'))
 assert.ok(shellKeyPanel.includes('./dsh.sh start'), 'install.sh key-panel must start the sidecar through dsh.sh')

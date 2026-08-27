@@ -185,13 +185,13 @@ async function runSeed(payload) {
       providers: existingProviders && yaml.isMap(existingProviders)
         ? existingProviders.toJSON?.() ?? {}
         : {},
-      // 已经有值的引用不碰：用户自己在 WebUI 里填过真实密钥的话，占位串盖回去
-      // 就等于把他的配置弄坏。
-      refs: existingRefs && yaml.isMap(existingRefs)
-        ? existingRefs.items
-          .filter((item) => String(item.value?.value ?? item.value ?? '').length > 0)
-          .map((item) => String(item.key))
-        : [],
+      // 传引用的当前值：策略层要能分辨"已经是占位串"和"这里存着一把真实密钥"。
+      // 后者会被换回占位串（代理托管的上游在容器里不需要真密钥），并在摘要里点出来。
+      refValues: existingRefs && yaml.isMap(existingRefs)
+        ? Object.fromEntries(existingRefs.items.map(
+          (item) => [String(item.key), String(item.value?.value ?? item.value ?? '')],
+        ))
+        : {},
       defaultModel: settings.getIn(['agent-default-model', 'model']) !== undefined,
     },
   })
@@ -249,6 +249,7 @@ async function runSeed(payload) {
     skipped: plan.skipped,
     defaultModel: plan.defaultModel,
     credentialRefs: Object.keys(plan.refs),
+    reclaimedRefs: [...plan.reclaimed],
     catalogAvailable: Object.keys(catalog).length > 0,
     // 空数组表示这次没能加载 llm-pi-ai，validationFailure 为空串也不代表校验过了。
     supportedProtocols: validation.protocols,
@@ -285,6 +286,12 @@ function applyToHome(home, payload, result) {
   }
   for (const path of result.removed) {
     process.stdout.write('    已删除旧版安装器留下的重复配置：' + path + '\n')
+  }
+  // 走 stdout 而不是 stderr：这条提醒必须出现在面板的输出框里，用户正是在那里保存的。
+  for (const ref of result.reclaimedRefs) {
+    process.stdout.write('    ' + ref + ' 原本存的不是占位串（像是一把真实密钥），已换回 ' +
+      '占位串：这个上游的密钥由代理注入，容器里留一把真的只是泄漏。\n')
+    process.stdout.write('      那把密钥进过 dsh 容器，Agent 能读到，建议到上游控制台轮换。\n')
   }
   if (result.defaultModel !== null) {
     process.stdout.write('    默认模型：' + result.defaultModel.provider + ' / ' + result.defaultModel.model + '\n')

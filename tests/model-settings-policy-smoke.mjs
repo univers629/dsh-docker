@@ -164,17 +164,30 @@ const handWritten = planSeed({
 assert.deepEqual(handWritten.removals, [])
 
 // ---------------------------------------------------------------------------
-// 幂等与"不覆盖用户"：已有真实密钥的引用不写占位串，已选过的默认模型不改回来。
+// 幂等：已经是占位串的引用照原样写回（文本不变），已选过的默认模型不改回来。
 // ---------------------------------------------------------------------------
 const again = planSeed({
   upstreams: [{ name: 'deepseek', shape: 'any', models: [] }],
   brokerBase: 'http://dsh-key-broker:8080',
   placeholder: 'dsh-broker-placeholder',
   catalog,
-  existing: { refs: ['DEEPSEEK_API_KEY'], defaultModel: true },
+  existing: { refValues: { DEEPSEEK_API_KEY: 'dsh-broker-placeholder' }, defaultModel: true },
 })
-assert.deepEqual(again.refs, {})
+assert.deepEqual(again.refs, { DEEPSEEK_API_KEY: 'dsh-broker-placeholder' })
+assert.deepEqual(again.reclaimed, [])
 assert.equal(again.defaultModel, null)
+
+// 引用里存着一把真实密钥：代理托管这个上游，容器里那把只是泄漏，必须换回占位串，
+// 并且要被点出来（摘要靠它提醒用户轮换）。
+const reclaim = planSeed({
+  upstreams: [{ name: 'deepseek', shape: 'any', models: [] }],
+  brokerBase: 'http://dsh-key-broker:8080',
+  placeholder: 'dsh-broker-placeholder',
+  catalog,
+  existing: { refValues: { DEEPSEEK_API_KEY: 'sk-real-user-key' }, defaultModel: true },
+})
+assert.deepEqual(reclaim.refs, { DEEPSEEK_API_KEY: 'dsh-broker-placeholder' })
+assert.deepEqual(reclaim.reclaimed, ['DEEPSEEK_API_KEY'])
 // 部署相关的两项照样重算：密钥代理换了地址，旧 baseURL 会让请求绕开代理。
 assert.equal(again.entries[0].always.baseURL, 'http://dsh-key-broker:8080/u/deepseek')
 
