@@ -98,7 +98,7 @@ const rejects = [
   { input: { name: 'gw', key: 'k', baseUrl: 'https://user:pw@api.example.com' }, hint: '凭据' },
   { input: { name: 'gw', key: '', baseUrl: 'https://api.example.com' }, hint: '空密钥' },
   { input: { name: 'gw', key: 'k', baseUrl: 'https://api.example.com', shape: 'nope' }, hint: '形态' },
-  { input: { name: 'gw', key: 'k', baseUrl: 'https://api.example.com', models: 'bad id!' }, hint: '模型 id' },
+  { input: { name: 'gw', key: 'k', baseUrl: 'https://api.example.com', models: 'bad"id' }, hint: '模型 id' },
 ]
 for (const entry of rejects) {
   assert.throws(() => normalizeUpstreamInput(entry.input), AdminInputError, '应当拒绝：' + entry.hint)
@@ -124,6 +124,13 @@ assert.deepEqual(
 )
 
 assert.deepEqual(normalizeModelIds('a, b , a\nc'), ['a', 'b', 'c'])
+// 转卖网关爱给模型贴花名，而官方模板要求原样发这个 id：除了分隔符、引号、反斜杠和
+// 控制字符，其余都要放行。DSH 那边 id 就是 z.string()，本来没有字符集限制。
+assert.deepEqual(normalizeModelIds('[蝶恋花]deepseek-v4-flash①'), ['[蝶恋花]deepseek-v4-flash①'])
+assert.deepEqual(extractModelIds({ data: [{ id: '[蝶恋花]deepseek-v4-flash①' }] }), ['[蝶恋花]deepseek-v4-flash①'])
+// Gemini 原生协议把 id 拼进 URL 路径，所以这一种形态仍然只收 URL 安全的字符。
+assert.throws(() => normalizeModelIds('[蝶恋花]gemini-3-pro', 'gemini'), AdminInputError)
+assert.deepEqual(extractModelIds({ models: [{ name: 'models/[x]gemini' }] }, 'gemini'), [])
 assert.equal(normalizeName(' DeepSeek '), 'deepseek')
 
 // --- keys.json 往返 ---
