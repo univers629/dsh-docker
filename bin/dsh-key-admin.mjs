@@ -18,13 +18,11 @@ import { spawn } from 'node:child_process'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
-import https from 'node:https'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-import { createGuardedLookup } from './dsh-egress-policy.mjs'
-import { redactSecrets } from './dsh-key-broker-policy.mjs'
+import { fetchUpstreamModels } from './dsh-upstream-models.mjs'
 import {
   DEFAULT_LOCKOUT,
   attemptDelayMs,
@@ -38,10 +36,9 @@ import {
   API_SHAPES,
   DEFAULT_BASE_URLS,
   defaultShapeOf,
-  extractModelIds,
   findUpstream,
+  looksLikeCatalogRoute,
   mergeUpstream,
-  modelsRequestCandidates,
   normalizeName,
   normalizeUpstreamInput,
   readDocument,
@@ -65,10 +62,6 @@ const PLACEHOLDER = process.env.DSH_KEY_ADMIN_PLACEHOLDER ?? 'dsh-broker-placeho
 const UPSTREAM_TIMEOUT_MS = Number(process.env.DSH_KEY_ADMIN_UPSTREAM_TIMEOUT_MS ?? 20_000)
 const SEED_TIMEOUT_MS = Number(process.env.DSH_KEY_ADMIN_SEED_TIMEOUT_MS ?? 120_000)
 const BODY_LIMIT = 256 * 1024
-const MODELS_BODY_LIMIT = 4 * 1024 * 1024
-// 上游主机名是配置里的合法域名，但解析结果由 DNS 说了算：复用出站代理那套判定，
-// 只允许公网单播地址，防止"合法域名解析到 169.254.169.254"这种内网探测。
-const guardedLookup = createGuardedLookup()
 
 const STATIC_FILES = new Map([
   ['/', { file: 'index.html', type: 'text/html; charset=utf-8' }],
@@ -300,77 +293,14 @@ function runSeed(document) {
   })
 }
 
-/** 拉一次上游的模型列表。密钥只在这个进程的内存里用，不进日志、不回给浏览器。 */
-function fetchJson(candidate, secrets) {
-  return new Promise((resolve) => {
-    let url
-    try {
-      url = new URL(candidate.url)
-    } catch {
-      resolve({ ok: false, message: '地址不合法：' + candidate.url })
-      return
-    }
-    const request = https.request(
-      {
-        host: url.hostname,
-        port: url.port === '' ? 443 : Number(url.port),
-        method: 'GET',
-        path: url.pathname + url.search,
-        headers: { ...candidate.headers, host: url.hostname },
-        servername: url.hostname,
-        lookup: guardedLookup,
-      },
-      (upstream) => {
-        const chunks = []
-        let size = 0
-        upstream.on('data', (chunk) => {
-          size += chunk.length
-          if (size <= MODELS_BODY_LIMIT) chunks.push(chunk)
-        })
-        upstream.on('end', () => {
-          const status = upstream.statusCode ?? 0
-          const text = redactSecrets(Buffer.concat(chunks).toString('utf8'), secrets)
-          if (status !== 200) {
-            resolve({ ok: false, message: 'HTTP ' + status + ' ' + text.replace(/\s+/g, ' ').slice(0, 200) })
-            return
-          }
-          try {
-            resolve({ ok: true, payload: JSON.parse(text) })
-          } catch {
-            resolve({ ok: false, message: '200 但响应不是 JSON' })
-          }
-        })
-        upstream.on('error', (error) => resolve({ ok: false, message: redactSecrets(error.message, secrets) }))
-      },
-    )
-    request.setTimeout(UPSTREAM_TIMEOUT_MS, () => request.destroy(new Error('上游超时')))
-    request.on('error', (error) => resolve({ ok: false, message: redactSecrets(error.message, secrets) }))
-    request.end()
-  })
-}
-
 async function fetchModels(record) {
-  const secrets = [record.key]
-  const tried = []
-  for (const candidate of modelsRequestCandidates(record)) {
-    const result = await fetchJson(candidate, secrets)
-    if (!result.ok) {
-      tried.push(candidate.url + ' -> ' + result.message)
-      continue
-    }
-    const models = extractModelIds(result.payload)
-    if (models.length === 0) {
-      tried.push(candidate.url + ' -> 200，但响应里没有可用的模型 id')
-      continue
-    }
-    log({ event: 'models', upstream: record.name, endpoint: candidate.url, count: models.length })
-    return { ok: true, models, endpoint: candidate.url, tried }
+  const found = await fetchUpstreamModels(record, { timeoutMs: UPSTREAM_TIMEOUT_MS })
+  if (found.ok) {
+    log({ event: 'models', upstream: record.name, endpoint: found.endpoint, count: found.models.length })
+    return found
   }
   // 拉不到不是错误路径的终点：很多自建网关根本不实现 /models，手写模型 id 一样能用。
-  throw new AdminInputError(
-    '拉不到模型列表，直接在下面手写模型 id 也可以。试过的地址：' + tried.join('；'),
-    502,
-  )
+  throw new AdminInputError('拉不到模型列表，直接在下面手写模型 id 也可以。' + found.message, 502)
 }
 
 function stateResponse() {
@@ -391,13 +321,42 @@ function stateResponse() {
 
 const RELOAD_NOTE = 'dsh-key-broker 每 5 秒按修改时间热加载 keys.json，DSH 的 settings.yaml 也是热加载：两边都不用重启容器。'
 
+/**
+ * 目录外的网关一个模型 id 都没有时，替用户去上游问一次。
+ *
+ * 这不是省一次点击：DSH 对目录外的路由要求至少一个模型，缺了就拒绝整条路由，而被拒绝的
+ * 结果是"页面上不多出任何卡片、也不报错"。面板本来就持有密钥、也本来就有拉取按钮，
+ * 所以保存时顺手拉一次，比让用户先猜到要点哪个按钮现实得多。拉不到就照原样保存，
+ * 让 seed 的警告去说明为什么 DSH 那边还没这条供应商。
+ */
+async function withDiscoveredModels(record) {
+  if (record.models.length > 0 || looksLikeCatalogRoute(record.name)) return { record, discovery: '' }
+  try {
+    const found = await fetchModels(record)
+    const models = found.models.slice(0, 200)
+    return {
+      record: { ...record, models },
+      discovery: '已从 ' + found.endpoint + ' 拉到 ' + models.length + ' 个模型 id（目录外的上游必须有模型清单，'
+        + '所以保存时自动拉了一次）。不想要这么多就在模型清单里删掉再保存。',
+    }
+  } catch (error) {
+    return {
+      record,
+      discovery: '这个上游不在 DSH 内置目录里，而模型清单是空的，自动拉取也没成功：'
+        + (error instanceof AdminInputError ? error.message : String(error && error.message))
+        + ' 请在模型清单里手写至少一个模型 id 再保存，否则 DSH 不会多出这条供应商。',
+    }
+  }
+}
+
 async function saveUpstream(body) {
   const before = readDocument(readConfigText())
   const name = normalizeName(body?.name)
   const rename = typeof body?.rename === 'string' && body.rename.trim() !== '' ? normalizeName(body.rename) : ''
   // 改名时密钥要从旧那条上继承，否则"只改个名字"会被当成"新上游没填密钥"。
   const existing = findUpstream(before, name) ?? (rename !== '' ? findUpstream(before, rename) : undefined)
-  const record = normalizeUpstreamInput(body, existing)
+  const discovered = await withDiscoveredModels(normalizeUpstreamInput(body, existing))
+  const record = discovered.record
   let next = mergeUpstream(before, toBrokerEntry(record))
   const renamed = rename !== '' && rename !== record.name && findUpstream(next, rename) !== undefined
   if (renamed) next = removeUpstream(next, rename)
@@ -405,8 +364,9 @@ async function saveUpstream(body) {
   log({ event: 'save', upstream: record.name, shape: record.shape, models: record.models.length, renamedFrom: renamed ? rename : '' })
   const seed = await runSeed(next)
   const notes = [RELOAD_NOTE]
+  if (discovered.discovery !== '') notes.push(discovered.discovery)
   if (renamed) notes.push('上游 ' + rename + ' 已被改名成 ' + record.name + '；DSH 侧那条旧供应商要自己在 WebUI 里删。')
-  return { ok: true, name: record.name, brokerReload: notes.join('\n'), seed }
+  return { ok: true, name: record.name, models: record.models, brokerReload: notes.join('\n'), seed }
 }
 
 async function deleteUpstreamHandler(body) {

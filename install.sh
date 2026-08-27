@@ -843,11 +843,15 @@ json_string() {
   printf '"%s"' "$(json_escape "$1")"
 }
 
+# 上游名字同时是 settings.yaml 里的路由键和凭据引用名的词干，所以规则不能比 DSH
+# 自己宽：官方「添加自定义提供方」用的是 /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/——首字符必须是
+# 小写字母（凭据引用名是 POSIX 标识符，不能以数字开头），分隔符只有单个短横线，末尾
+# 不能是短横线。放行 b_ai、4o 之类的名字，只会写出一条用户在官方页面上改不了的路由。
 validate_upstream_name() {
   local name="$1"
   case "$name" in
-    ''|*[!a-z0-9_-]*)
-      echo "[错误] 上游名字只允许小写字母、数字、下划线和短横线：$name" >&2
+    ''|[!a-z]*|*[!a-z0-9-]*|*-|*--*)
+      echo "[错误] 上游名字要以小写字母开头，之后只能是小写字母、数字和单个短横线：$name" >&2
       return 1
       ;;
   esac
@@ -1046,6 +1050,18 @@ broker_upstream_models() {
   printf '%s' ''
 }
 
+# 把自动问到的模型清单回填进数组。名字对不上就什么都不做（上游可能已经被跳过了）。
+set_broker_models() {
+  local wanted="$1" value="$2" index=0
+  while [ "$index" -lt "${#BROKER_NAMES[@]}" ]; do
+    if [ "${BROKER_NAMES[$index]}" = "$wanted" ]; then
+      BROKER_MODELS[$index]="$value"
+      return 0
+    fi
+    index=$((index + 1))
+  done
+}
+
 # 上游名字不是秘密，可以进摘要和日志；密钥永远不进。
 broker_upstream_names() {
   local index=0 names=""
@@ -1097,6 +1113,10 @@ broker_upstreams_json() {
       extras="${extras:+$extras, }$(json_string "${extra%%=*}"): $(json_string "${extra#*=}")"
     done
     [ -z "$extras" ] || entry="$entry, \"extraHeaders\": {$extras}"
+    # dsh 这个字段 broker 自己会忽略（它的解析器丢掉未知字段），存的是"DSH 侧要怎么填"：
+    # 形态和模型清单。不写的话密钥管理面板打开这条上游时看到的是空清单，用户会以为
+    # 安装时填的东西丢了，一保存还会把已经问到的模型清单覆盖掉。
+    entry="$entry, \"dsh\": {\"api\": $(json_string "$profile"), \"models\": $(broker_models_json "${BROKER_MODELS[$index]}")}"
     [ "${BROKER_RPM[$index]}" = 0 ] || entry="$entry, \"requestsPerMinute\": ${BROKER_RPM[$index]}"
     [ "${BROKER_DAILY[$index]}" = 0 ] || entry="$entry, \"dailyRequestBudget\": ${BROKER_DAILY[$index]}"
     entry="$entry}"
@@ -1150,6 +1170,60 @@ merge_broker_config() {
     image="$(node_tool_image)"
     printf '%s' "$payload" | DOCKER run --rm -i --entrypoint node "$image" -e "$BROKER_MERGE_SCRIPT"
   fi
+}
+
+# 替"DSH 内置目录之外的上游"向上游问一次模型清单。
+#
+# 这一步不是省一次输入：DSH 对目录外的路由要求至少一个模型 id，缺了就拒绝整条路由，
+# 而拒绝的表现是 WebUI 的模型页不多出卡片、也不报任何错。向导以前靠追问用户手写模型
+# id 来避免它，但那是把上游文档的活推给了用户，跳过一次就装出一个"填了密钥却选不到
+# 模型"的部署。密钥这时就在手上，直接问上游最省事；问不出来才提示手动补。
+#
+# 密钥全程走 stdin，不进任何进程的命令行。宿主有 node 就用宿主的，没有就借镜像里那个
+# （和 merge_broker_config 同一个理由：绝不让密钥流经 dsh 容器）。
+discover_broker_models() {
+  local image="$1" index=0 name payload upstreams="" result kind value count
+  [ "${#BROKER_NAMES[@]}" -gt 0 ] || return 0
+  if [ ! -f bin/discover-upstream-models.mjs ]; then
+    return 0
+  fi
+  while [ "$index" -lt "${#BROKER_NAMES[@]}" ]; do
+    name="${BROKER_NAMES[$index]}"
+    if [ -z "${BROKER_MODELS[$index]}" ] && ! model_default_base_url "$name" >/dev/null 2>&1; then
+      upstreams="${upstreams:+$upstreams, }{\"name\": $(json_string "$name"), \"baseUrl\": $(json_string "${BROKER_BASE_URLS[$index]}"), \"key\": $(json_string "${BROKER_KEYS[$index]}"), \"shape\": $(json_string "${BROKER_PROFILES[$index]}")}"
+    fi
+    index=$((index + 1))
+  done
+  [ -n "$upstreams" ] || return 0
+  echo "==> 这些上游不在 DSH 内置模型目录里，正在向上游问它们的模型清单..."
+  payload="$(printf '{"upstreams": [%s]}' "$upstreams")"
+  if command -v node >/dev/null 2>&1; then
+    result="$(printf '%s' "$payload" | node bin/discover-upstream-models.mjs 2>/dev/null || true)"
+  else
+    [ -n "$image" ] || image="$(node_tool_image)"
+    result="$(printf '%s' "$payload" | DOCKER run --rm -i \
+      -v "$(pwd)/bin:/dsh-bin:ro" --entrypoint node "$image" \
+      /dsh-bin/discover-upstream-models.mjs 2>/dev/null || true)"
+  fi
+  payload=""
+  while IFS="$(printf '\t')" read -r kind name value; do
+    case "$kind" in
+      models)
+        [ -n "$value" ] || continue
+        set_broker_models "$name" "$value"
+        count="$(printf '%s' "$value" | tr ',' '\n' | grep -c .)"
+        echo "    $name：问到 $count 个模型 id，已写进 DSH 的模型清单。"
+        ;;
+      failed)
+        echo "[警告] 上游 $name 的模型清单问不出来：$value" >&2
+        echo "       DSH 要求内置目录之外的上游至少有一个模型 id，所以它暂时不会出现在" >&2
+        echo "       「设置 → 模型」里。装完在密钥管理面板的\"模型清单\"里手写一个再保存即可。" >&2
+        ;;
+    esac
+  done <<EOF
+$result
+EOF
+  result=""
 }
 
 # --no-model-broker 必须真的把密钥清掉：只翻开关、把文件留在盘上，等于密钥还在。
@@ -1482,53 +1556,27 @@ apply_model_key_specs() {
 #   - 还没填过任何上游 → 什么都不收集，调用方按"不启用"处理；
 #   - 已经填过 → 只是不再加下一个，前面填好的保留。
 prompt_broker_upstreams() {
-  local name base key confirm rpm daily profile choice headers pair models
+  local name base key confirm profile headers models
   while :; do
     while :; do
-      prompt "上游名字（小写字母、数字、下划线、短横线）" deepseek
+      prompt "上游名字（小写字母开头，只能用小写字母、数字和短横线）" deepseek
       name="$(printf '%s' "$PROMPT_RESULT" | tr '[:upper:]' '[:lower:]')"
       validate_upstream_name "$name" && break
     done
-    while :; do
-      base="$(model_default_base_url "$name" 2>/dev/null || true)"
-      if [ -z "$base" ]; then
-        # 内置表里没有这个名字，说明是自建网关或聚合站：版本段是这里最常漏的一项，
-        # 漏了就是上游 404，而那时候人已经在 WebUI 里找不到原因了。
-        echo > /dev/tty
-        echo "$name 不在内置默认表里，base_url 照上游文档原样填，注意带上版本段：" > /dev/tty
-        echo "    OpenAI 兼容网关一般是 https://<域名>/v1，Anthropic 兼容的一般不带 /v1。" > /dev/tty
-        echo "    这里填的是真实上游地址；DSH 容器那边填什么由安装器自己算。" > /dev/tty
-      fi
-      prompt "$name 的 base_url" "$base"
-      base="$PROMPT_RESULT"
-      validate_upstream_base_url "$base" && break
-    done
-    # 形态决定注入哪个认证头、放行哪些端点，也决定 WebUI 里 base_url 要不要带 /v1。
-    # 默认值按上游名猜，绝大多数情况直接回车就对。
-    profile="$(broker_default_profile "$name")"
-    echo > /dev/tty
-    echo "$name 走哪种 API：" > /dev/tty
-    echo "1) OpenAI 兼容，不额外收窄端点（chat/completions、responses、embeddings 都放行）" > /dev/tty
-    echo "2) 只用 Responses（Codex 那类客户端）" > /dev/tty
-    echo "3) 只用 Chat Completions" > /dev/tty
-    echo "4) Anthropic Messages（认证头 x-api-key，自动带 anthropic-version）" > /dev/tty
-    echo "5) Gemini 原生（认证头 x-goog-api-key，端点 /v1beta/models）" > /dev/tty
-    case "$profile" in
-      messages) choice=4 ;;
-      gemini) choice=5 ;;
-      *) choice=1 ;;
-    esac
-    while :; do
-      prompt "请选择" "$choice"
-      case "$PROMPT_RESULT" in
-        1) profile=any; break ;;
-        2) profile=responses; break ;;
-        3) profile=chat; break ;;
-        4) profile=messages; break ;;
-        5) profile=gemini; break ;;
-        *) echo "请输入 1 到 5。" > /dev/tty ;;
-      esac
-    done
+    # base_url 内置表里有就不问：deepseek、openai、anthropic、google、nvidia 这些
+    # 上游的地址不是用户该记的东西。表里没有才问，因为自建网关的地址无从猜测。
+    base="$(model_default_base_url "$name" 2>/dev/null || true)"
+    if [ -z "$base" ]; then
+      echo > /dev/tty
+      echo "$name 不在内置默认表里，base_url 照上游文档原样填，注意带上版本段：" > /dev/tty
+      echo "    OpenAI 兼容网关一般是 https://<域名>/v1，Anthropic 兼容的一般不带 /v1。" > /dev/tty
+      echo "    这里填的是真实上游地址；DSH 容器那边填什么由安装器自己算。" > /dev/tty
+      while :; do
+        prompt "$name 的 base_url" ""
+        base="$PROMPT_RESULT"
+        validate_upstream_base_url "$base" && break
+      done
+    fi
     while :; do
       prompt_secret "$name 的 API 密钥（不回显，留空 = 跳过）"
       key="$PROMPT_RESULT"
@@ -1544,50 +1592,15 @@ prompt_broker_upstreams() {
       echo "两次输入不一致，请重试。" > /dev/tty
     done
     confirm=""
-    # 配额是这一层唯一能限制"额度被别人花掉"的手段：密钥代理保证的是密钥不外泄，
-    # 不保证额度不被用，被注入的 Agent 照样可以拿占位密钥发请求。
-    while :; do
-      prompt "$name 每分钟请求上限（0 = 不限）" 0
-      rpm="$PROMPT_RESULT"
-      case "$rpm" in ''|*[!0-9]*) echo "请输入非负整数。" > /dev/tty ;; *) break ;; esac
-    done
-    while :; do
-      prompt "$name 每日请求配额（0 = 不限）" 0
-      daily="$PROMPT_RESULT"
-      case "$daily" in ''|*[!0-9]*) echo "请输入非负整数。" > /dev/tty ;; *) break ;; esac
-    done
-    # 有些上游（或客户端协议）要求固定的请求头，例如 Codex 那套 originator / version，
-    # 或者上游按 User-Agent 做识别。放在代理这一侧配，容器里改不了，客户端也不用管。
-    headers=""
-    prompt_yes_no "$name 需要固定请求头（originator、version、User-Agent 之类）" n
-    if [ "$PROMPT_RESULT" = true ]; then
-      echo "一行一个 name=value，回车结束。示例：user-agent=codex_cli_rs/0.101.0" > /dev/tty
-      while :; do
-        prompt_optional "请求头"
-        [ -n "$PROMPT_RESULT" ] || break
-        pair="$(validate_broker_header "$PROMPT_RESULT")" || continue
-        headers="${headers:+$headers$BROKER_HEADER_RS}$pair"
-      done
-    fi
-    # 模型 id 决定 WebUI 的模型下拉里能选到什么。内置目录里的上游不用填：安装器
-    # 会沿用 DSH 自带的那份清单；目录里没有的网关，DSH 无从知道它有哪些模型，
-    # 空着就等于装完在 WebUI 里一个模型都选不到，所以这里直接挡住。
-    echo > /dev/tty
-    echo "$name 要在 DSH 里启用哪些模型：" > /dev/tty
-    if model_default_base_url "$name" >/dev/null 2>&1; then
-      echo "    $name 在 DSH 内置模型目录里，直接回车就沿用目录里的整份模型清单。" > /dev/tty
-    else
-      echo "    $name 不在 DSH 内置模型目录里，必须自己列出模型 id，照上游文档原样写。" > /dev/tty
-      echo "    例如：claude-opus-5-thinking 或 gpt-5.2,gemini-3-pro。" > /dev/tty
-    fi
-    while :; do
-      prompt_optional "模型 id（多个用逗号分隔）"
-      models="$PROMPT_RESULT"
-      [ -n "$models" ] || models="$(model_id_override "$name")"
-      if [ -n "$models" ] || model_default_base_url "$name" >/dev/null 2>&1; then break; fi
-      echo "$name 不在内置目录里，至少要填一个模型 id。" > /dev/tty
-    done
-    add_broker_upstream "$name" "$base" "$key" "$rpm" "$daily" "$profile" "$headers" "$models" || continue
+    # 认证头形态、固定请求头、模型清单、限额都不在这里问：
+    #   - 形态按上游名推断（broker_default_profile），认证头因此不会写错；
+    #   - 模型清单由 discover_broker_models 向上游问，问不出来才需要人介入；
+    #   - 这四样都能在密钥管理面板里改，而且它们都不是秘密，唯一必须在这里给的是密钥。
+    # 命令行给过 --model-api / --model-header / --model-id 时沿用，不再重复追问。
+    profile="$(model_api_override "$name" || true)"
+    headers="$(model_header_overrides "$name")" || headers=""
+    models="$(model_id_override "$name")"
+    add_broker_upstream "$name" "$base" "$key" 0 0 "$profile" "$headers" "$models" || continue
     key=""
     prompt_yes_no "再添加一个上游" n
     [ "$PROMPT_RESULT" = true ] || break
@@ -2347,6 +2360,7 @@ add_model_key() {
       return 0
     fi
   fi
+  discover_broker_models "$(node_tool_image)"
   write_broker_config
   if [ ! -s data/broker/keys.json ]; then
     echo "[错误] data/broker/keys.json 仍然是空的，.env 未改动。" >&2
@@ -2448,6 +2462,7 @@ case "$ACTION" in
     obtain_dsh_image
     write_basic_auth
     write_root_password
+    discover_broker_models "$PENDING_IMAGE"
     write_broker_config
     write_key_admin_token
     seed_dsh_model_settings "$PENDING_IMAGE"

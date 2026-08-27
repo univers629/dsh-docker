@@ -113,7 +113,7 @@
 }
 ```
 
-`requestsPerMinute` 与 `dailyRequestBudget` 缺省或为 `0` 表示不限，此时代理只防密钥外泄、不提供额度保护，建议显式设置（例如 `requestsPerMinute: 60`，每日配额按实际用量设定，撞到 429 再调高）。`maxRequestBytes` 缺省为 8 MiB。`headerName` 与 `headerTemplate` 默认是 `authorization` 与 `Bearer {key}`，只有使用其他认证头的上游需要显式设置。`allowedPathPrefixes` 缺省为 broker 内置的前缀集合，显式给出即为只放行这些前缀。客户端侧的 `base_url` 是 `http://dsh-key-broker:8080/u/<上游名>`，不带版本段，api key 填占位串 `dsh-broker-placeholder`。
+`requestsPerMinute` 与 `dailyRequestBudget` 缺省或为 `0` 表示不限，此时代理只防密钥外泄、不提供额度保护，建议显式设置（例如 `requestsPerMinute: 60`，每日配额按实际用量设定，撞到 429 再调高）。安装向导和管理面板都不问这两项（DSH 官方的模型页也没有对应控件），要设就用 `--model-keys-file` 给一份完整的 `keys.json`，或直接改宿主上的 `data/broker/keys.json`（broker 每 5 秒按 mtime 热加载）；面板保存时不会清掉已经设过的值。`maxRequestBytes` 缺省为 8 MiB。`headerName` 与 `headerTemplate` 默认是 `authorization` 与 `Bearer {key}`，只有使用其他认证头的上游需要显式设置。`allowedPathPrefixes` 缺省为 broker 内置的前缀集合，显式给出即为只放行这些前缀。客户端侧的 `base_url` 是 `http://dsh-key-broker:8080/u/<上游名>`，不带版本段，api key 填占位串 `dsh-broker-placeholder`。
 
 ### 写进 DSH 的模型配置
 
@@ -127,8 +127,9 @@
 - 凭据引用名与 WebUI 自己派生的一致（上游名大写、非字母数字换成下划线、加 `_API_KEY`），所以之后在页面上改密钥改的是同一个引用。
 - `deepseek` 走 DSH 第一方命名空间 `llm-deepseek`（路由 id `deepseek-official`），而不是再建一条同名 `llm-pi-ai` 路由：WebUI 的「模型」页按路由渲染，两条都在就会显示两行 DeepSeek，而默认模型只指其中一行。第一方那条的凭据引用名本来就是 `DEEPSEEK_API_KEY`，模型清单也沿用它内置的那份。旧版安装器写下的重复路由，在下次写配置时会被删掉（只删 `baseURL` 指向本部署代理的那条）。
 - 两份文件 DSH 都在热加载，写完刷新页面即可，不重启容器。
+- 上游名字必须满足 `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` 且不超过 32 个字符，这是照 DSH「添加自定义提供方」的 `ROUTE_PATTERN` 对齐的。不合规的名字 DSH 会静默拒收整条路由，页面上只表现为「模型页少一张卡片」，所以安装器和面板都在输入时就挡住。
 - 上游名命中 DSH 内置模型目录（`deepseek`、`openai`、`anthropic`、`google`、`nvidia`、`openrouter`、`groq`、`xai`、`moonshotai` 等）时，协议和整份模型清单由目录提供，安装器只写 `baseURL` 与 `apiKeyEnv`，WebUI 里立刻有一整排可选模型。
-- 目录里没有的自建网关必须显式给模型 id：向导会问，非交互用 `--model-id NAME=ID[,ID]`（PowerShell：`-ModelId`）。少了它 DSH 会拒绝整个 `llm-pi-ai` 命名空间，结果是所有供应商一起消失，所以安装器在写入前先用 DSH 自己的校验函数过一遍，不通过就一个字都不写，并在输出里说明原因。
+- 目录里没有的自建网关必须有模型 id，少了它 DSH 会拒绝整个 `llm-pi-ai` 命名空间，结果是所有供应商一起消失。所以安装器在写配置前会先用刚拿到的密钥请求上游的 `/models`（`bin/discover-upstream-models.mjs`，走 SSRF 防护的解析器，最多取 200 个 id），拉到就自动填；拉不到就打印失败原因，此时用 `--model-id NAME=ID[,ID]`（PowerShell：`-ModelId`）或在管理面板里补。安装器写入前还会用 DSH 自己的校验函数过一遍，不通过就一个字都不写。
 - `baseURL`、`apiKeyEnv` 和凭据引用的值每次都按当前部署重写；`api`、`models`、`agent-default-model` 只在缺失时补，不覆盖用户在 WebUI 里的选择。
 - 凭据引用被写死成占位串，不是"缺失时才补"：这个上游的真实密钥在代理手里，代理转发时会把认证头换成自己那把，所以容器里留一把真的既不起作用，又会被 WebUI 的供应商卡片明文显示、被 Agent 直接读走。写入前发现引用里存的不是占位串时，会换回占位串并在输出里点明，此时应当认为那把密钥已经进过容器，到上游控制台轮换它。
 - `--no-model-settings-seed`（PowerShell：`-NoModelSettingsSeed`）关闭这一步，供应商与模型改为在 WebUI 里自行添加。

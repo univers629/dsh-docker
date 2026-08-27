@@ -37,7 +37,7 @@
   <div class="panel">
     <h2 id="form-title">新增上游</h2>
     <div class="row">
-      <label class="field"><span>上游名字（小写字母、数字、下划线、短横线）</span>
+      <label class="field"><span>上游名字（小写字母开头，只能用小写字母、数字和短横线）</span>
         <input id="name" autocomplete="off" spellcheck="false" placeholder="deepseek"></label>
       <label class="field"><span>API 形态</span><select id="shape"></select></label>
     </div>
@@ -48,10 +48,6 @@
     <div class="row">
       <label class="field"><span>API 密钥（不回显；改其它字段时留空 = 沿用已存的那把）</span>
         <input id="key" type="password" autocomplete="off" spellcheck="false"></label>
-      <label class="field"><span>每分钟请求上限（0 = 不限）</span>
-        <input id="rpm" inputmode="numeric" value="0"></label>
-      <label class="field"><span>每日请求配额（0 = 不限）</span>
-        <input id="daily" inputmode="numeric" value="0"></label>
     </div>
     <p id="key-hint" class="hint"></p>
 
@@ -61,7 +57,8 @@
     <div class="actions"><button id="add-header" type="button">加一行</button></div>
 
     <h2>模型清单</h2>
-    <p class="hint">写进 DSH 的模型 id，逗号或换行分隔。DSH 内置目录里的上游（deepseek、openai、anthropic、google、nvidia 等）留空就沿用目录里的整份清单；自建网关必须至少给一个。</p>
+    <p class="hint">写进 DSH 的模型 id，逗号或换行分隔。DSH 内置目录里的上游（deepseek、openai、anthropic、google、nvidia 等）留空就沿用目录里的整份清单；
+    目录外的自建网关留空时，保存会自动向上游拉一次清单，拉不到才需要手写。</p>
     <textarea id="models" spellcheck="false" placeholder="deepseek-v4-flash, deepseek-v4-pro"></textarea>
     <div class="actions">
       <button id="fetch-models" type="button">向上游拉取模型列表</button>
