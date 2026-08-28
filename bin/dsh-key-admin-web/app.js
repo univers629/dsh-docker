@@ -103,7 +103,6 @@ function renderList() {
     meta.className = 'meta'
     const bits = [view.shape, view.baseUrl]
     bits.push(view.models.length > 0 ? view.models.length + ' 个模型' : '模型清单沿用 DSH 内置目录')
-    // 限额不再有输入框，但老配置里设过的值仍然生效，所以还是要显示出来。
     if (view.requestsPerMinute > 0) bits.push(view.requestsPerMinute + ' 次/分钟')
     if (view.dailyRequestBudget > 0) bits.push(view.dailyRequestBudget + ' 次/天')
     if (view.extraHeaders.length > 0) bits.push(view.extraHeaders.length + ' 个固定头')
@@ -162,6 +161,8 @@ function fillForm(view) {
   byId('key').value = ''
   byId('models').value = view ? view.models.join(', ') : ''
   byId('reasoning').value = view ? view.reasoningEfforts.join(', ') : ''
+  byId('rpm').value = view ? String(view.requestsPerMinute) : '0'
+  byId('daily').value = view ? String(view.dailyRequestBudget) : '0'
   byId('key-hint').textContent = view && view.hasKey
     ? '这个上游已有密钥（指纹 ' + view.keyFingerprint + '）。要换密钥就填新的，不换就留空。'
     : '新上游必须填一次密钥。'
@@ -191,7 +192,9 @@ function readForm() {
     rename: S.editing,
     models: byId('models').value,
     extraHeaders,
-    // 限额字段故意不发：面板没有这两个输入框，缺字段时后端沿用 keys.json 里的现值。
+    // 两个限额框留空时发空串，后端把它当成"沿用 keys.json 里的现值"；要取消限制得填 0。
+    requestsPerMinute: byId('rpm').value.trim(),
+    dailyRequestBudget: byId('daily').value.trim(),
   }
 }
 
@@ -232,10 +235,97 @@ function seedSummary(payload) {
   return lines.join('\n') || '完成。'
 }
 
+// --- 容器出站策略 ---
+//
+// 一条条目 = 勾选框（启停）+ 域名 + 备注 + 删除。勾选而不是直接删，是因为"临时放开一条
+// 隧道域名"和"永久不管这条"是两回事，取消勾选保留了原因（备注）也保留了恢复的成本。
+function entryRow(entry, placeholder) {
+  const row = document.createElement('div')
+  row.className = 'row'
+  const toggle = document.createElement('input')
+  toggle.type = 'checkbox'
+  toggle.className = 'entry-enabled'
+  toggle.checked = entry ? entry.enabled !== false : true
+  toggle.title = '取消勾选 = 这条留着但不生效'
+  const hostField = document.createElement('label')
+  hostField.className = 'field'
+  const host = document.createElement('input')
+  host.className = 'entry-host'
+  host.spellcheck = false
+  host.autocomplete = 'off'
+  host.placeholder = placeholder
+  host.value = entry ? entry.host : ''
+  hostField.appendChild(host)
+  const noteField = document.createElement('label')
+  noteField.className = 'field'
+  const note = document.createElement('input')
+  note.className = 'entry-note'
+  note.spellcheck = false
+  note.autocomplete = 'off'
+  note.placeholder = '备注（可留空）'
+  note.value = entry ? entry.note : ''
+  noteField.appendChild(note)
+  const remove = document.createElement('button')
+  remove.type = 'button'
+  remove.textContent = '删除'
+  remove.addEventListener('click', () => row.remove())
+  row.appendChild(toggle)
+  row.appendChild(hostField)
+  row.appendChild(noteField)
+  row.appendChild(remove)
+  return row
+}
+
+function renderEntries(node, entries, placeholder) {
+  const box = byId(node)
+  box.textContent = ''
+  for (const entry of entries) box.appendChild(entryRow(entry, placeholder))
+}
+
+function readEntries(node) {
+  const out = []
+  for (const row of byId(node).querySelectorAll('.row')) {
+    const host = row.querySelector('.entry-host').value.trim()
+    if (host === '') continue
+    out.push({
+      host,
+      enabled: row.querySelector('.entry-enabled').checked,
+      note: row.querySelector('.entry-note').value.trim(),
+    })
+  }
+  return out
+}
+
+function renderEgress() {
+  const egress = S.state.egress
+  if (!egress) {
+    byId('egress-panel').hidden = true
+    return
+  }
+  byId('egress-panel').hidden = false
+  byId('egress-mode').value = egress.policy.mode
+  byId('egress-allow-mode').value = egress.policy.allowMode
+  renderEntries('egress-allow', egress.policy.allow, 'search.example.com 或 *.example.com')
+  renderEntries('egress-block', egress.policy.block, '*.example.com')
+  const lines = []
+  if (egress.deploymentMode === 'open') {
+    lines.push('当前部署是 open：容器直接出网，不经过 dsh-egress，所以这份策略现在不生效。'
+      + '要让它生效，在宿主上重跑 ./install.sh，出站那一问选 blocklist 或 allowlist。'
+      + '（这两个模式之间的切换是热的，只有 open ↔ 隔离要重跑安装器。）')
+  } else {
+    lines.push('当前部署是 ' + egress.deploymentMode + '：容器出网只走 dsh-egress，这份策略立刻生效（代理 5 秒内跟上）。'
+      + '要回到 open 得在宿主上重跑 ./install.sh。')
+  }
+  lines.push('策略文件：' + egress.policyPath + (egress.exists ? '' : '（还没写过，下面是默认值）'))
+  if (egress.error) lines.push(egress.error)
+  byId('egress-deployment').textContent = lines.join(' ')
+}
+
 async function refresh() {
   S.state = await api('/api/state')
   shapeOptions()
   renderList()
+  renderEgress()
   status('auth-status', '已连接。密钥代理地址 ' + S.state.brokerBase + '，配置文件 ' + S.state.configPath + '。', 'good')
 }
 
@@ -339,6 +429,44 @@ function main() {
     log(seedSummary(payload))
   }))
   byId('delete').addEventListener('click', () => deleteUpstream(byId('name').value.trim(), 'form-status'))
+  byId('egress-allow-add').addEventListener('click', () => {
+    byId('egress-allow').appendChild(entryRow(null, 'search.example.com 或 *.example.com'))
+  })
+  byId('egress-block-add').addEventListener('click', () => {
+    byId('egress-block').appendChild(entryRow(null, '*.example.com'))
+  })
+  byId('egress-builtin').addEventListener('click', () => {
+    const egress = S.state && S.state.egress
+    if (!egress) return
+    log('append 模式下始终放行的内置源（不用自己填）：\n' + egress.builtinAllow.join('\n'))
+  })
+  byId('egress-block-default').addEventListener('click', () => {
+    const egress = S.state && S.state.egress
+    if (!egress) return
+    // 只补缺的，不动已有条目：用户取消过勾选或改过备注的那些要保留。
+    const present = new Set(readEntries('egress-block').map((entry) => entry.host.toLowerCase()))
+    let added = 0
+    for (const builtin of egress.builtinBlock) {
+      if (present.has(builtin.host.toLowerCase())) continue
+      byId('egress-block').appendChild(entryRow({ host: builtin.host, enabled: true, note: builtin.note }, '*.example.com'))
+      added += 1
+    }
+    status('egress-status', added > 0 ? '补了 ' + added + ' 条内置隧道域名，别忘了保存。' : '内置隧道域名都在清单里了。', '')
+  })
+  byId('egress-save').addEventListener('click', () => guard('egress-status', async () => {
+    const payload = await api('/api/egress', {
+      policy: {
+        mode: byId('egress-mode').value,
+        allowMode: byId('egress-allow-mode').value,
+        allow: readEntries('egress-allow'),
+        block: readEntries('egress-block'),
+      },
+    })
+    S.state.egress = payload.egress
+    renderEgress()
+    status('egress-status', '出站策略已保存（模式 ' + payload.egress.policy.mode + '）。', 'good')
+    log(payload.brokerReload || '完成。')
+  }))
   byId('reseed').addEventListener('click', () => guard('auth-status', async () => {
     const payload = await api('/api/seed', {})
     await refresh()

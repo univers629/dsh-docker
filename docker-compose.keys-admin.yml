@@ -44,6 +44,11 @@ services:
       # MODEL_BROKER_PLACEHOLDER_KEY 一字不差：面板每次都把代理托管上游的引用写成
       # 这个值，两边不一致会让每次保存都误报"引用里存着真实密钥"。
       DSH_KEY_ADMIN_PLACEHOLDER: "dsh-broker-placeholder"
+      # 出站策略文件：面板可写，dsh-egress 只读挂同一份，按 mtime 热加载。
+      DSH_KEY_ADMIN_EGRESS_POLICY: /etc/dsh-egress/policy.json
+      # 当前部署形态（open / blocklist / allowlist）。面板只用它来说明"这份策略现在生效
+      # 了没有"：open 部署根本没有 dsh-egress 容器，切换形态必须在宿主上重跑安装器。
+      DSH_EGRESS_MODE: "${DSH_EGRESS_MODE:-open}"
       # 镜像里 DSH 的依赖在这里：seed 脚本要用其中的 yaml 库和内置模型目录。
       DSH_SEED_MODULE_ROOTS: /app/dsh/node_modules
       NODE_OPTIONS: "--max-old-space-size=192"
@@ -57,6 +62,8 @@ services:
       - ./data/broker:/etc/dsh-broker
       # DSH 的家目录：面板保存后顺便把供应商写进 settings.yaml / .credentials.yaml。
       - ./data/dsh:/data/dsh
+      # 出站策略。面板要可写（它就是来改这份文件的），dsh-egress 那边是 :ro。
+      - ./data/egress:/etc/dsh-egress
     networks:
       # 只有这一张网络：dsh 不在上面，所以 Agent 摸不到面板；它自己需要出网，
       # 因为拉模型列表是面板直连上游（它本来就持有密钥）。

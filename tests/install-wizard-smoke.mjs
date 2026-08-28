@@ -273,11 +273,14 @@ assert.ok(installSh.includes('\\"dsh\\"'), 'install.sh 没写 keys.json 的 dsh 
 assert.ok(installPs1.includes("$entry['dsh']"), 'install.ps1 没写 keys.json 的 dsh 段')
 // 出站模式的说明也必须逐字一致：这是用户唯一能看到的策略说明。
 for (const line of [
-  '1) open（默认）：容器可访问任意外网地址。',
-  '2) allowlist：容器只能经 dsh-egress 代理出网，白名单外的域名返回 403。',
-  '    内置白名单：Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，',
-  '    足够 apt / pip / npm / git 正常工作；其他域名需要在下一问里补充。',
-  '    影响范围：Agent 访问白名单外的网页、搜索接口、第三方下载站会被拒绝。',
+  '1) open：容器直接访问任意外网地址。',
+  '2) blocklist：出站经 dsh-egress 代理，默认放行，只挡黑名单里的域名。',
+  '    内置黑名单是常见的一键公网隧道服务（cloudflared 快速隧道、ngrok、cpolar 等），',
+  '    它们能把容器里的端口发布到公网，等于把模型密钥代理变成别人能用的免费网关。',
+  '    Agent 的网页搜索、文档站、第三方下载都照常可用。',
+  '3) allowlist：出站经 dsh-egress 代理，只放行白名单里的域名，其余返回 403。',
+  '    内置白名单覆盖 Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，',
+  '    足够 apt / pip / npm / git 正常工作；网页搜索和文档站要自己补域名。',
   '    填写的域名会追加在内置白名单之后（内置的软件源始终放行），留空表示只用内置白名单。',
 ]) {
   assert.ok(installSh.includes(line), `install.sh 缺少出站模式说明：${line}`)
@@ -285,9 +288,29 @@ for (const line of [
 }
 // 追加语义是策略层的默认值，compose 必须把开关透出来，否则 .env 里写了也不生效。
 assert.match(isolatedCompose, /DSH_EGRESS_ALLOWED_HOSTS_MODE: "\$\{DSH_EGRESS_ALLOWED_HOSTS_MODE:-append\}"/)
+// 出站策略文件是安装器、代理、面板三方的契约，所以这几条都要钉住。
+// 1) 两个安装器都要建目录并写策略文件。
+assert.ok(installSh.includes('mkdir -p data/auth data/secret data/broker data/egress'), 'install.sh 没建 data/egress')
+assert.ok(installPs1.includes("'data\\egress'"), 'install.ps1 没建 data\\egress')
+assert.ok(installSh.includes('write_egress_policy'), 'install.sh 没写出站策略文件')
+assert.ok(installPs1.includes('Write-EgressPolicy'), 'install.ps1 没写出站策略文件')
+// 2) 安装器只写 mode：内置域名表不能在 shell 里再抄一份，否则默认清单会有两个来源。
+assert.equal(installSh.includes('trycloudflare'), false, 'install.sh 不该复制内置黑名单')
+assert.equal(installPs1.includes('trycloudflare'), false, 'install.ps1 不该复制内置黑名单')
+// 3) 策略文件里的模式优先于 .env：否则在面板里切过模式，重跑安装器会被 .env 顶回去。
+assert.ok(installSh.includes('egress_policy_mode'), 'install.sh 要先看策略文件里的模式')
+assert.ok(installPs1.includes('Get-EgressPolicyMode'), 'install.ps1 要先看策略文件里的模式')
+// 4) blocklist 与 allowlist 都要叠加隔离 compose，只有 open 不叠加。
+assert.match(installSh, /"\$PENDING_EGRESS_MODE" != open/)
+assert.match(installPs1, /\$egressMode -ne 'open'/)
+// 5) 挂载方向：代理只读，面板可写。反了就等于把出站策略交给了另一个容器。
+assert.match(isolatedCompose, /\.\/data\/egress:\/etc\/dsh-egress:ro/)
+assert.match(keyAdminCompose, /\.\/data\/egress:\/etc\/dsh-egress$/m)
+assert.match(isolatedCompose, /DSH_EGRESS_POLICY_FILE: \/etc\/dsh-egress\/policy\.json/)
+assert.match(keyAdminCompose, /DSH_KEY_ADMIN_EGRESS_POLICY: \/etc\/dsh-egress\/policy\.json/)
 assert.match(installPs1, /\[string\]\$ModelKeysFile = ''/)
 assert.match(installPs1, /\[switch\]\$NoModelBroker/)
-assert.match(installPs1, /\[ValidateSet\('',\s*'open',\s*'allowlist'\)\]/)
+assert.match(installPs1, /\[ValidateSet\('',\s*'open',\s*'blocklist',\s*'allowlist'\)\]/)
 assert.match(installPs1, /\[string\[\]\]\$EgressAllow = @\(\)/)
 assert.match(installPs1, /\[switch\]\$UsernsPreflight/)
 assert.match(installPs1, /\[string\[\]\]\$ModelId = @\(\)/)

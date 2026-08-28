@@ -45,6 +45,46 @@ export const DEFAULT_CONNECT_PORTS = Object.freeze([443])
 // 普通正向代理请求放行 80/443，apt 仍有相当多的镜像走 http。
 export const DEFAULT_FORWARD_PORTS = Object.freeze([80, 443])
 
+// 出站策略的三种部署形态。open 是「容器直连外网、根本不经过这个代理」，所以它只出现
+// 在部署层（.env + compose 叠加），代理进程自己只可能跑在 allowlist 或 blocklist 上。
+export const DEPLOYMENT_EGRESS_MODES = Object.freeze(['open', 'blocklist', 'allowlist'])
+export const PROXY_EGRESS_MODES = Object.freeze(['allowlist', 'blocklist'])
+
+// blocklist 模式的内置清单：常见的「一条命令就把容器里的端口发布到公网」的隧道服务。
+//
+// 这是启发式的，不是安全边界。它挡的是顺手滥用（Agent 或使用者随手起一条快速隧道把
+// dsh-key-broker 反代出去，让外面的人花你的额度），挡不住自建域名的 frp / 自己的
+// VPS。真正的边界只有 allowlist。每一条都可以在面板里取消勾选。
+export const DEFAULT_BLOCKED_HOSTS = Object.freeze([
+  { host: '*.trycloudflare.com', note: 'Cloudflare 快速隧道（cloudflared tunnel --url，不需要账号）' },
+  { host: '*.ngrok.io', note: 'ngrok' },
+  { host: '*.ngrok-free.app', note: 'ngrok 免费域名' },
+  { host: '*.ngrok.app', note: 'ngrok' },
+  { host: '*.ngrok.dev', note: 'ngrok' },
+  { host: '*.ngrok.cc', note: 'ngrok.cc（国内分发）' },
+  { host: '*.devtunnels.ms', note: 'VS Code / Dev Tunnels' },
+  { host: '*.loca.lt', note: 'localtunnel' },
+  { host: '*.lhr.life', note: 'serverless ssh 隧道' },
+  { host: '*.serveo.net', note: 'serveo' },
+  { host: '*.pinggy.link', note: 'pinggy' },
+  { host: '*.pinggy.io', note: 'pinggy' },
+  { host: '*.zrok.io', note: 'zrok' },
+  { host: '*.bore.pub', note: 'bore' },
+  { host: '*.telebit.io', note: 'telebit' },
+  { host: '*.tunnelto.dev', note: 'tunnelto' },
+  { host: '*.localtonet.com', note: 'localtonet' },
+  { host: '*.jprq.io', note: 'jprq' },
+  { host: '*.ts.net', note: 'Tailscale Funnel 的公开域名' },
+  { host: '*.cpolar.cn', note: 'cpolar' },
+  { host: '*.cpolar.top', note: 'cpolar' },
+  { host: '*.natapp.cc', note: 'natapp' },
+  { host: '*.natfrp.com', note: 'SakuraFrp' },
+  { host: '*.openfrp.net', note: 'OpenFrp' },
+  { host: '*.vicp.net', note: '花生壳（Oray）' },
+])
+
+export const DEFAULT_BLOCK_LIST = Object.freeze(DEFAULT_BLOCKED_HOSTS.map((entry) => entry.host))
+
 // 逐跳头必须在转发时剥掉：它们描述的是「这一段连接」，透传过去会让上游看到
 // 代理凭据、或让 keep-alive / 分块编码的语义在两段连接之间错位。
 export const HOP_BY_HOP_HEADERS = Object.freeze([
@@ -266,22 +306,33 @@ export function parsePortSet(value, fallback = DEFAULT_FORWARD_PORTS) {
 // 精确匹配或通配后缀匹配。`*.foo.com` 匹配 `a.foo.com`、`a.b.foo.com`，但不匹配
 // `foo.com` 本身；比较的是 `.foo.com` 这个带点后缀，所以 `evilfoo.com` 这类后缀
 // 混淆进不来。
-export function isHostAllowed(host, allowList = DEFAULT_ALLOWED_HOSTS) {
+export function matchHostEntry(host, entries) {
   const target = normalizeHost(host)
-  if (!target) return false
-  const entries = typeof allowList === 'string' ? parseAllowList(allowList) : allowList
-  if (!entries || typeof entries[Symbol.iterator] !== 'function') return false
-  for (const raw of entries) {
+  if (!target) return ''
+  const list = typeof entries === 'string' ? parseAllowList(entries) : entries
+  if (!list || typeof list[Symbol.iterator] !== 'function') return ''
+  for (const raw of list) {
     const entry = normalizeHost(raw)
     if (!entry) continue
     if (entry.startsWith('*.')) {
       const suffix = entry.slice(1)
-      if (target.length > suffix.length && target.endsWith(suffix)) return true
+      if (target.length > suffix.length && target.endsWith(suffix)) return entry
       continue
     }
-    if (target === entry) return true
+    if (target === entry) return entry
   }
-  return false
+  return ''
+}
+
+export function isHostAllowed(host, allowList = DEFAULT_ALLOWED_HOSTS) {
+  return matchHostEntry(host, allowList) !== ''
+}
+
+// 黑名单命中判定。匹配规则与白名单完全一致（精确名 + 最左一级通配），返回命中的那条
+// 条目，好让拒绝原因说清是哪一条挡的。
+export function matchBlockedHost(host, blockList) {
+  if (!blockList) return ''
+  return matchHostEntry(host, blockList)
 }
 
 // 解析 `host[:port]`，含 IPv6 字面量 `[::1]:443`。端口缺失或不合法时用
@@ -311,9 +362,32 @@ export function normalizeTarget(hostHeaderOrAuthority, defaultPort) {
   }
 }
 
-// 三道闸门的顺序固定：先地址形态（IP / localhost / 内网后缀），再端口，最后
-// 域名白名单。这样审计日志里的拒绝原因总是最具体的那一条。
-function assertTarget(action, host, port, allowList, allowedPorts, fallbackPorts) {
+// 第二个参数既可以是白名单本身（数组或逗号分隔的字符串），也可以是
+// { mode, allowList, blockList } 这样的规则对象。前者是历史签名，等价于 allowlist 模式。
+function resolveGate(allowListOrRules) {
+  if (
+    allowListOrRules
+    && typeof allowListOrRules === 'object'
+    && !Array.isArray(allowListOrRules)
+    && typeof allowListOrRules[Symbol.iterator] !== 'function'
+  ) {
+    return {
+      mode: allowListOrRules.mode === 'blocklist' ? 'blocklist' : 'allowlist',
+      allowList: allowListOrRules.allowList ?? DEFAULT_ALLOWED_HOSTS,
+      blockList: allowListOrRules.blockList ?? [],
+    }
+  }
+  return { mode: 'allowlist', allowList: allowListOrRules, blockList: [] }
+}
+
+// 闸门顺序固定：先地址形态（IP / localhost / 内网后缀），再端口，最后域名判定。这样
+// 审计日志里的拒绝原因总是最具体的那一条。
+//
+// 前两道闸门在 allowlist 与 blocklist 两种模式下完全一样，不因为「默认放行」而放松：
+// 裸 IP 目标、localhost、内网后缀、非 80/443 端口在两种模式下都拒绝，DNS rebinding
+// 的解析结果校验也照旧。两种模式只差最后一道：allowlist 要求命中白名单，blocklist
+// 只要求没命中黑名单。
+function assertTarget(action, host, port, allowListOrRules, allowedPorts, fallbackPorts) {
   const blocked = describeBlockedAddress(host)
   if (blocked) throw new EgressPolicyError(`拒绝 ${action} 目标 ${host || '(空)'}：${blocked}`)
   const ports = parsePortSet(allowedPorts, fallbackPorts)
@@ -321,7 +395,15 @@ function assertTarget(action, host, port, allowList, allowedPorts, fallbackPorts
     const allowed = Array.from(ports).sort((left, right) => left - right).join('/')
     throw new EgressPolicyError(`拒绝 ${action} 目标 ${host}:${port}：端口不在允许集合 ${allowed} 内`)
   }
-  if (!isHostAllowed(host, allowList)) {
+  const gate = resolveGate(allowListOrRules)
+  if (gate.mode === 'blocklist') {
+    const hit = matchBlockedHost(host, gate.blockList)
+    if (hit !== '') {
+      throw new EgressPolicyError(`拒绝 ${action} 目标 ${host}:${port}：命中出站黑名单条目 ${hit}`)
+    }
+    return { host, port }
+  }
+  if (!isHostAllowed(host, gate.allowList)) {
     throw new EgressPolicyError(`拒绝 ${action} 目标 ${host}:${port}：主机不在出站白名单内`)
   }
   return { host, port }
@@ -436,6 +518,145 @@ export function describeBlockedResolvedAddress(value) {
 
 export function isBlockedResolvedAddress(value) {
   return describeBlockedResolvedAddress(value) !== null
+}
+
+// --- 出站策略文件（data/egress/policy.json） ---
+//
+// 白名单原来只能写在 .env 里，改一条就要重建容器。策略文件把「模式 + 两份清单」挪到
+// 一个面板可写、代理只读的 JSON 上，代理按 mtime 热加载，所以 allowlist 与 blocklist
+// 之间的切换、清单的增删改都不用动容器。
+//
+// 部署形态（open ↔ 隔离）不在这份文件里：open 意味着容器直连外网、根本没有这个代理，
+// 那是 compose 叠加决定的，必须在宿主上重跑安装器。
+export const EGRESS_POLICY_VERSION = 1
+
+function normalizePolicyEntry(raw, { builtinNotes } = {}) {
+  const input = typeof raw === 'string' ? { host: raw } : (raw ?? {})
+  const host = normalizeHost(input.host ?? input.name ?? '')
+  if (!host) return null
+  assertAllowListEntry(host)
+  const note = typeof input.note === 'string' ? input.note.trim().slice(0, 200) : ''
+  return {
+    host,
+    // 只有显式的 false 才算关掉：老文件里没有这个字段时按启用处理。
+    enabled: input.enabled !== false,
+    note: note !== '' ? note : (builtinNotes?.get(host) ?? ''),
+  }
+}
+
+function normalizePolicyList(value, options) {
+  const items = Array.isArray(value) ? value : []
+  const out = []
+  const seen = new Set()
+  for (const raw of items) {
+    const entry = normalizePolicyEntry(raw, options)
+    if (!entry) continue
+    if (seen.has(entry.host)) continue
+    seen.add(entry.host)
+    out.push(entry)
+  }
+  return out
+}
+
+const BUILTIN_BLOCK_NOTES = new Map(DEFAULT_BLOCKED_HOSTS.map((entry) => [entry.host, entry.note]))
+
+export function parseProxyEgressMode(value, fallback = 'allowlist') {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+    return fallback
+  }
+  const mode = String(value).trim().toLowerCase()
+  // open 在代理进程里没有意义（open 部署根本不起这个容器）。收到它按 allowlist 处理：
+  // 宁可把请求挡在白名单外，也不要因为一个不认识的值把出站全放开。
+  if (mode === 'open') return 'allowlist'
+  if (!PROXY_EGRESS_MODES.includes(mode)) {
+    throw new EgressPolicyError(`出站模式只支持 ${PROXY_EGRESS_MODES.join(' / ')}，当前值：${value}`)
+  }
+  return mode
+}
+
+export function parseDeploymentEgressMode(value, fallback = 'open') {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+    return fallback
+  }
+  const mode = String(value).trim().toLowerCase()
+  if (!DEPLOYMENT_EGRESS_MODES.includes(mode)) {
+    throw new EgressPolicyError(`出站模式只支持 ${DEPLOYMENT_EGRESS_MODES.join(' / ')}，当前值：${value}`)
+  }
+  return mode
+}
+
+/** 内置黑名单的默认条目（全部启用），用来生成第一份策略文件或在面板里"恢复默认"。 */
+export function defaultBlockEntries() {
+  return DEFAULT_BLOCKED_HOSTS.map((entry) => ({ host: entry.host, enabled: true, note: entry.note }))
+}
+
+/**
+ * 归一化一份策略：补默认值、校验每条域名、去重。非法条目直接抛 EgressPolicyError，
+ * 由调用方决定是"拒绝保存"（面板）还是"沿用上一份"（代理热加载）。
+ */
+export function normalizeEgressPolicy(input) {
+  const raw = input && typeof input === 'object' ? input : {}
+  const mode = parseProxyEgressMode(raw.mode)
+  const allowMode = parseAllowListMode(raw.allowMode)
+  const allow = normalizePolicyList(raw.allow)
+  // 缺 block 字段 = 用内置隧道清单。安装器写出来的第一份策略只有一个 mode，靠这条把
+  // 内置清单补齐，省得在 shell 里再抄一份同样的域名表。已经有 block 字段的（面板保存
+  // 过的）照原样用：里面每条的勾选状态都是用户的决定，包括"全删空 = 什么都不挡"。
+  const block = raw.block === undefined || raw.block === null
+    ? defaultBlockEntries()
+    : normalizePolicyList(raw.block, { builtinNotes: BUILTIN_BLOCK_NOTES })
+  return { version: EGRESS_POLICY_VERSION, mode, allowMode, allow, block }
+}
+
+export function parseEgressPolicyText(text) {
+  if (typeof text !== 'string' || text.trim() === '') return normalizeEgressPolicy({})
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    throw new EgressPolicyError(`出站策略文件不是合法 JSON：${error.message}`)
+  }
+  return normalizeEgressPolicy(parsed)
+}
+
+export function serializeEgressPolicy(policy) {
+  return `${JSON.stringify(normalizeEgressPolicy(policy), null, 2)}\n`
+}
+
+/**
+ * 把一份策略解析成代理真正使用的规则。
+ *
+ * allowlist 模式下清单为空会回落到内置白名单（parseAllowList 的既有语义）：宁可只放行
+ * Debian / npm / PyPI 这些源，也不要跑成一个空白名单。blocklist 模式下清单为空就是
+ * "什么都不挡"，如实照做——那是用户在面板里逐条取消勾选的结果。
+ */
+export function resolveEgressRules(policy, { baseline = DEFAULT_ALLOWED_HOSTS } = {}) {
+  const normalized = normalizeEgressPolicy(policy)
+  const allowHosts = normalized.allow.filter((entry) => entry.enabled).map((entry) => entry.host)
+  return {
+    mode: normalized.mode,
+    allowMode: normalized.allowMode,
+    // 传 undefined 而不是空数组：resolveAllowList 对空数组会报"白名单不能为空"，而
+    // "一条都没填"要的是回落到内置白名单。
+    allowList: resolveAllowList(allowHosts.length > 0 ? allowHosts : undefined, normalized.allowMode, baseline),
+    blockList: normalized.block.filter((entry) => entry.enabled).map((entry) => entry.host),
+  }
+}
+
+/** 从 .env 那套环境变量拼一份等价策略：没有策略文件的老部署走这条路。 */
+export function egressPolicyFromEnv(env = {}) {
+  const mode = parseProxyEgressMode(env.DSH_EGRESS_MODE)
+  return normalizeEgressPolicy({
+    mode,
+    allowMode: parseAllowListMode(env.DSH_EGRESS_ALLOWED_HOSTS_MODE),
+    // parseAllowList 空值会回落到 fallback、空结果会报错，这里只是把自定义域名抄过来，
+    // 所以先自己判空。
+    allow: String(env.DSH_EGRESS_ALLOWED_HOSTS ?? '').trim() === ''
+      ? []
+      : parseAllowList(env.DSH_EGRESS_ALLOWED_HOSTS).map((host) => ({ host })),
+    // block 不传 = normalizeEgressPolicy 补内置清单。blocklist 模式下没有策略文件时
+    // 不能变成"黑名单模式但一条都不挡"。
+  })
 }
 
 // 生成可以直接传给 net.connect({ lookup }) / http.request({ lookup }) 的解析器：

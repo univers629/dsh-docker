@@ -22,6 +22,10 @@ button.danger { color: var(--bad); }
 .item .meta { color: var(--muted); font-size: 12px; }
 .item .row-actions { display: flex; gap: 8px; flex: 0 0 auto; }
 .headers .row { align-items: center; margin-bottom: 0; }
+.entries .row { align-items: center; margin-bottom: 6px; }
+.entries input[type="checkbox"] { width: auto; flex: 0 0 auto; }
+.entries .entry-host { font-family: ui-monospace, Consolas, monospace; }
+[hidden] { display: none; }
 .models { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 2px 12px; margin-top: 10px; max-height: 280px; overflow: auto; }
 .models label { display: flex; gap: 6px; align-items: center; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 .models input { width: auto; }

@@ -99,7 +99,8 @@ usage() {
   --key-admin / --no-key-admin    模型密钥管理面板（浏览器里填密钥、拉模型列表、写 DSH 配置）
   --key-admin-bind ADDRESS        面板发布地址（默认 127.0.0.1，改成别的等于把面板暴露出去）
   --key-admin-port PORT           面板宿主端口（默认 3082）
-  --egress open|allowlist         容器出站模式（allowlist 只放行白名单域名）
+  --egress open|blocklist|allowlist
+                                  容器出站模式（blocklist 挡内置隧道清单，allowlist 只放行白名单）
   --egress-allow HOSTS            allowlist 下额外放行的域名（可重复，逗号分隔，支持 *.example.com）
   --userns-preflight              只做宿主 userns-remap 预检并退出，不安装
   --non-interactive               不显示问答，使用参数或安全默认值
@@ -266,8 +267,8 @@ case "$IMAGE_SOURCE_OVERRIDE" in
   *) echo "[错误] --image-source 只支持 prebuilt 或 build。" >&2; exit 2 ;;
 esac
 case "$EGRESS_MODE_OVERRIDE" in
-  ''|open|allowlist) ;;
-  *) echo "[错误] --egress 只支持 open 或 allowlist。" >&2; exit 2 ;;
+  ''|open|blocklist|allowlist) ;;
+  *) echo "[错误] --egress 只支持 open、blocklist 或 allowlist。" >&2; exit 2 ;;
 esac
 
 if [ "$INTERACTIVE" = auto ]; then
@@ -450,7 +451,7 @@ userns_preflight() {
       echo "       既读不到 /etc/subuid 的 dockremap 行（格式 dockremap:BASE:COUNT），" >&2
       echo "       docker info 的 DockerRootDir 也没有 <uid>.<gid> 后缀。" >&2
       echo "       请手动确认 BASE 后执行（1000 是容器内 dsh 账户的 UID）：" >&2
-      echo "         sudo chown -R \$((BASE + 1000)):\$((BASE + 1000)) data/dsh data/home data/agents data/mcp workspace data/broker" >&2
+      echo "         sudo chown -R \$((BASE + 1000)):\$((BASE + 1000)) data/dsh data/home data/agents data/mcp workspace data/broker data/egress" >&2
       echo "         sudo chown -R \$((BASE + 0)):\$((BASE + 0)) data/secret data/auth" >&2
       return 1
       ;;
@@ -469,13 +470,13 @@ userns_preflight() {
   fi
   if [ -z "$project_dir" ]; then
     echo "    未找到工程目录（$TARGET_DIR），只打印需要在工程目录里执行的命令："
-    echo "      sudo chown -R $mapped_user:$mapped_user data/dsh data/home data/agents data/mcp workspace data/broker"
+    echo "      sudo chown -R $mapped_user:$mapped_user data/dsh data/home data/agents data/mcp workspace data/broker data/egress"
     echo "      sudo chown -R $mapped_root:$mapped_root data/secret data/auth"
     return 0
   fi
-  ( cd "$project_dir" && mkdir -p data/dsh data/home data/agents data/mcp data/broker data/secret data/auth workspace )
+  ( cd "$project_dir" && mkdir -p data/dsh data/home data/agents data/mcp data/broker data/egress data/secret data/auth workspace )
   # 走 DSH 账户的目录用 BASE+1000；data/secret 与 data/auth 只被容器 root 读，用 BASE+0。
-  for directory in data/dsh data/home data/agents data/mcp workspace data/broker; do
+  for directory in data/dsh data/home data/agents data/mcp workspace data/broker data/egress; do
     userns_chown "$project_dir/$directory" "$mapped_user:$mapped_user" || failed=true
   done
   for directory in data/secret data/auth; do
@@ -755,7 +756,8 @@ get_compose_env() {
 # 并且只挂到容器的 /root/dsh-secret（0700 root:root），dsh 账户读不到。
 # data/broker 存模型密钥，只被 dsh-key-broker 容器以 UID 1000 只读挂载，
 # 完全不出现在 DSH 容器的挂载表里。
-mkdir -p data/auth data/secret data/broker
+# data/egress 存出站策略（模式 + 白名单 + 黑名单）：管理面板可写，dsh-egress 只读挂载。
+mkdir -p data/auth data/secret data/broker data/egress
 COMPOSE_ARGS=(-f docker-compose.yml)
 
 # 叠加顺序是契约的一部分，不能按别的顺序拼：keys.yml 先把 dsh-key-broker 放进
@@ -782,9 +784,11 @@ set_compose_args() {
     echo "[警告] 密钥代理关着，密钥管理面板不会启动（它管理的就是代理那份密钥配置）。" >&2
     PENDING_KEY_ADMIN=off
   fi
-  if [ "$PENDING_EGRESS_MODE" = allowlist ]; then
+  # blocklist 与 allowlist 用同一套隔离形态：都要把 dsh 收进没有网关的网络，出站全部
+  # 经过 dsh-egress。两者只差代理里那最后一道域名判定，而那是策略文件的事。
+  if [ "$PENDING_EGRESS_MODE" != open ]; then
     if [ ! -f docker-compose.isolated.yml ]; then
-      echo "[错误] 需要 docker-compose.isolated.yml 才能启用出站白名单模式，但工程目录里没有它。" >&2
+      echo "[错误] 需要 docker-compose.isolated.yml 才能启用出站黑/白名单模式，但工程目录里没有它。" >&2
       echo "       请更新工程源码，或用 --egress open 保持直连出网。" >&2
       exit 1
     fi
@@ -1738,22 +1742,39 @@ configure_model_broker() {
 configure_egress_mode() {
   local default_route
   PENDING_EGRESS_MODE="${EGRESS_MODE_OVERRIDE:-$(get_compose_env DSH_EGRESS_MODE open)}"
-  case "$PENDING_EGRESS_MODE" in open|allowlist) ;; *) PENDING_EGRESS_MODE=open ;; esac
+  case "$PENDING_EGRESS_MODE" in open|blocklist|allowlist) ;; *) PENDING_EGRESS_MODE=open ;; esac
+  # 黑白名单之间的切换可以在面板里做，那时 .env 不会跟着变。所以隔离部署的当前模式要以
+  # 策略文件为准，否则重跑安装器会把面板里的选择悄悄改回来。
+  if [ -z "$EGRESS_MODE_OVERRIDE" ] && [ "$PENDING_EGRESS_MODE" != open ]; then
+    case "$(egress_policy_mode)" in
+      blocklist) PENDING_EGRESS_MODE=blocklist ;;
+      allowlist) PENDING_EGRESS_MODE=allowlist ;;
+    esac
+  fi
   if [ "$INTERACTIVE" = true ] && [ -z "$EGRESS_MODE_OVERRIDE" ]; then
-    case "$PENDING_EGRESS_MODE" in allowlist) default_route=2 ;; *) default_route=1 ;; esac
+    case "$PENDING_EGRESS_MODE" in
+      blocklist) default_route=2 ;;
+      allowlist) default_route=3 ;;
+      *) default_route=1 ;;
+    esac
     echo
-    echo "容器出站网络："
-    echo "1) open（默认）：容器可访问任意外网地址。"
-    echo "2) allowlist：容器只能经 dsh-egress 代理出网，白名单外的域名返回 403。"
-    echo "    内置白名单：Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，"
-    echo "    足够 apt / pip / npm / git 正常工作；其他域名需要在下一问里补充。"
-    echo "    影响范围：Agent 访问白名单外的网页、搜索接口、第三方下载站会被拒绝。"
-    echo "    不受影响：模型请求（dsh-key-broker 独立出网）；宿主 3080 改由 dsh-ingress"
-    echo "    发布，反向代理仍写 http://dsh:3080。"
+    echo "容器出站网络（三种都不影响模型请求：那条路由走 dsh-key-broker，是另一个容器出网）："
+    echo "1) open：容器直接访问任意外网地址。"
+    echo "2) blocklist：出站经 dsh-egress 代理，默认放行，只挡黑名单里的域名。"
+    echo "    内置黑名单是常见的一键公网隧道服务（cloudflared 快速隧道、ngrok、cpolar 等），"
+    echo "    它们能把容器里的端口发布到公网，等于把模型密钥代理变成别人能用的免费网关。"
+    echo "    Agent 的网页搜索、文档站、第三方下载都照常可用。"
+    echo "3) allowlist：出站经 dsh-egress 代理，只放行白名单里的域名，其余返回 403。"
+    echo "    内置白名单覆盖 Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，"
+    echo "    足够 apt / pip / npm / git 正常工作；网页搜索和文档站要自己补域名。"
+    echo "  选 2 或 3 之后：dsh 容器不再直连外网，宿主 3080 改由 dsh-ingress 发布"
+    echo "  （反向代理仍写 http://dsh:3080）。两份清单和 2/3 之间的切换之后都能在密钥管理"
+    echo "  面板里热改，只有和 1 之间的切换要重跑这个安装器。"
     prompt "请选择" "$default_route"
     case "$PROMPT_RESULT" in
       1) PENDING_EGRESS_MODE=open ;;
-      2) PENDING_EGRESS_MODE=allowlist ;;
+      2) PENDING_EGRESS_MODE=blocklist ;;
+      3) PENDING_EGRESS_MODE=allowlist ;;
       *) echo "[错误] 无效出站模式选项。" >&2; exit 2 ;;
     esac
   fi
@@ -1764,6 +1785,49 @@ configure_egress_mode() {
     prompt_optional "额外放行的域名（逗号分隔，支持 *.example.com）" "$PENDING_EGRESS_ALLOWED_HOSTS"
     PENDING_EGRESS_ALLOWED_HOSTS="$PROMPT_RESULT"
   fi
+}
+
+# 出站策略文件 data/egress/policy.json：模式 + 白名单 + 黑名单。dsh-egress 只读它，密钥
+# 管理面板可写它，两边都按 mtime 热加载，所以装完之后改清单、在黑白名单之间切换都不用
+# 再回终端（只有 open 和隔离形态之间的切换要重跑这个安装器，那要改 compose 叠加）。
+#
+# 这里只写 mode 一个字段：两份清单缺字段时由代理和面板自己补默认值（白名单回落到内置
+# 软件源，黑名单回落到内置隧道清单），省得把同一份域名表在 shell 里再抄一遍。
+egress_policy_mode() {
+  [ -f data/egress/policy.json ] || return 0
+  sed -n 's/^[[:space:]]*"mode"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' data/egress/policy.json 2>/dev/null | sed -n 1p
+}
+
+write_egress_policy() {
+  local temporary
+  [ "$PENDING_EGRESS_MODE" != open ] || return 0
+  mkdir -p data/egress
+  # 面板以 UID 1000 写这个目录里的临时文件，属主对不上就只能读不能改。
+  chown 1000:1000 data/egress 2>/dev/null || true
+  if [ -s data/egress/policy.json ]; then
+    [ "$(egress_policy_mode)" = "$PENDING_EGRESS_MODE" ] && return 0
+    temporary="$(mktemp data/egress/policy.json.tmp.XXXXXX)"
+    # 只替换 mode 那一行，两份清单原样保留：它们是用户在面板里改过的。
+    if sed 's/^\([[:space:]]*"mode"[[:space:]]*:[[:space:]]*"\)[a-z]*\("\)/\1'"$PENDING_EGRESS_MODE"'\2/' \
+        data/egress/policy.json > "$temporary" \
+        && grep -q "\"mode\"[[:space:]]*:[[:space:]]*\"$PENDING_EGRESS_MODE\"" "$temporary"; then
+      chmod 644 "$temporary"
+      mv "$temporary" data/egress/policy.json
+      chown 1000:1000 data/egress/policy.json 2>/dev/null || true
+      echo "==> 出站策略的模式已改成 $PENDING_EGRESS_MODE（data/egress/policy.json，两份清单保留）。"
+      return 0
+    fi
+    rm -f "$temporary"
+    echo "[警告] data/egress/policy.json 里没找到可替换的 mode 字段，没有改动它。" >&2
+    echo "       现在生效的是文件里那个模式，可以在密钥管理面板里直接改。" >&2
+    return 0
+  fi
+  temporary="$(mktemp data/egress/policy.json.tmp.XXXXXX)"
+  printf '{\n  "version": 1,\n  "mode": "%s"\n}\n' "$PENDING_EGRESS_MODE" > "$temporary"
+  chmod 644 "$temporary"
+  mv "$temporary" data/egress/policy.json
+  chown 1000:1000 data/egress/policy.json 2>/dev/null || true
+  echo "==> 出站策略已写入 data/egress/policy.json（模式 $PENDING_EGRESS_MODE），清单之后在密钥管理面板里改。"
 }
 
 configure_dsh() {
@@ -2257,8 +2321,10 @@ assert_model_broker() {
 
 assert_egress_isolation() {
   local attempt payload="" state="" ingress_host
-  [ "$PENDING_EGRESS_MODE" = allowlist ] || return 0
-  echo "==> 正在核验出站白名单代理（dsh-egress）..."
+  # blocklist 和 allowlist 是同一套隔离形态：容器不直连外网、出站全经 dsh-egress、宿主
+  # 3080 由 dsh-ingress 发布。两者都要核验这条链路。
+  [ "$PENDING_EGRESS_MODE" != open ] || return 0
+  echo "==> 正在核验出站代理（dsh-egress，模式 $PENDING_EGRESS_MODE）..."
   for ((attempt = 0; attempt < 30; attempt++)); do
     payload="$(DOCKER exec dsh-egress node -e "fetch('http://127.0.0.1:3128/status').then(async (response) => { if (response.status !== 200) { process.exit(1) } process.stdout.write(await response.text()) }).catch(() => process.exit(1))" 2>/dev/null || true)"
     case "$payload" in
@@ -2335,22 +2401,31 @@ print_config_summary() {
       echo "    模型设置: 已写进 data/dsh/settings.yaml，WebUI 的「设置 → 模型」里可直接选模型"
     fi
     echo "    作用范围: 只保证密钥字面值不进入 dsh 容器，不限制额度消耗，也不阻止数据外发。"
-    echo "      容器里的 Agent 用占位密钥仍可发起请求，因此建议为每个上游设置"
-    echo "      requestsPerMinute / dailyRequestBudget，并按需启用 allowlist 出站模式。"
+    echo "      容器里的 Agent 用占位密钥仍可发起请求，因此建议在密钥管理面板里给每个上游"
+    echo "      设置请求限额（每分钟上限 / 每日配额），并按需启用出站黑名单或白名单。"
   else
     echo "    模型密钥代理: 关（密钥若写进容器内的配置或环境，容器里的 Agent 一条 cat 就能读到）"
   fi
   print_key_admin_access
-  if [ "$PENDING_EGRESS_MODE" = allowlist ]; then
-    echo "    出站模式: allowlist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）"
-    if [ -n "$PENDING_EGRESS_ALLOWED_HOSTS" ]; then
-      echo "    白名单: 内置白名单 + 自定义 $(printf '%s' "$PENDING_EGRESS_ALLOWED_HOSTS" | awk -F, '{ print NF }') 条（DSH_EGRESS_ALLOWED_HOSTS）"
-    else
-      echo "    白名单: 仅内置白名单（Debian / npm / PyPI / GitHub / ghcr.io / nodejs.org / astral.sh）"
-    fi
-  else
-    echo "    出站模式: open（容器可访问任意外网地址，出站流量不做域名限制）"
-  fi
+  case "$PENDING_EGRESS_MODE" in
+    allowlist)
+      echo "    出站模式: allowlist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）"
+      if [ -n "$PENDING_EGRESS_ALLOWED_HOSTS" ]; then
+        echo "    白名单: 内置白名单 + 自定义 $(printf '%s' "$PENDING_EGRESS_ALLOWED_HOSTS" | awk -F, '{ print NF }') 条（DSH_EGRESS_ALLOWED_HOSTS）"
+      else
+        echo "    白名单: 仅内置白名单（Debian / npm / PyPI / GitHub / ghcr.io / nodejs.org / astral.sh）"
+      fi
+      echo "    清单可在密钥管理面板的「容器出站策略」里改，改完 5 秒生效"
+      ;;
+    blocklist)
+      echo "    出站模式: blocklist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）"
+      echo "    黑名单: 内置的一键公网隧道域名清单，其余域名默认放行"
+      echo "    清单和模式可在密钥管理面板的「容器出站策略」里改，改完 5 秒生效"
+      ;;
+    *)
+      echo "    出站模式: open（容器可访问任意外网地址，出站流量不做域名限制）"
+      ;;
+  esac
 }
 
 # 给已经装好的部署补填模型密钥。单独做一个动作的理由：install/configure 见到 dsh 容器
@@ -2495,6 +2570,7 @@ case "$ACTION" in
     discover_broker_models "$PENDING_IMAGE"
     write_broker_config
     write_key_admin_token
+    write_egress_policy
     seed_dsh_model_settings "$PENDING_IMAGE"
     prepare_pending_env
     echo "==> 正在启动 DSH..."

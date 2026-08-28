@@ -168,18 +168,16 @@ rate limit and a UTC daily request budget per upstream and forwards only GET
 and POST on allow-listed API paths, so an occasional 429 is normal feedback:
 slow down instead of retrying in a loop.
 
-When DSH_EGRESS_MODE is allowlist, this container has no default gateway and
-cannot reach the internet directly. Every outbound HTTP(S) request must go
-through the forward proxy at DSH_EGRESS_PROXY_URL, which allows only a fixed
-list of domains (Debian, npm, PyPI, GitHub/ghcr, astral.sh, and nodejs.org by
-default) on ports 80 and 443, and CONNECT only on 443. apt, pip, npm, and git
-are already pointed at it, HTTP_PROXY/HTTPS_PROXY/NO_PROXY are set, and
-NODE_USE_ENV_PROXY=1 makes Node fetch honour them, so use those tools normally.
-A domain outside the allow list gets 403 from the proxy. That is policy, not a
+When DSH_EGRESS_MODE is anything other than open, this container has no default
+gateway and cannot reach the internet directly. Every outbound HTTP(S) request
+must go through the forward proxy at DSH_EGRESS_PROXY_URL, which decides per
+domain and allows ports 80 and 443 only, with CONNECT only on 443. apt, pip,
+npm, and git are already pointed at it, HTTP_PROXY/HTTPS_PROXY/NO_PROXY are set,
+and NODE_USE_ENV_PROXY=1 makes Node fetch honour them, so use those tools
+normally. A refused domain gets 403 from the proxy. That is policy, not a
 network fault: another mirror, a raw IP address, or a retry loop will not get
-around it. Report the blocked domain and ask the user to add it to
-DSH_EGRESS_ALLOWED_HOSTS on the host and restart the stack. You cannot change
-the allow list from inside the container.
+around it. Report the blocked domain and ask the user to allow it on the host.
+The policy cannot be changed from inside this container.
 
 ## Security boundary
 

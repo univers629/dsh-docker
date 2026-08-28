@@ -370,10 +370,33 @@ try {
   assert.match(isolatedEnv, /^DSH_EGRESS_MODE=allowlist$/m)
   assert.match(isolatedEnv, /^DSH_EGRESS_ALLOWED_HOSTS=a\.example\.com,\*\.b\.example\.com$/m)
   assert.match(isolated.stdout, /自定义 2 条/)
+  // 安装器只写 mode 一个字段：两份清单缺字段时由代理和面板补默认值（内置软件源 /
+  // 内置隧道清单），所以这里逐字比对整份文件，防止有人又把域名表抄进 shell。
+  assert.deepEqual(
+    JSON.parse(await readFile(join(sandbox, 'egress-install', 'data', 'egress', 'policy.json'), 'utf8')),
+    { version: 1, mode: 'allowlist' },
+  )
+
+  // blocklist 与 allowlist 共用同一条隔离路径（都叠加 isolated compose），只差策略
+  // 文件里的模式，所以两种都要真装一次。
+  const blocklist = runInstall('blocklist-install', [
+    '--access', 'local',
+    '--image-source', 'build',
+    '--egress', 'blocklist',
+  ])
+  assert.equal(blocklist.status, 0, `${blocklist.stdout}\n${blocklist.stderr}`)
+  assert.match(await readFile(join(sandbox, 'blocklist-install', '.env'), 'utf8'), /^DSH_EGRESS_MODE=blocklist$/m)
+  assert.deepEqual(
+    JSON.parse(await readFile(join(sandbox, 'blocklist-install', 'data', 'egress', 'policy.json'), 'utf8')),
+    { version: 1, mode: 'blocklist' },
+  )
+
+  // open 不起 dsh-egress，也就没有策略文件可写。
+  assert.equal(existsSync(join(sandbox, 'local-install', 'data', 'egress', 'policy.json')), false)
 
   const badEgress = runInstall('bad-egress-install', ['--access', 'local', '--egress', 'everything'])
   assert.equal(badEgress.status, 2, 'an unknown egress mode must exit 2')
-  assert.match(badEgress.stderr, /--egress 只支持 open 或 allowlist/)
+  assert.match(badEgress.stderr, /--egress 只支持 open、blocklist 或 allowlist/)
 
   // ---- userns-remap 预检 ----
   // 未启用时只打印人工步骤，绝不代改 daemon.json，也要如实说明 Docker Desktop 不支持。

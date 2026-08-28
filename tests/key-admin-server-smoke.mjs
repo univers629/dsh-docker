@@ -19,6 +19,7 @@ const work = mkdtempSync(join(tmpdir(), 'dsh-key-admin-'))
 const configPath = join(work, 'keys.json')
 const tokenPath = join(work, 'admin.token')
 const seedPayloadPath = join(work, 'seed-payload.json')
+const egressPolicyPath = join(work, 'egress-policy.json')
 const seedScript = join(work, 'stub-seed.mjs')
 const dshHome = join(work, 'dsh')
 const token = randomBytes(24).toString('hex')
@@ -50,6 +51,9 @@ const server = spawn(process.execPath, [join(root, 'bin/dsh-key-admin.mjs')], {
     DSH_KEY_ADMIN_SEED: seedScript,
     DSH_KEY_ADMIN_WEB: join(root, 'bin/dsh-key-admin-web'),
     DSH_KEY_ADMIN_UPSTREAM_TIMEOUT_MS: '8000',
+    DSH_KEY_ADMIN_EGRESS_POLICY: egressPolicyPath,
+    // 部署形态给 blocklist：面板要照这个给默认策略，保存时也不该提示「当前是 open」。
+    DSH_EGRESS_MODE: 'blocklist',
     STUB_SEED_OUT: seedPayloadPath,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -228,6 +232,57 @@ try {
   assert.equal(missing.status, 404)
 
   assert.equal(existsSync(join(dshHome, 'settings.yaml')), false, '替身 seed 不写文件，这里只确认没人偷偷写')
+
+  // --- 出站策略 ---
+  //
+  // 面板是唯一能写这份策略的地方（dsh 容器没挂这个目录），所以读、写、拒非法条目
+  // 三条都要钉住：写坏了等于「以为在挡、其实全放行」。
+  const egressBefore = (await call('/api/state')).payload.egress
+  assert.equal(egressBefore.deploymentMode, 'blocklist')
+  assert.equal(egressBefore.policyPath, egressPolicyPath)
+  assert.equal(egressBefore.available, true, '目录在就应该可写')
+  assert.equal(egressBefore.exists, false, '还没保存过，文件不该存在')
+  assert.equal(egressBefore.error, '')
+  // 文件还没写过时给的默认策略：模式跟着部署形态，黑名单补成内置隧道清单。
+  assert.equal(egressBefore.policy.mode, 'blocklist')
+  assert.equal(egressBefore.policy.allow.length, 0)
+  assert.equal(egressBefore.policy.block.length, egressBefore.builtinBlock.length)
+  assert.ok(egressBefore.builtinAllow.includes('deb.debian.org'))
+  assert.ok(egressBefore.builtinBlock.some((entry) => entry.host === '*.trycloudflare.com'))
+
+  const egressSaved = await call('/api/egress', {
+    method: 'POST',
+    body: {
+      policy: {
+        mode: 'allowlist',
+        allow: [{ host: 'Search.Example.com', note: '搜索' }],
+        block: [{ host: '*.ngrok.io', enabled: false }],
+      },
+    },
+  })
+  assert.equal(egressSaved.status, 200, egressSaved.text)
+  assert.match(egressSaved.payload.brokerReload, /热加载/)
+  const egressFile = JSON.parse(readFileSync(egressPolicyPath, 'utf8'))
+  assert.equal(egressFile.version, 1)
+  assert.equal(egressFile.mode, 'allowlist')
+  assert.deepEqual(egressFile.allow, [{ host: 'search.example.com', enabled: true, note: '搜索' }])
+  // 取消勾选的条目要留在文件里（下次还能勾回来），只是不进代理的规则。
+  assert.equal(egressFile.block.length, 1)
+  assert.equal(egressFile.block[0].enabled, false)
+  assert.equal((await call('/api/state')).payload.egress.exists, true)
+
+  // 非法域名一律 400，且不落盘。
+  const egressBad = await call('/api/egress', {
+    method: 'POST',
+    body: { policy: { mode: 'allowlist', allow: [{ host: 'bad_host.com' }], block: [] } },
+  })
+  assert.equal(egressBad.status, 400, egressBad.text)
+  assert.equal(JSON.parse(readFileSync(egressPolicyPath, 'utf8')).mode, 'allowlist')
+  const egressBadMode = await call('/api/egress', {
+    method: 'POST',
+    body: { policy: { mode: 'nonsense', allow: [], block: [] } },
+  })
+  assert.equal(egressBadMode.status, 400, egressBadMode.text)
 
   // --- 暴力破解 ---
   //
