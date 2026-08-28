@@ -16,7 +16,7 @@
 - **工具链持久化**：Agent 用 apt 安装的软件保留在容器可写层，启动、停止、重启和 DSH 更新都不重建容器。
 - **模型密钥不进容器**：真实密钥只存在于宿主文件和独立的代理容器中，DSH 侧填占位串。
 - **非特权运行**：DSH 与 Agent 以 `dsh`（1000:1000）身份运行，`cap_drop: ALL` 后只补回 7 项常规能力，apt 依旧可用。
-- **可选出站白名单**：容器出网强制经过域名白名单正向代理。
+- **可选出站黑/白名单**：容器出网强制经过独立正向代理，按域名黑名单或白名单放行。
 - **多架构预构建镜像**：`ghcr.io/univers629/dsh-docker:latest` 覆盖 `linux/amd64` 与 `linux/arm64`，拉取失败时自动改为本地构建。
 
 > DSH 本体在容器内更新即可（WebUI 的“DSH 环境”页，或 `./dsh.sh update`），不需要重建容器或跟随镜像更新。
@@ -132,14 +132,14 @@ flowchart LR
 
     broker["dsh-key-broker 容器<br/>read_only · 无端口发布"]
     admin["dsh-key-admin 容器<br/>密钥管理面板 · 令牌鉴权"]
-    egress["dsh-egress 容器<br/>域名白名单正向代理"]
+    egress["dsh-egress 容器<br/>域名黑/白名单正向代理"]
     upstream["模型上游 API"]
     internet["公网"]
 
     client -->|3080| nginx --> agent
     client -->|3082 回环 + 令牌| admin
     agent -->|占位密钥| broker -->|注入真实密钥| upstream
-    agent -->|allowlist 模式| egress --> internet
+    agent -->|隔离模式| egress --> internet
     agent -.->|unix socket| helper
     keys -.->|只读挂载| broker
     keys -.->|读写| admin
@@ -170,7 +170,7 @@ Debian 系统目录留在容器可写层，不使用 overlay 覆盖，因此同�
 | 层 | 实现 | 覆盖的风险 |
 | --- | --- | --- |
 | 密钥外置 | 独立 `dsh-key-broker` 容器注入密钥，剥离客户端认证头，路径白名单、限速与每日配额 | 提示注入或任意命令执行导致的密钥外泄 |
-| 出站控制 | `allowlist` 模式下容器只接内部网络，出网经域名白名单代理，并校验 DNS 解析结果 | 数据外发到任意地址、绕过密钥代理 |
+| 出站控制 | 隔离模式下容器只接内部网络，出网经域名黑/白名单代理，并校验 DNS 解析结果 | 数据外发到任意地址、绕过密钥代理 |
 | 运行身份 | DSH、Agent 与 Nginx worker 以 1000:1000 运行；仅 PID 1、Nginx 主进程和特权代理为 root | 容器内直接以 root 运行进程 |
 | 能力收敛 | `cap_drop: ALL` 后只补回 `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`FSETID`、`SETGID`、`SETUID`、`KILL`，保持 `no-new-privileges`，不放开 seccomp 与 AppArmor | `CAP_SYS_ADMIN` 挂载逃逸、cgroup `release_agent`、内核模块加载、跨进程 ptrace |
 | 隔离面 | 不使用 privileged、不挂载 Docker socket、不共享宿主 PID/network/IPC namespace、设置 `pids_limit` | Docker API 逃逸、宿主进程可见性、fork 炸弹 |
@@ -182,8 +182,9 @@ Debian 系统目录留在容器可写层，不使用 overlay 覆盖，因此同�
 
 - 容器与宿主共享内核，内核和容器运行时漏洞无法在容器内加固层面拦住，需要升级宿主内核与 Docker。
 - 默认免密 apt 意味着容器内可以通过白名单代理取得容器 root；收紧方式是 `DSH_PRIVILEGED_APT=password`。
-- 密钥代理只保证密钥字面值不进入容器，不保护额度和数据，需要靠配额与出站白名单限制损失。
+- 密钥代理只保证密钥字面值不进入容器，不保护额度和数据，需要靠请求限额与出站白名单限制损失。
 - 出站白名单按域名判定且不做 TLS 中间人，放行域名下的任意路径都可访问。
+- 出站黑名单是启发式清单，只降低顺手滥用的概率，自建域名的隧道挡不住；真正的边界只有白名单。
 - 第一道防线仍然是不把不可信内容交给 Agent，上述各层只缩小注入成功后的后果。
 
 威胁模型、每层的具体配置、密钥代理的 `keys.json` 结构、出站白名单细节、user namespace remap 与 rootless Docker 的取舍，见 [docs/security.md](docs/security.md)。
@@ -203,13 +204,14 @@ Debian 系统目录留在容器可写层，不使用 overlay 覆盖，因此同�
 
 ### 密钥管理面板
 
-不想在终端里填密钥就用管理面板：浏览器里增删上游、填密钥、选 API 形态、写模型 id、设固定请求头，还能按上游拉一次模型列表；保存后同时写 `data/broker/keys.json` 与 DSH 的 `settings.yaml`、`.credentials.yaml`，两边都是热加载，不用重启任何容器。面板不提供限速和配额输入框（DSH 的模型页也没有），已有配置里设过的值会照原样保留，改这两项请用 `--model-keys-file`。
+不想在终端里填密钥就用管理面板：浏览器里增删上游、填密钥、选 API 形态、写模型 id、设固定请求头、设请求限额，还能按上游拉一次模型列表；保存后同时写 `data/broker/keys.json` 与 DSH 的 `settings.yaml`、`.credentials.yaml`，两边都是热加载，不用重启任何容器。面板还管容器的出站策略（见「出站模式」）。
 
 - 开启：新装向导会问；已有部署执行 `./install.sh key-panel`（Windows：`.\install.ps1 -DshAction key-panel`），它只新增 `dsh-key-admin` 容器，不重建 `dsh`。关闭用 `--no-key-admin`。
 - 访问：默认 `http://127.0.0.1:3082/`，访问令牌在 `data/broker/admin.token`（0600）。远程用 SSH 隧道：`ssh -N -L 3082:127.0.0.1:3082 <用户名@宿主地址>`。地址与端口由 `DSH_KEY_ADMIN_BIND_HOST`、`DSH_KEY_ADMIN_HOST_PORT` 决定。
 - 面板刻意不做进 DSH 的 WebUI：那个页面运行在 DSH 容器内，填进去的密钥就落在 Agent 能读的地方。面板作为独立容器只接入 `dsh-admin` 网络，`dsh` 容器不在其上；安装器会从 `dsh` 容器内实测这条连接必须失败，否则安装失败。
 - 令牌连续输错会触发递增延迟与锁定；面板容器自身 `read_only`、`cap_drop: ALL`、以 1000:1000 运行，只能读写 `data/broker` 与 `data/dsh`。
 - 推理强度：DSH 的模型页只对声明过档位的模型显示「推理强度」菜单，所以面板里那一栏留空时没有这个下拉。填 `off, low, medium, high` 这样的档位（可用 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）会写进这个上游的每个模型；给不支持 `reasoning_effort` 的模型声明档位会被上游拒绝，所以按上游实际支持的填。
+- 请求限额：每分钟请求上限 + 每日请求配额（UTC 零点清零），数的是请求次数，不是 token 也不是金额，撞到上限时代理返回 429。`0` 表示不限，留空表示沿用现值。按 token 或金额限额需要逐家解析用量字段并维护价格表，面板不做；要按钱卡住就在上游平台后台给这把密钥单独设额度。
 - 空的 `keys.json` 是合法状态：安装时可以先不填密钥，这期间模型请求返回 503，等在面板里填完第一把密钥即可。
 - 代理托管的上游不要在 DSH 的 WebUI 卡片里填密钥：那个密钥框是 `type=password`，浏览器的密码管理器会自动往里填一个保存过的密码，随手保存一次就把它明文写进容器里的 `.credentials.yaml`。面板每 30 秒会把这类值换回占位串并在日志里点名（提醒轮换），但填进去的那把仍应视为已经进过容器。
 - 跳过密钥代理和面板时，WebUI 直填密钥仍然可用，代价是失去这一层保护。
@@ -236,7 +238,10 @@ DSH 的模型页只渲染配置里真实存在的供应商，配置被拒收时�
 `.env` 中的 `DSH_EGRESS_MODE` 决定容器如何出网：
 
 - `open`（默认）：容器直连公网，配置简单，但被注入的 Agent 可以把数据发到任意地址。
-- `allowlist`：容器只接入无网关的内部网络，出网必须经过 `dsh-egress` 正向代理，按域名白名单放行；内置白名单覆盖 Debian、npm、PyPI、GitHub、GHCR 等 15 个域名，`DSH_EGRESS_ALLOWED_HOSTS` 在其之上追加域名（写 `DSH_EGRESS_ALLOWED_HOSTS_MODE=replace` 才整体替换）。白名单外的域名一律 403，包括 Agent 要访问的网页与搜索接口。
+- `blocklist`：容器只接入无网关的内部网络，出网必须经过 `dsh-egress` 正向代理，默认放行，只拒绝黑名单里的域名；内置黑名单是常见的一键公网隧道服务（cloudflared 快速隧道、ngrok、cpolar 等），它们能把容器里的端口发布到公网。Agent 的网页访问、搜索接口、第三方下载都照常可用。
+- `allowlist`：同样只经 `dsh-egress` 出网，但只放行白名单里的域名；内置白名单覆盖 Debian、npm、PyPI、GitHub、GHCR 等 15 个域名。白名单外的域名一律 403，包括 Agent 要访问的网页与搜索接口。
+
+模式与两份清单存在 `data/egress/policy.json`（面板可写，代理只读，按修改时间热加载）。`blocklist` 与 `allowlist` 之间的切换、清单的增删改都在密钥管理面板的「容器出站策略」里做，5 秒生效；只有 `open` 与隔离模式之间的切换要重跑安装器，因为那要改 compose 叠加。三种模式都不影响模型请求：那条路由由 `dsh-key-broker` 独立出网。
 
 ## 镜像发布
 

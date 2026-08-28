@@ -24,7 +24,7 @@ param(
     [switch]$NoKeyAdmin,
     [string]$KeyAdminBind = '',
     [string]$KeyAdminPort = '',
-    [ValidateSet('','open','allowlist')]
+    [ValidateSet('','open','blocklist','allowlist')]
     [string]$Egress = '',
     [string[]]$EgressAllow = @(),
     [switch]$UsernsPreflight,
@@ -739,9 +739,47 @@ function Show-KeyAdminAccess {
     }
 }
 
+# 出站策略文件 data\egress\policy.json：模式 + 白名单 + 黑名单。dsh-egress 只读它，密钥
+# 管理面板可写它，两边都按修改时间热加载，所以装完之后改清单、在黑白名单之间切换都不用
+# 再回终端（只有 open 和隔离形态之间的切换要重跑安装器，那要改 compose 叠加）。
+#
+# 这里只写 mode 一个字段：两份清单缺字段时由代理和面板自己补默认值（白名单回落到内置
+# 软件源，黑名单回落到内置隧道清单），省得把同一份域名表在这里再抄一遍。
+function Get-EgressPolicyMode {
+    $file = Join-Path (Get-Location) 'data\egress\policy.json'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return '' }
+    $found = [regex]::Match([IO.File]::ReadAllText($file), '"mode"\s*:\s*"([a-z]+)"')
+    if ($found.Success) { return $found.Groups[1].Value }
+    return ''
+}
+
+function Write-EgressPolicy {
+    param([string]$Mode)
+    if ($Mode -eq 'open') { return }
+    $dir = Join-Path (Get-Location) 'data\egress'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $file = Join-Path $dir 'policy.json'
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    if (Test-Path -LiteralPath $file -PathType Leaf) {
+        if ((Get-EgressPolicyMode) -eq $Mode) { return }
+        # 只替换 mode，两份清单原样保留：它们是用户在面板里改过的。
+        $next = [IO.File]::ReadAllText($file) -replace '("mode"\s*:\s*")[a-z]+(")', ('${1}' + $Mode + '${2}')
+        if ($next -notmatch ('"mode"\s*:\s*"' + $Mode + '"')) {
+            Write-Host '[警告] data\egress\policy.json 里没找到可替换的 mode 字段，没有改动它。' -ForegroundColor Yellow
+            Write-Host '       现在生效的是文件里那个模式，可以在密钥管理面板里直接改。' -ForegroundColor Yellow
+            return
+        }
+        [IO.File]::WriteAllText($file, $next, $utf8NoBom)
+        Write-Host "==> 出站策略的模式已改成 $Mode（data\egress\policy.json，两份清单保留）。" -ForegroundColor Yellow
+        return
+    }
+    [IO.File]::WriteAllText($file, ("{`n  ""version"": 1,`n  ""mode"": ""$Mode""`n}`n"), $utf8NoBom)
+    Write-Host "==> 出站策略已写入 data\egress\policy.json（模式 $Mode），清单之后在密钥管理面板里改。" -ForegroundColor Yellow
+}
+
 function Assert-EgressIsolation {
     param([string]$ProbeHost)
-    Write-Host '==> 正在核验出站白名单代理（dsh-egress）...' -ForegroundColor Yellow
+    Write-Host '==> 正在核验出站代理（dsh-egress）...' -ForegroundColor Yellow
     $payload = ''
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         $payload = ((& docker exec dsh-egress node -e "fetch('http://127.0.0.1:3128/status').then(async (response) => { if (response.status !== 200) { process.exit(1) } process.stdout.write(await response.text()) }).catch(() => process.exit(1))" 2>$null) -join '')
@@ -1382,7 +1420,13 @@ $modelBroker = Get-ComposeEnvValue $envFile 'DSH_MODEL_BROKER' 'off'
 if ($modelBroker -notin @('on','off')) { $modelBroker = 'off' }
 $keyAdmin = 'off'
 $egressMode = if ($Egress) { $Egress } else { Get-ComposeEnvValue $envFile 'DSH_EGRESS_MODE' 'open' }
-if ($egressMode -notin @('open','allowlist')) { $egressMode = 'open' }
+if ($egressMode -notin @('open','blocklist','allowlist')) { $egressMode = 'open' }
+# 黑白名单之间的切换可以在密钥管理面板里做，那时 .env 不会跟着变。所以隔离部署的当前
+# 模式要以策略文件为准，否则重跑安装器会把面板里的选择悄悄改回来。
+if (-not $Egress -and $egressMode -ne 'open') {
+    $egressPolicyMode = Get-EgressPolicyMode
+    if ($egressPolicyMode -in @('blocklist','allowlist')) { $egressMode = $egressPolicyMode }
+}
 $egressAllowed = if ($EgressAllow.Count -gt 0) { ($EgressAllow -join ',') } else { Get-ComposeEnvValue $envFile 'DSH_EGRESS_ALLOWED_HOSTS' '' }
 
 if ($DshAction -in @('install','configure')) {
@@ -1439,6 +1483,8 @@ if ($DshAction -in @('install','configure')) {
     New-Item -ItemType Directory -Path (Join-Path (Get-Location) 'data\secret') -Force | Out-Null
     # data\broker 存模型密钥，只被 dsh-key-broker 容器只读挂载，不出现在 DSH 容器的挂载表里。
     New-Item -ItemType Directory -Path (Join-Path (Get-Location) 'data\broker') -Force | Out-Null
+    # data\egress 存出站策略（模式 + 白名单 + 黑名单）：管理面板可写，dsh-egress 只读挂载。
+    New-Item -ItemType Directory -Path (Join-Path (Get-Location) 'data\egress') -Force | Out-Null
     $authFile = Join-Path (Get-Location) 'data\auth\htpasswd'
     $replaceAuth = -not (Test-Path $authFile)
     if ($accessMode -eq 'basic' -and $interactive -and -not $replaceAuth) { $replaceAuth = -not (Ask-YesNo '保留现有 Basic Auth 用户名和密码' $true) }
@@ -1561,16 +1607,20 @@ if ($DshAction -in @('install','configure')) {
 
     # ---- 出站模式 ----
     if ($interactive -and -not $Egress) {
-        Write-Host '容器出站网络：'
-        Write-Host '1) open（默认）：容器可访问任意外网地址。'
-        Write-Host '2) allowlist：容器只能经 dsh-egress 代理出网，白名单外的域名返回 403。'
-        Write-Host '    内置白名单：Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，'
-        Write-Host '    足够 apt / pip / npm / git 正常工作；其他域名需要在下一问里补充。'
-        Write-Host '    影响范围：Agent 访问白名单外的网页、搜索接口、第三方下载站会被拒绝。'
-        Write-Host '    不受影响：模型请求（dsh-key-broker 独立出网）；宿主 3080 改由 dsh-ingress'
-        Write-Host '    发布，反向代理仍写 http://dsh:3080。'
-        $egressDefault = if ($egressMode -eq 'allowlist') { '2' } else { '1' }
-        $egressMode = switch (Ask '请选择' $egressDefault) { '2' {'allowlist'}; default {'open'} }
+        Write-Host '容器出站网络（三种都不影响模型请求：那条路由走 dsh-key-broker，是另一个容器出网）：'
+        Write-Host '1) open：容器直接访问任意外网地址。'
+        Write-Host '2) blocklist：出站经 dsh-egress 代理，默认放行，只挡黑名单里的域名。'
+        Write-Host '    内置黑名单是常见的一键公网隧道服务（cloudflared 快速隧道、ngrok、cpolar 等），'
+        Write-Host '    它们能把容器里的端口发布到公网，等于把模型密钥代理变成别人能用的免费网关。'
+        Write-Host '    Agent 的网页搜索、文档站、第三方下载都照常可用。'
+        Write-Host '3) allowlist：出站经 dsh-egress 代理，只放行白名单里的域名，其余返回 403。'
+        Write-Host '    内置白名单覆盖 Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，'
+        Write-Host '    足够 apt / pip / npm / git 正常工作；网页搜索和文档站要自己补域名。'
+        Write-Host '  选 2 或 3 之后：dsh 容器不再直连外网，宿主 3080 改由 dsh-ingress 发布'
+        Write-Host '  （反向代理仍写 http://dsh:3080）。两份清单和 2/3 之间的切换之后都能在密钥管理'
+        Write-Host '  面板里热改，只有和 1 之间的切换要重跑这个安装器。'
+        $egressDefault = switch ($egressMode) { 'blocklist' { '2' } 'allowlist' { '3' } default { '1' } }
+        $egressMode = switch (Ask '请选择' $egressDefault) { '2' {'blocklist'}; '3' {'allowlist'}; default {'open'} }
     }
     if ($egressMode -eq 'allowlist' -and $interactive -and $EgressAllow.Count -eq 0) {
         Write-Host '    填写的域名会追加在内置白名单之后（内置的软件源始终放行），留空表示只用内置白名单。'
@@ -1597,9 +1647,11 @@ if ($DshAction -in @('install','configure')) {
         Write-Host '[警告] 密钥代理关着，密钥管理面板不会启动（它管理的就是代理那份密钥配置）。' -ForegroundColor Yellow
         $keyAdmin = 'off'
     }
-    if ($egressMode -eq 'allowlist') {
+    # blocklist 与 allowlist 用同一套隔离形态：都把 dsh 收进没有网关的网络，出站全部经过
+    # dsh-egress。两者只差代理里那最后一道域名判定，而那是策略文件的事。
+    if ($egressMode -ne 'open') {
         if (-not (Test-Path -LiteralPath 'docker-compose.isolated.yml' -PathType Leaf)) {
-            throw '需要 docker-compose.isolated.yml 才能启用出站白名单模式，但工程目录里没有它。请更新工程源码，或用 -Egress open 保持直连出网。'
+            throw '需要 docker-compose.isolated.yml 才能启用出站黑/白名单模式，但工程目录里没有它。请更新工程源码，或用 -Egress open 保持直连出网。'
         }
         $composeFileArgs += @('-f','docker-compose.isolated.yml')
     }
@@ -1660,6 +1712,7 @@ switch ($DshAction) {
         Invoke-BrokerModelDiscovery -Image $imageRef
         Write-BrokerConfig $brokerConfigFile
         Write-KeyAdminToken ($keyAdmin -eq 'on')
+        Write-EgressPolicy -Mode $egressMode
         Invoke-DshModelSettingsSeed -Image $imageRef -BrokerConfig $brokerConfigFile -Enabled ($modelBroker -eq 'on')
         $pendingEnvFile = Join-Path (Get-Location) ('.env.pending.' + $PID + '.' + [guid]::NewGuid().ToString('N'))
         try {
@@ -1689,7 +1742,8 @@ switch ($DshAction) {
             Assert-DshHardening
             if ($modelBroker -eq 'on') { Assert-ModelBroker }
             if ($keyAdmin -eq 'on') { Assert-KeyAdmin }
-            if ($egressMode -eq 'allowlist') { Assert-EgressIsolation -ProbeHost $bind }
+            # blocklist 和 allowlist 是同一套隔离形态，出站链路要一样地核验。
+            if ($egressMode -ne 'open') { Assert-EgressIsolation -ProbeHost $bind }
         } finally {
             if ($pendingEnvFile -and (Test-Path -LiteralPath $pendingEnvFile)) {
                 Remove-Item -LiteralPath $pendingEnvFile -Force -ErrorAction SilentlyContinue
@@ -1814,7 +1868,7 @@ switch ($DshAction) {
                 $statusFileArgs += @('-f','docker-compose.keys-admin.yml')
             }
         }
-        if ((Get-ComposeEnvValue '.env' 'DSH_EGRESS_MODE' 'open') -eq 'allowlist' -and (Test-Path -LiteralPath 'docker-compose.isolated.yml' -PathType Leaf)) {
+        if ((Get-ComposeEnvValue '.env' 'DSH_EGRESS_MODE' 'open') -ne 'open' -and (Test-Path -LiteralPath 'docker-compose.isolated.yml' -PathType Leaf)) {
             $statusFileArgs += @('-f','docker-compose.isolated.yml')
         }
         docker compose @statusFileArgs ps
@@ -1838,8 +1892,8 @@ if ($DshAction -in @('install','configure')) {
             Write-Host '模型设置：已写进 data\dsh\settings.yaml，WebUI 的「设置 → 模型」里可直接选模型' -ForegroundColor Green
         }
         Write-Host '作用范围：只保证密钥字面值不进入 dsh 容器，不限制额度消耗，也不阻止数据外发。' -ForegroundColor Yellow
-        Write-Host '  容器里的 Agent 用占位密钥仍可发起请求，因此建议为每个上游设置' -ForegroundColor Yellow
-        Write-Host '  requestsPerMinute / dailyRequestBudget，并按需启用 allowlist 出站模式。' -ForegroundColor Yellow
+        Write-Host '  容器里的 Agent 用占位密钥仍可发起请求，因此建议在密钥管理面板里给每个上游' -ForegroundColor Yellow
+        Write-Host '  设置请求限额（每分钟上限 / 每日配额），并按需启用出站黑名单或白名单。' -ForegroundColor Yellow
     } else {
         Write-Host '模型密钥代理：关（密钥若写进容器内的配置或环境，容器里的 Agent 一条 cat 就能读到）' -ForegroundColor Green
     }
@@ -1851,6 +1905,11 @@ if ($DshAction -in @('install','configure')) {
         } else {
             Write-Host '白名单：仅内置白名单（Debian / npm / PyPI / GitHub / ghcr.io / nodejs.org / astral.sh）' -ForegroundColor Green
         }
+        Write-Host '清单可在密钥管理面板的「容器出站策略」里改，改完 5 秒生效' -ForegroundColor Green
+    } elseif ($egressMode -eq 'blocklist') {
+        Write-Host '出站模式：blocklist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）' -ForegroundColor Green
+        Write-Host '黑名单：内置的一键公网隧道域名清单，其余域名默认放行' -ForegroundColor Green
+        Write-Host '清单和模式可在密钥管理面板的「容器出站策略」里改，改完 5 秒生效' -ForegroundColor Green
     } else {
         Write-Host '出站模式：open（容器可访问任意外网地址，出站流量不做域名限制）' -ForegroundColor Green
     }

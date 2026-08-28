@@ -24,6 +24,16 @@ import { fileURLToPath } from 'node:url'
 
 import { fetchUpstreamModels } from './dsh-upstream-models.mjs'
 import {
+  DEFAULT_ALLOWED_HOSTS,
+  DEFAULT_BLOCKED_HOSTS,
+  EgressPolicyError,
+  normalizeEgressPolicy,
+  parseDeploymentEgressMode,
+  parseEgressPolicyText,
+  parseProxyEgressMode,
+  serializeEgressPolicy,
+} from './dsh-egress-policy.mjs'
+import {
   DEFAULT_LOCKOUT,
   attemptDelayMs,
   emptyLockoutState,
@@ -64,6 +74,16 @@ const UPSTREAM_TIMEOUT_MS = Number(process.env.DSH_KEY_ADMIN_UPSTREAM_TIMEOUT_MS
 const SEED_TIMEOUT_MS = Number(process.env.DSH_KEY_ADMIN_SEED_TIMEOUT_MS ?? 120_000)
 // 凭据巡检间隔。0 或负数关闭；见 scrubCredentials 上面那段说明。
 const SCRUB_INTERVAL_MS = Number(process.env.DSH_KEY_ADMIN_SCRUB_INTERVAL_MS ?? 30_000)
+// 出站策略文件（面板可写，dsh-egress 只读挂同一份）。空串 = 这台部署没有这个功能。
+const EGRESS_POLICY_PATH = (process.env.DSH_KEY_ADMIN_EGRESS_POLICY ?? '/etc/dsh-egress/policy.json').trim()
+// 当前部署形态：open 时策略文件存在也不生效（那种部署根本没有 dsh-egress 容器）。
+const DEPLOYMENT_EGRESS_MODE = (() => {
+  try {
+    return parseDeploymentEgressMode(process.env.DSH_EGRESS_MODE, 'open')
+  } catch {
+    return 'open'
+  }
+})()
 const BODY_LIMIT = 256 * 1024
 
 const STATIC_FILES = new Map([
@@ -345,6 +365,110 @@ async function scrubCredentials() {
   }
 }
 
+// --- 容器出站策略 ---
+//
+// 这份文件决定 dsh 容器出网时哪些域名放得过去。它和密钥没关系，但归在同一个面板里：
+// 两者都是"只有宿主上的人能改、容器里的 Agent 摸不到"的配置，而面板本来就是那唯一
+// 一个既能写宿主文件、又不在 dsh 网络上的容器。
+//
+// open ↔ 隔离（blocklist / allowlist）的切换不在这里：那要改 compose 叠加，只能在宿主上
+// 重跑安装器。allowlist ↔ blocklist 与两份清单的增删改都是热的，代理 5 秒内跟上。
+function readEgressPolicy() {
+  if (EGRESS_POLICY_PATH === '') return { available: false, exists: false, policy: normalizeEgressPolicy({}), error: '' }
+  let text
+  try {
+    text = fs.readFileSync(EGRESS_POLICY_PATH, 'utf8')
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      // 目录在但文件还没写过：这是全新部署的正常状态，给一份默认策略让页面能直接编辑。
+      const available = fs.existsSync(path.dirname(EGRESS_POLICY_PATH))
+      return {
+        available,
+        exists: false,
+        // 默认策略跟着部署形态走（open 部署按 allowlist 显示，那种部署里 mode 本来不生效），
+        // 黑名单由 normalizeEgressPolicy 补成内置隧道清单。
+        policy: normalizeEgressPolicy({ mode: parseProxyEgressMode(DEPLOYMENT_EGRESS_MODE) }),
+        error: available ? '' : EGRESS_POLICY_PATH + ' 所在目录没有挂进面板容器，先在宿主上重跑一次安装器。',
+      }
+    }
+    return { available: false, exists: false, policy: normalizeEgressPolicy({}), error: '读不到 ' + EGRESS_POLICY_PATH + '：' + error.message }
+  }
+  try {
+    return { available: true, exists: true, policy: parseEgressPolicyText(text), error: '' }
+  } catch (error) {
+    // 文件被手改坏了：如实报出来，同时给一份默认策略，别让页面白屏。
+    return {
+      available: true,
+      exists: true,
+      policy: normalizeEgressPolicy({ mode: parseProxyEgressMode(DEPLOYMENT_EGRESS_MODE) }),
+      error: String(error && error.message) + '（代理仍在用上一份规则，这里保存一次就能修好）',
+    }
+  }
+}
+
+function writeEgressPolicy(policy) {
+  if (EGRESS_POLICY_PATH === '') {
+    throw new AdminInputError('这台部署没有出站策略文件（DSH_KEY_ADMIN_EGRESS_POLICY 是空的）。', 400)
+  }
+  const text = serializeEgressPolicy(policy)
+  const temporary = EGRESS_POLICY_PATH + '.tmp.' + process.pid
+  try {
+    // 0644：dsh-egress 以另一个 UID 只读挂载这份文件，必须读得到。它不是秘密。
+    fs.writeFileSync(temporary, text, { mode: 0o644 })
+    fs.chmodSync(temporary, 0o644)
+    fs.renameSync(temporary, EGRESS_POLICY_PATH)
+  } catch (error) {
+    try {
+      fs.rmSync(temporary, { force: true })
+    } catch {
+      // 临时文件删不掉不影响正确性。
+    }
+    throw new AdminInputError('写不了 ' + EGRESS_POLICY_PATH + '：' + error.message
+      + '（目录要挂进面板容器才能改，先在宿主上重跑一次安装器）', 500)
+  }
+}
+
+function egressState() {
+  const current = readEgressPolicy()
+  return {
+    deploymentMode: DEPLOYMENT_EGRESS_MODE,
+    policyPath: EGRESS_POLICY_PATH,
+    available: current.available,
+    exists: current.exists,
+    error: current.error,
+    policy: current.policy,
+    // 内置清单给页面用：白名单里这些源始终放行（append 模式），黑名单可以一键恢复默认。
+    builtinAllow: Array.from(DEFAULT_ALLOWED_HOSTS),
+    builtinBlock: DEFAULT_BLOCKED_HOSTS.map((entry) => ({ host: entry.host, note: entry.note })),
+  }
+}
+
+async function saveEgressHandler(body) {
+  let policy
+  try {
+    policy = normalizeEgressPolicy(body?.policy ?? body)
+  } catch (error) {
+    if (error instanceof EgressPolicyError) throw new AdminInputError(error.message, 400)
+    throw error
+  }
+  writeEgressPolicy(policy)
+  log({
+    event: 'egress-save',
+    mode: policy.mode,
+    allow: policy.allow.filter((entry) => entry.enabled).length,
+    block: policy.block.filter((entry) => entry.enabled).length,
+  })
+  const notes = ['dsh-egress 每 5 秒按修改时间热加载这份策略：allowlist 与 blocklist 之间的切换、清单的增删改都不用重启容器。']
+  if (DEPLOYMENT_EGRESS_MODE === 'open') {
+    notes.push('当前部署是 open：容器直连外网，根本不经过 dsh-egress，所以这份策略暂时不生效。'
+      + '要让它生效，在宿主上重跑 ./install.sh，出站那一问选 blocklist 或 allowlist。')
+  }
+  if (policy.mode === 'blocklist') {
+    notes.push('blocklist 只挡清单里的域名，自建域名的隧道挡不住；要真正收口就用 allowlist。')
+  }
+  return { ok: true, egress: egressState(), brokerReload: notes.join('\n') }
+}
+
 async function fetchModels(record) {
   const found = await fetchUpstreamModels(record, { timeoutMs: UPSTREAM_TIMEOUT_MS })
   if (found.ok) {
@@ -368,6 +492,7 @@ function stateResponse() {
     defaultBaseUrls: { ...DEFAULT_BASE_URLS },
     defaultShapes,
     upstreams: document.upstreams.map((entry) => toUpstreamView(entry)),
+    egress: egressState(),
   }
 }
 
@@ -527,6 +652,10 @@ async function handle(request, response) {
   }
   if (pathname === '/api/seed') {
     sendJson(response, 200, await seedHandler())
+    return
+  }
+  if (pathname === '/api/egress') {
+    sendJson(response, 200, await saveEgressHandler(body))
     return
   }
   sendJson(response, 404, { ok: false, message: '没有这个地址：' + pathname })

@@ -113,7 +113,7 @@
 }
 ```
 
-`requestsPerMinute` 与 `dailyRequestBudget` 缺省或为 `0` 表示不限，此时代理只防密钥外泄、不提供额度保护，建议显式设置（例如 `requestsPerMinute: 60`，每日配额按实际用量设定，撞到 429 再调高）。安装向导和管理面板都不问这两项（DSH 官方的模型页也没有对应控件），要设就用 `--model-keys-file` 给一份完整的 `keys.json`，或直接改宿主上的 `data/broker/keys.json`（broker 每 5 秒按 mtime 热加载）；面板保存时不会清掉已经设过的值。`maxRequestBytes` 缺省为 8 MiB。`headerName` 与 `headerTemplate` 默认是 `authorization` 与 `Bearer {key}`，只有使用其他认证头的上游需要显式设置。`allowedPathPrefixes` 缺省为 broker 内置的前缀集合，显式给出即为只放行这些前缀。客户端侧的 `base_url` 是 `http://dsh-key-broker:8080/u/<上游名>`，不带版本段，api key 填占位串 `dsh-broker-placeholder`。
+`requestsPerMinute` 与 `dailyRequestBudget` 缺省或为 `0` 表示不限，此时代理只防密钥外泄、不提供额度保护，建议显式设置（例如 `requestsPerMinute: 60`，每日配额按实际用量设定，撞到 429 再调高）。管理面板的上游表单里有「请求限额」两个输入框（每分钟上限、每日配额），留空表示沿用现值，填 `0` 表示取消限制；也可以用 `--model-keys-file` 给一份完整的 `keys.json`，或直接改宿主上的 `data/broker/keys.json`（broker 每 5 秒按 mtime 热加载）。安装向导不问这两项，避免首次安装时多问两行。`maxRequestBytes` 缺省为 8 MiB。`headerName` 与 `headerTemplate` 默认是 `authorization` 与 `Bearer {key}`，只有使用其他认证头的上游需要显式设置。`allowedPathPrefixes` 缺省为 broker 内置的前缀集合，显式给出即为只放行这些前缀。客户端侧的 `base_url` 是 `http://dsh-key-broker:8080/u/<上游名>`，不带版本段，api key 填占位串 `dsh-broker-placeholder`。
 
 ### 写进 DSH 的模型配置
 
@@ -148,7 +148,7 @@
 
 ### 密钥管理面板
 
-`.env` 中 `DSH_KEY_ADMIN=on` 时，安装器再叠加 `docker-compose.keys-admin.yml`，运行独立容器 `dsh-key-admin`：一个只做模型密钥配置的小面板（增删上游、填密钥、选 API 形态、写模型 id、设固定请求头、按上游拉一次模型列表），保存时同时写 `data/broker/keys.json` 与 DSH 的 `settings.yaml`、`.credentials.yaml`。
+`.env` 中 `DSH_KEY_ADMIN=on` 时，安装器再叠加 `docker-compose.keys-admin.yml`，运行独立容器 `dsh-key-admin`：一个只做模型密钥配置的小面板（增删上游、填密钥、选 API 形态、写模型 id、设固定请求头、设请求限额、按上游拉一次模型列表），保存时同时写 `data/broker/keys.json` 与 DSH 的 `settings.yaml`、`.credentials.yaml`。它还管容器的出站策略，写 `data/egress/policy.json`（见「出站模式」）。
 
 它填的是「密钥只能在安装向导里填」这个缺口，同时不能变成新的攻击面。面板持有全部真实密钥，所以以下三条边界缺一条它就比 WebUI 直填更糟：
 
@@ -156,7 +156,7 @@
 2. **发布地址**：宿主端口默认只发布在 `127.0.0.1:3082`。发布到 `0.0.0.0` 时 `dsh` 容器能经宿主网关回连这个端口，第 1 条就被绕开了，因此非回环绑定会给出警告，远程访问应当走 SSH 隧道。
 3. **鉴权**：除 `/healthz` 与静态资源外，所有 `/api` 都要 Bearer 令牌。令牌是 192 bit 随机值，写 `data/broker/admin.token`（0600），不进 `.env`；比较走定长摘要，连续失败触发与容器 root 口令同一套递增延迟与锁定。
 
-面板自身的收敛与 broker 一致：非 root（1000:1000）、`cap_drop: ALL`、`no-new-privileges`、只读根文件系统、`pids_limit`，可写范围只有 `data/broker` 与 `data/dsh` 两个挂载。另外两点值得单独说明：
+面板自身的收敛与 broker 一致：非 root（1000:1000）、`cap_drop: ALL`、`no-new-privileges`、只读根文件系统、`pids_limit`，可写范围只有 `data/broker`、`data/dsh` 与 `data/egress` 三个挂载。另外两点值得单独说明：
 
 - 服务代码从工程目录的 `./bin` 只读挂载进容器，不打进镜像，所以老部署开面板不需要重建镜像。
 - 写 DSH 配置前会 `lstat` 目标文件，`settings.yaml` 或 `.credentials.yaml` 是符号链接或目录时拒绝写入。`dsh` 容器对 `data/dsh` 有写权限，没有这道检查的话它可以把这两个路径换成指向别处的符号链接，诱导面板把 `keys.json` 的内容写进 Agent 能读的位置。这种情况只按「写 DSH 配置失败」处理，不影响密钥本身保存。
@@ -164,33 +164,35 @@
 
 ### 边界
 
-代理保证的是**密钥字面值不进入 DSH 容器**，密钥不会被复制出去或在别处复用。它不保护额度，也不保护数据：被注入的 Agent 仍然可以借它消耗额度，并把容器内的数据作为 prompt 发往上游。代理也不对客户端做认证，凡是能连上 `dsh-internal` 网络的进程都能通过它发请求——放进 DSH 容器的任何 broker 凭据同样会被读出，因此增加客户端认证没有实际收益。可用的缓解手段是配额限制损失上限，出站白名单限制数据能送往哪里。
+代理保证的是**密钥字面值不进入 DSH 容器**，密钥不会被复制出去或在别处复用。它不保护额度，也不保护数据：被注入的 Agent 仍然可以借它消耗额度，并把容器内的数据作为 prompt 发往上游。代理也不对客户端做认证，凡是能连上 `dsh-internal` 网络的进程都能通过它发请求——放进 DSH 容器的任何 broker 凭据同样会被读出，因此增加客户端认证没有实际收益。可用的缓解手段是请求限额压低损失上限，出站白名单限制数据能送往哪里。
 
 ## 出站模式
 
-`.env` 中的 `DSH_EGRESS_MODE` 决定容器如何出网。
+`.env` 中的 `DSH_EGRESS_MODE` 决定容器如何出网，三种取值：`open`、`blocklist`、`allowlist`。
 
 **open（默认）**：容器像普通 Docker 容器一样直连公网。配置简单，但被注入的 Agent 可以把数据 POST 到任意地址，也可以绕开密钥代理直连模型厂商。
 
-**allowlist**：安装器叠加 `docker-compose.isolated.yml`，容器出网必须经过独立的 `dsh-egress` 正向代理（监听 3128），按域名白名单放行。网络拓扑：
+**blocklist** 与 **allowlist**：安装器叠加 `docker-compose.isolated.yml`，容器出网必须经过独立的 `dsh-egress` 正向代理（监听 3128）。两种模式的网络拓扑、地址形态校验、端口限制与 DNS 解析校验完全一致，只差最后一道域名判定：`blocklist` 默认放行、拒绝黑名单命中的域名；`allowlist` 默认拒绝、只放行白名单命中的域名。网络拓扑：
 
 ```text
 宿主 3080 ──► dsh-ingress ──► dsh-app:3080      Nginx 四层转发，隔离模式下唯一发布端口的容器
-                    dsh ──► dsh-egress ──► 公网   域名白名单，HTTP 仅 80/443，CONNECT 仅 443
+                    dsh ──► dsh-egress ──► 公网   域名黑/白名单，HTTP 仅 80/443，CONNECT 仅 443
                     dsh ──► dsh-key-broker ──► 模型上游
 ```
 
 此时 dsh 容器只接入 `dsh-internal`（`internal: true`，没有默认网关），直连外网不是被拒绝，而是没有路由。
 
-- 内置白名单 15 个域名：`deb.debian.org`、`security.debian.org`、`registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`、`github.com`、`api.github.com`、`codeload.github.com`、`objects.githubusercontent.com`、`raw.githubusercontent.com`、`github-releases.githubusercontent.com`、`pkg-containers.githubusercontent.com`、`ghcr.io`、`astral.sh`、`nodejs.org`。
-- 默认拒绝绕过域名判定的写法：IP 字面量（含 `127.0.0.1`、`169.254.169.254`、10/8、172.16/12、192.168/16、`::1`、`fd00::/8`）、`localhost` 与 `.internal`/`.local`/`.localdomain`/`.localhost` 后缀、整数或十六进制形式的地址（`2130706433`、`0x7f000001`）、带凭据的 URL、非 http(s) scheme，以及 CONNECT 到 443 以外的端口。逐跳头在转发时剥除；代理不做 TLS 中间人，容器内证书链保持原样。
+- `allowlist` 的内置白名单 15 个域名：`deb.debian.org`、`security.debian.org`、`registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`、`github.com`、`api.github.com`、`codeload.github.com`、`objects.githubusercontent.com`、`raw.githubusercontent.com`、`github-releases.githubusercontent.com`、`pkg-containers.githubusercontent.com`、`ghcr.io`、`astral.sh`、`nodejs.org`。
+- `blocklist` 的内置黑名单 25 条，全部是「一条命令就把容器里的端口发布到公网」的隧道服务：`*.trycloudflare.com`、ngrok 的五个域名、`*.devtunnels.ms`、`*.loca.lt`、`*.lhr.life`、`*.serveo.net`、pinggy、zrok、bore、telebit、tunnelto、localtonet、jprq、`*.ts.net`（Tailscale Funnel）、cpolar、natapp、natfrp、openfrp、`*.vicp.net`。拦的是顺手滥用——把 `dsh-key-broker` 反代到公网让外人花你的额度；自建域名的 frp 或自己的 VPS 挡不住。每一条都可以在面板里取消勾选。
+- 两种模式都默认拒绝绕过域名判定的写法：IP 字面量（含 `127.0.0.1`、`169.254.169.254`、10/8、172.16/12、192.168/16、`::1`、`fd00::/8`）、`localhost` 与 `.internal`/`.local`/`.localdomain`/`.localhost` 后缀、整数或十六进制形式的地址（`2130706433`、`0x7f000001`）、带凭据的 URL、非 http(s) scheme，以及 CONNECT 到 443 以外的端口。逐跳头在转发时剥除；代理不做 TLS 中间人，容器内证书链保持原样。
 - DNS rebinding 防护：建连之前校验 DNS 解析结果，只允许公网单播地址，解析到环回、私网、链路本地（含云 metadata 的 `169.254.169.254`）、CGNAT 或 IPv4 映射的私网地址返回 403。可用 `DSH_EGRESS_ALLOW_PRIVATE_UPSTREAM=1` 关闭，仅在白名单中确实包含同网段内网镜像源时才应关闭，关闭后一个受控的白名单域名即可让代理成为访问宿主与内网的通道。
-- 放行新域名：在宿主的 `.env` 写 `DSH_EGRESS_ALLOWED_HOSTS`（逗号分隔，支持 `*.example.com` 形式的最左一级通配，不匹配裸域名），然后重启容器；安装时可用 `--egress open|allowlist` 与 `--egress-allow HOSTS` 指定。默认追加在内置白名单之后，内置软件源保持放行；写 `DSH_EGRESS_ALLOWED_HOSTS_MODE=replace` 才整体替换，此时仍需要的域名要写全。容器内无法修改白名单。
-- 影响范围：白名单外的域名对 apt / pip / npm / git 与 Agent 的网页抓取、搜索接口一律返回 403，需要哪些域名就显式列出。模型请求不经过 `dsh-egress`，由 `dsh-key-broker` 直接出网，因此不受白名单限制。
+- 清单的存放位置：`data/egress/policy.json`，形态是 `{ version, mode, allowMode, allow: [{ host, enabled, note }], block: [...] }`。这份文件只读挂到 `dsh-egress` 的 `/etc/dsh-egress`，可写挂到密钥管理面板容器；代理每 5 秒按 mtime 热加载（`DSH_EGRESS_POLICY_RELOAD_MS`，`0` 表示只读一次），解析失败时保留上一份并记一条 `policy-error` 审计，文件被删则回落到环境变量。增删域名、改勾选、在 `blocklist` 与 `allowlist` 之间切换都在面板的「容器出站策略」里做，不用重启容器；只有 `open` 与隔离模式之间的切换要重跑安装器，因为那要改 compose 叠加。
+- 环境变量兜底：策略文件不存在时按 `.env` 的 `DSH_EGRESS_MODE` 与 `DSH_EGRESS_ALLOWED_HOSTS`（逗号分隔，支持 `*.example.com` 形式的最左一级通配，不匹配裸域名，默认追加在内置白名单之后，写 `DSH_EGRESS_ALLOWED_HOSTS_MODE=replace` 才整体替换）生成规则；安装时可用 `--egress open|blocklist|allowlist` 与 `--egress-allow HOSTS` 指定。文件存在时以文件为准。文件里的 `mode` 写成 `open` 会被代理当作 `allowlist`（fail closed：代理进程存在就说明处于隔离模式）；`block` 字段缺失表示补齐内置隧道清单，写成空数组表示明确什么都不挡。dsh 容器没有挂载这个目录，容器内改不到。
+- 影响范围：`allowlist` 下白名单外的域名对 apt / pip / npm / git 与 Agent 的网页抓取、搜索接口一律返回 403，需要哪些域名就显式列出；`blocklist` 下只有黑名单命中的域名被拒，其余照常。两种模式都不影响模型请求：那条路由不经过 `dsh-egress`，由 `dsh-key-broker` 直接出网。
 - 入口使用四层转发：`dsh-ingress` 用 Nginx `stream` 模块做 TCP 转发，不解析 HTTP、不改 Host、不加 `X-Forwarded-*`，Basic Auth 与同源、凭据边界仍由 dsh 容器内的 Nginx 负责。其 `proxy_pass` 使用变量形式，每条新连接都走 Docker 内嵌 DNS，因此 dsh 容器重启换 IP 后自动跟上。
 - 上游写 `dsh-app:3080` 而不是 `dsh:3080`：`dsh-ingress` 在 `dsh-private` 网络上持有 network alias `dsh`（使把上游写成 `http://dsh:3080` 的反代无需改配置），而 Docker 内嵌 DNS 会把查询方自身的 alias 计入解析结果，导致 ingress 解析 `dsh` 时指向自己并自连失败。`docker-compose.isolated.yml` 因此给 dsh 服务在 `dsh-internal` 上另挂专用别名 `dsh-app`。
 - 容器内的包管理器配置：`bin/entrypoint.sh` 在隔离模式下写 `/etc/apt/apt.conf.d/00-dsh-proxy`、`/etc/pip.conf`、npm 的 globalconfig 和 `git config --system http.proxy`，并设置 `NODE_USE_ENV_PROXY=1`（Node 24 的 `--use-env-proxy`；undici/fetch 默认不读代理环境变量）。这些文件是必需的：这些工具对代理环境变量的支持不完整，apt 在特权代理中还会被清理环境。只有带 `dsh-docker managed` 标记的文件会被改写或回收，用户自建配置会被保留并提示；切回 open 模式时这些文件会被删除。
-- 运维命令：`./dsh.sh egress` 打印代理的 `/status`（白名单条数、允许端口、解析结果校验是否开启、活跃连接数、放行与拒绝计数）。
+- 运维命令：`./dsh.sh egress` 打印代理的 `/status`（当前模式、规则来源是策略文件还是环境变量、白名单与黑名单条数、允许端口、解析结果校验是否开启、活跃连接数、放行与拒绝计数）。
 
 旁路容器的加固一致：
 
@@ -198,7 +200,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `dsh` | PID 1 为 root；DSH、Agent 会话与 Nginx worker 为 1000:1000 | `cap_drop: ALL` + 7 项能力、`no-new-privileges`、可写系统层 | open 模式发布 3080，隔离模式不发布 | `/data`、`/workspace` 等绑定挂载 | DSH 本体与 Agent |
 | `dsh-key-broker` | 1000:1000 | `cap_drop: ALL`、`no-new-privileges`、`read_only` 根文件系统 + 16 MB `/tmp` tmpfs | 不发布 | 只读挂载 `data/broker` | 注入模型密钥、限速与配额 |
-| `dsh-egress` | 1000:1000 | 同上 | 不发布 | 无 | 出站域名白名单正向代理 |
+| `dsh-egress` | 1000:1000 | 同上 | 不发布 | 只读挂载 `bin` 与 `data/egress` | 出站域名黑/白名单正向代理 |
 | `dsh-ingress` | 1000:1000 | 同上 | 隔离模式发布 3080（默认绑 `127.0.0.1`） | 无 | 四层转发到 `dsh-app:3080` |
 
 ## user namespace remap
@@ -237,6 +239,7 @@ Linux 上还有一条比 `userns-remap` 更强的路径：rootless Docker，整�
 - **密钥代理不保护额度与数据**：只保证密钥字面值不出容器，被注入的 Agent 仍可消耗额度并把数据发往上游，只能用限速与配额压低上限。
 - **密钥代理不对客户端做认证**：能连上 `dsh-internal` 的进程都能通过它发请求。
 - **出站白名单只按域名判定**：已包含 DNS 解析结果校验，但代理不做 TLS 中间人，放行域名下的任意路径都可访问；例如放行 `github.com` 也就放行了向它上传内容的接口。
+- **出站黑名单是启发式清单**：只降低顺手起一条公网隧道的概率，自建域名的 frp 或自己的 VPS 挡不住；真正的出站边界只有 `allowlist`。
 - **真正的第一道防线是不把不可信内容交给 Agent**：以上各层只缩小注入成功后的后果。
 
 ## 其他实现说明

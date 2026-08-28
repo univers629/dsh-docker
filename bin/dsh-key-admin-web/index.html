@@ -78,11 +78,67 @@
         <input id="reasoning" autocomplete="off" spellcheck="false" placeholder="off, low, medium, high"></label>
     </div>
 
+    <h2>请求限额</h2>
+    <p class="hint">数的是请求次数，不是 token 也不是金额：撞到上限时代理返回 429，每日配额按 UTC 零点清零。
+    <code>0</code> = 不限，留空 = 沿用现值。按 token 或金额限额要逐家解析用量字段和维护价格表，这里不做——
+    真要按钱卡住就去上游平台后台给这把密钥单独设额度。</p>
+    <div class="row">
+      <label class="field"><span>每分钟请求上限</span>
+        <input id="rpm" type="number" min="0" step="1" inputmode="numeric" autocomplete="off" placeholder="0"></label>
+      <label class="field"><span>每日请求配额（UTC 日界）</span>
+        <input id="daily" type="number" min="0" step="1" inputmode="numeric" autocomplete="off" placeholder="0"></label>
+    </div>
+
     <div class="actions">
       <button id="save" class="primary" type="button">保存并写入 DSH 配置</button>
       <button id="delete" class="danger" type="button">删除这个上游</button>
     </div>
     <p id="form-status" class="status"></p>
+  </div>
+
+  <div class="panel" id="egress-panel">
+    <h2>容器出站策略</h2>
+    <p class="hint">决定 dsh 容器出网时哪些域名放得过去。改完 5 秒内生效，不用重启容器。
+    模型请求不受影响：那条路走 dsh-key-broker，是另一个容器自己出网。</p>
+    <p id="egress-deployment" class="hint"></p>
+    <div class="row">
+      <label class="field"><span>模式</span>
+        <select id="egress-mode">
+          <option value="allowlist">allowlist：只放行白名单里的域名，其余全部 403</option>
+          <option value="blocklist">blocklist：默认放行，只挡黑名单里的域名</option>
+        </select></label>
+      <label class="field"><span>白名单与内置软件源的关系</span>
+        <select id="egress-allow-mode">
+          <option value="append">append：内置源始终放行，下面的域名追加上去</option>
+          <option value="replace">replace：只放行下面的域名（Debian / npm / PyPI 也要自己列）</option>
+        </select></label>
+    </div>
+    <p class="hint">两种模式下都不会放松的部分：裸 IP 目标、localhost 与内网域名后缀、80/443 以外的端口、
+    解析结果落在内网的域名，一律拒绝。blocklist 只是把最后一道「域名判定」从「必须在白名单里」换成
+    「不在黑名单里」——它降低顺手滥用的概率，真正收口的只有 allowlist。</p>
+
+    <h2>白名单</h2>
+    <p class="hint">allowlist 模式下生效。支持 <code>*.example.com</code>（只能写最左边一级通配）。
+    Agent 要做网页搜索或读文档，就把那些域名加进来。</p>
+    <div id="egress-allow" class="entries"></div>
+    <div class="actions">
+      <button id="egress-allow-add" type="button">加一行</button>
+      <button id="egress-builtin" type="button">看内置放行的源</button>
+    </div>
+
+    <h2>黑名单</h2>
+    <p class="hint">blocklist 模式下生效。内置的是常见的一键公网隧道服务（它们能把容器里的端口发布到公网，
+    等于把密钥代理变成别人可用的免费网关）。不需要的可以取消勾选。</p>
+    <div id="egress-block" class="entries"></div>
+    <div class="actions">
+      <button id="egress-block-add" type="button">加一行</button>
+      <button id="egress-block-default" type="button">补齐内置隧道清单</button>
+    </div>
+
+    <div class="actions">
+      <button id="egress-save" class="primary" type="button">保存出站策略</button>
+    </div>
+    <p id="egress-status" class="status"></p>
   </div>
 
   <div class="panel">

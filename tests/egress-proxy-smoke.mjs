@@ -9,22 +9,34 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
   DEFAULT_ALLOWED_HOSTS,
+  DEFAULT_BLOCK_LIST,
   DEFAULT_CONNECT_PORTS,
   DEFAULT_FORWARD_PORTS,
+  DEPLOYMENT_EGRESS_MODES,
+  EGRESS_POLICY_VERSION,
   EgressPolicyError,
+  PROXY_EGRESS_MODES,
   assertConnectTarget,
   assertForwardRequest,
   createGuardedLookup,
   describeBlockedAddress,
   describeBlockedResolvedAddress,
+  egressPolicyFromEnv,
   isBlockedAddress,
   isBlockedResolvedAddress,
   isHostAllowed,
+  matchBlockedHost,
+  normalizeEgressPolicy,
   normalizeTarget,
   parseAllowList,
   parseAllowListMode,
+  parseDeploymentEgressMode,
+  parseEgressPolicyText,
   parsePortSet,
+  parseProxyEgressMode,
   resolveAllowList,
+  resolveEgressRules,
+  serializeEgressPolicy,
   stripHopByHopHeaders,
 } from '../bin/dsh-egress-policy.mjs'
 
@@ -464,6 +476,131 @@ assert.equal(describeBlockedResolvedAddress('172.32.0.1'), null)
   assert.equal(empty.error?.code, 'EGRESSBLOCKED')
 }
 
+// --- 出站策略文件：模式、两份清单、缺字段与空数组的语义 ---
+//
+// 策略文件是面板与代理之间唯一的契约，写错一个字段的后果是「以为在挡、其实全放行」，
+// 所以每条语义都在这里钉住。
+for (const host of ['*.trycloudflare.com', '*.ngrok-free.app', '*.devtunnels.ms', '*.ts.net', '*.cpolar.cn']) {
+  assert.ok(DEFAULT_BLOCK_LIST.includes(host), `内置黑名单缺少 ${host}`)
+}
+assert.deepEqual(Array.from(DEPLOYMENT_EGRESS_MODES), ['open', 'blocklist', 'allowlist'])
+assert.deepEqual(Array.from(PROXY_EGRESS_MODES), ['allowlist', 'blocklist'])
+
+// 代理进程里没有 open：收到它按 allowlist 处理（fail closed）。
+assert.equal(parseProxyEgressMode('open'), 'allowlist')
+assert.equal(parseProxyEgressMode(''), 'allowlist')
+assert.equal(parseProxyEgressMode('blocklist'), 'blocklist')
+assert.throws(() => parseProxyEgressMode('off'), EgressPolicyError)
+// 部署形态那一层三个值都合法，open 是缺省。
+assert.equal(parseDeploymentEgressMode(undefined), 'open')
+assert.equal(parseDeploymentEgressMode('blocklist'), 'blocklist')
+assert.throws(() => parseDeploymentEgressMode('allow'), EgressPolicyError)
+
+// 缺 block 字段 = 补内置隧道清单（安装器只写一个 mode 就靠这条）。
+const seeded = normalizeEgressPolicy({ mode: 'blocklist' })
+assert.equal(seeded.version, EGRESS_POLICY_VERSION)
+assert.equal(seeded.block.length, DEFAULT_BLOCK_LIST.length)
+assert.ok(seeded.block.every((entry) => entry.enabled === true && entry.note !== ''))
+assert.deepEqual(seeded.allow, [])
+// 显式空数组 = 明确什么都不挡，不能被「补默认」覆盖掉。
+assert.deepEqual(normalizeEgressPolicy({ mode: 'blocklist', block: [] }).block, [])
+// 字符串条目、大小写、重复、末尾点都归一化；enabled 只有显式 false 才算关掉。
+assert.deepEqual(
+  normalizeEgressPolicy({
+    allow: ['Search.Example.com.', { host: 'search.example.com' }, { host: 'a.example.com', enabled: false }],
+    block: [],
+  }).allow,
+  [
+    { host: 'search.example.com', enabled: true, note: '' },
+    { host: 'a.example.com', enabled: false, note: '' },
+  ],
+)
+assert.throws(() => normalizeEgressPolicy({ allow: ['bad_host.com'], block: [] }), EgressPolicyError)
+assert.throws(() => parseEgressPolicyText('{'), EgressPolicyError)
+// 空文本按空策略处理（第一次写文件之前的状态）。
+assert.equal(parseEgressPolicyText('   ').mode, 'allowlist')
+assert.equal(
+  parseEgressPolicyText(serializeEgressPolicy({ mode: 'blocklist', block: [] })).mode,
+  'blocklist',
+)
+
+// resolveEgressRules：allowlist 下清单为空回落到内置白名单，blocklist 下为空就是不挡。
+const allowRules = resolveEgressRules({ mode: 'allowlist', allow: [], block: [] })
+assert.equal(allowRules.mode, 'allowlist')
+assert.deepEqual(allowRules.allowList, Array.from(DEFAULT_ALLOWED_HOSTS))
+assert.deepEqual(allowRules.blockList, [])
+const blockRules = resolveEgressRules({ mode: 'blocklist' })
+assert.equal(blockRules.mode, 'blocklist')
+assert.deepEqual(blockRules.blockList, Array.from(DEFAULT_BLOCK_LIST))
+// 取消勾选的条目不进规则。
+assert.deepEqual(
+  resolveEgressRules({
+    mode: 'blocklist',
+    block: [{ host: '*.ngrok.io' }, { host: '*.loca.lt', enabled: false }],
+  }).blockList,
+  ['*.ngrok.io'],
+)
+
+// matchBlockedHost：与白名单同一套匹配规则，返回命中的条目好写清拒绝原因。
+assert.equal(matchBlockedHost('abc.trycloudflare.com', DEFAULT_BLOCK_LIST), '*.trycloudflare.com')
+assert.equal(matchBlockedHost('trycloudflare.com', DEFAULT_BLOCK_LIST), '')
+assert.equal(matchBlockedHost('eviltrycloudflare.com', DEFAULT_BLOCK_LIST), '')
+assert.equal(matchBlockedHost('github.com', DEFAULT_BLOCK_LIST), '')
+assert.equal(matchBlockedHost('github.com', undefined), '')
+
+// blocklist 规则下的三道闸门：前两道（地址形态、端口）与 allowlist 完全一致，
+// 只有最后一道域名判定反过来。
+const blocklistGate = {
+  mode: 'blocklist',
+  allowList: [],
+  blockList: ['*.trycloudflare.com', 'evil.example.com'],
+}
+const passThrough = assertForwardRequest('http://anything.example.com/x', blocklistGate, DEFAULT_FORWARD_PORTS)
+assert.equal(passThrough.host, 'anything.example.com')
+assert.equal(passThrough.port, 80)
+assert.deepEqual(assertConnectTarget('anything.example.com:443', blocklistGate, DEFAULT_CONNECT_PORTS), {
+  host: 'anything.example.com',
+  port: 443,
+})
+for (const [target, hit] of [
+  ['http://abc.trycloudflare.com/x', '*.trycloudflare.com'],
+  ['http://evil.example.com/x', 'evil.example.com'],
+]) {
+  assert.throws(() => assertForwardRequest(target, blocklistGate, DEFAULT_FORWARD_PORTS), (error) => {
+    assert.ok(error instanceof EgressPolicyError)
+    assert.match(error.message, /出站黑名单/)
+    assert.ok(error.message.includes(hit), `拒绝原因要点明命中的条目：${error.message}`)
+    return true
+  })
+}
+assert.throws(() => assertConnectTarget('abc.trycloudflare.com:443', blocklistGate, DEFAULT_CONNECT_PORTS), EgressPolicyError)
+// 裸 IP、元数据地址、整数形式地址、带凭据的 URL 在 blocklist 下同样被拒。
+for (const target of [
+  'http://127.0.0.1/x',
+  'http://169.254.169.254/latest/',
+  'http://10.0.0.5/x',
+  'http://2130706433/x',
+  'http://user:pw@example.com/x',
+  'http://localhost/x',
+  'http://db.internal/x',
+]) {
+  assert.throws(() => assertForwardRequest(target, blocklistGate, DEFAULT_FORWARD_PORTS), EgressPolicyError)
+}
+// 端口闸门也不因为「默认放行」而放松。
+assert.throws(() => assertConnectTarget('example.com:22', blocklistGate, DEFAULT_CONNECT_PORTS), EgressPolicyError)
+assert.throws(() => assertForwardRequest('http://example.com:8080/x', blocklistGate, DEFAULT_FORWARD_PORTS), EgressPolicyError)
+
+// egressPolicyFromEnv：老部署没有策略文件时的等价策略。
+const envPolicy = egressPolicyFromEnv({
+  DSH_EGRESS_MODE: 'blocklist',
+  DSH_EGRESS_ALLOWED_HOSTS: 'search.example.com',
+})
+assert.equal(envPolicy.mode, 'blocklist')
+assert.deepEqual(envPolicy.allow.map((entry) => entry.host), ['search.example.com'])
+// blocklist 模式下没有策略文件，也不能变成「黑名单模式但一条都不挡」。
+assert.equal(envPolicy.block.length, DEFAULT_BLOCK_LIST.length)
+assert.equal(egressPolicyFromEnv({}).mode, 'allowlist')
+
 // --- 端到端：真起一个上游 + 真起代理进程 ---
 const UPSTREAM_HOST = 'upstream.dsh-egress-test'
 const BLOCKED_HOST = 'evilgithub.com'
@@ -763,6 +900,140 @@ try {
     assert.equal(strictLog.includes('/payload'), false, '审计日志不能记录路径')
   } finally {
     await stopProxy(strictChild)
+  }
+
+  // --- 策略文件 + blocklist 模式：文件优先于环境变量，并按 mtime 热加载 ---
+  //
+  // 面板改清单靠的就是这条路径：写文件，代理自己重新读。所以这里必须端到端验证
+  // 三件事——启动时文件压过 .env、blocklist 的放行/拒绝方向、改文件之后不重启就生效。
+  const policyPath = path.join(os.tmpdir(), `dsh-egress-policy-${process.pid}.json`)
+  const writePolicy = (policy) => fs.writeFileSync(policyPath, serializeEgressPolicy(policy), 'utf8')
+  writePolicy({ mode: 'blocklist', allow: [], block: [{ host: BLOCKED_HOST, note: '测试用' }] })
+
+  const policyChild = spawn(
+    process.execPath,
+    ['--import', pathToFileURL(preloadPath).href, path.join(root, 'bin', 'dsh-egress-proxy.mjs')],
+    {
+      env: {
+        ...process.env,
+        DSH_EGRESS_PORT: '0',
+        DSH_EGRESS_BIND: '127.0.0.1',
+        DSH_EGRESS_POLICY_FILE: policyPath,
+        DSH_EGRESS_POLICY_RELOAD_MS: '200',
+        // 故意给一份会拒掉假上游的环境变量配置：文件生效的话这两行就不该起作用。
+        DSH_EGRESS_MODE: 'allowlist',
+        DSH_EGRESS_ALLOWED_HOSTS: 'only-in-env.example.com',
+        DSH_EGRESS_ALLOWED_HOSTS_MODE: 'replace',
+        DSH_EGRESS_ALLOWED_PORTS: `80,443,${upstreamPort}`,
+        DSH_TEST_UPSTREAM_HOST: UPSTREAM_HOST,
+        DSH_EGRESS_ALLOW_PRIVATE_UPSTREAM: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  )
+  let policyLog = ''
+  let policyStderr = ''
+  policyChild.stdout.setEncoding('utf8')
+  policyChild.stderr.setEncoding('utf8')
+  policyChild.stdout.on('data', (chunk) => {
+    policyLog += chunk
+  })
+  policyChild.stderr.on('data', (chunk) => {
+    policyStderr += chunk
+  })
+
+  // 这一段要在两个端口上发请求，所以不复用上面那两个绑定了 proxyPort 的帮手。
+  const requestVia = (port, target) =>
+    new Promise((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port, path: target, agent: false }, (response) => {
+        let body = ''
+        response.setEncoding('utf8')
+        response.on('data', (chunk) => {
+          body += chunk
+        })
+        response.on('end', () => resolve({ status: response.statusCode, body }))
+      })
+      request.on('error', reject)
+      request.end()
+    })
+  const statusVia = async (port) => JSON.parse((await requestVia(port, '/status')).body)
+  // 热加载是轮询，所以只能等条件成立；等不到就当失败，不允许「反正会好」。
+  const waitForStatus = async (port, predicate, label) => {
+    const deadline = Date.now() + 10_000
+    let last
+    while (Date.now() < deadline) {
+      last = await statusVia(port)
+      if (predicate(last)) return last
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    throw new Error(`${label} 未在 10s 内生效：${JSON.stringify(last)}`)
+  }
+
+  try {
+    const policyListen = await waitForListen(
+      policyChild,
+      () => policyLog,
+      () => policyStderr,
+    )
+    const policyPort = policyListen.port
+    // listen 审计与 /status 都要如实报出模式和规则来源，否则运行期没法核查。
+    assert.equal(policyListen.mode, 'blocklist')
+    assert.equal(policyListen.policySource, 'file')
+    const initialStatus = await statusVia(policyPort)
+    assert.equal(initialStatus.mode, 'blocklist')
+    assert.equal(initialStatus.policySource, 'file')
+    assert.equal(initialStatus.blockedHosts, 1)
+
+    // blocklist 默认放行：假上游不在黑名单里就该通，而它并不在环境变量那份白名单里，
+    // 所以这一条同时证明了「文件压过 .env」。
+    const blockModeAllowed = await requestVia(policyPort, `http://${UPSTREAM_HOST}:${upstreamPort}/payload`)
+    assert.equal(blockModeAllowed.status, 200)
+    assert.equal(blockModeAllowed.body, PAYLOAD)
+
+    // 命中黑名单：403，说明里点出命中的条目。
+    const blockModeDenied = await requestVia(policyPort, `http://${BLOCKED_HOST}/anything`)
+    assert.equal(blockModeDenied.status, 403)
+    assert.match(blockModeDenied.body, /黑名单/)
+    assert.ok(blockModeDenied.body.includes(BLOCKED_HOST))
+
+    // 前两道闸门在 blocklist 下照旧：裸 IP 与元数据地址仍然不通。
+    assert.equal((await requestVia(policyPort, `http://127.0.0.1:${upstreamPort}/payload`)).status, 403)
+    assert.equal((await requestVia(policyPort, 'http://169.254.169.254/latest/meta-data/')).status, 403)
+
+    // 热加载：把假上游也加进黑名单，不重启进程，几百毫秒后同一条请求就该被拒。
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    writePolicy({
+      mode: 'blocklist',
+      allow: [],
+      block: [{ host: BLOCKED_HOST }, { host: UPSTREAM_HOST }],
+    })
+    await waitForStatus(policyPort, (state) => state.blockedHosts === 2, '策略文件热加载')
+    const afterReload = await requestVia(policyPort, `http://${UPSTREAM_HOST}:${upstreamPort}/payload`)
+    assert.equal(afterReload.status, 403)
+    assert.equal(afterReload.body.includes(PAYLOAD.trim()), false, '被拒的请求不能拿到上游内容')
+
+    // 写坏文件：保留上一份规则并记一条 policy-error，绝不因为一次写坏就全放行。
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    fs.writeFileSync(policyPath, '{ not json', 'utf8')
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const brokenStatus = await statusVia(policyPort)
+    assert.equal(brokenStatus.policySource, 'file')
+    assert.equal(brokenStatus.blockedHosts, 2)
+    assert.ok(
+      policyLog.split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line))
+        .some((entry) => entry.event === 'policy-error'),
+      `写坏策略文件要记一条 policy-error：${policyLog}`,
+    )
+
+    // 文件被删：回落到环境变量那套（allowlist + 只放行 only-in-env.example.com）。
+    fs.rmSync(policyPath, { force: true })
+    const envFallback = await waitForStatus(policyPort, (state) => state.policySource === 'env', '删文件后回落环境变量')
+    assert.equal(envFallback.mode, 'allowlist')
+    assert.equal(envFallback.allowedHosts, 1)
+    assert.equal((await requestVia(policyPort, `http://${UPSTREAM_HOST}:${upstreamPort}/payload`)).status, 403)
+  } finally {
+    await stopProxy(policyChild)
+    fs.rmSync(policyPath, { force: true })
   }
 
   // --- 默认（append）模式：真起一个进程，确认 loadConfig 的接线没错 ---

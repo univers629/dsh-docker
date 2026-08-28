@@ -295,8 +295,8 @@ export function normalizeUpstreamInput(raw, existingEntry) {
   const reasoningEfforts = raw?.reasoningEfforts === undefined
     ? normalizeThinkingLevels(existingEntry?.dsh?.reasoningEfforts)
     : normalizeThinkingLevels(raw.reasoningEfforts)
-  // 面板不再提供限额输入框（DSH 官方的供应商卡片也没有），但已经设过的值要留住：
-  // 缺字段一律沿用 keys.json 里那条的现值，只有显式写 0 才是"取消限制"。
+  // 限额数的是请求次数（每分钟上限 + UTC 每日配额），不是 token 也不是金额。面板上有这
+  // 两个输入框，但留空或缺字段一律沿用 keys.json 里那条的现值，只有显式写 0 才是"取消限制"。
   const requestsPerMinute = normalizeQuota(
     raw?.requestsPerMinute, '每分钟请求上限', Number(existingEntry?.requestsPerMinute ?? 0) || 0,
   )

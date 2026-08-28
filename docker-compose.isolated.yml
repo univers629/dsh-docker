@@ -61,10 +61,17 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m
-    entrypoint: ["node", "/usr/local/lib/dsh/dsh-egress-proxy.mjs"]
+    # 代理代码和出站策略都从工程目录挂进来，不从镜像里取：改策略、改代理逻辑都不用
+    # 先重建镜像（和 dsh-key-admin 一样的理由）。
+    entrypoint: ["node", "/dsh-bin/dsh-egress-proxy.mjs"]
     environment:
       DSH_EGRESS_PORT: "3128"
       DSH_EGRESS_BIND: "0.0.0.0"
+      # 出站模式。策略文件存在时以文件里的 mode 为准（面板改完 5 秒内生效），这里的值
+      # 只是没有策略文件时的兜底。open 在这个容器里没有意义，会被当作 allowlist。
+      DSH_EGRESS_MODE: "${DSH_EGRESS_MODE:-allowlist}"
+      # 面板写、代理只读的策略文件：模式 + 白名单 + 黑名单。按 mtime 每 5 秒热加载。
+      DSH_EGRESS_POLICY_FILE: /etc/dsh-egress/policy.json
       # 内置白名单覆盖 Debian/npm/PyPI/GitHub/uv 生态。要放行别的域名就在 .env 里写
       # DSH_EGRESS_ALLOWED_HOSTS，逗号分隔，支持 *.example.com；默认追加在内置白名单
       # 之后，写 DSH_EGRESS_ALLOWED_HOSTS_MODE=replace 才会整体顶替内置白名单。
@@ -76,6 +83,10 @@ services:
       # 镜像源时才需要在 .env 里关掉，关掉就等于放弃这层防护。
       DSH_EGRESS_ALLOW_PRIVATE_UPSTREAM: "${DSH_EGRESS_ALLOW_PRIVATE_UPSTREAM:-0}"
       NODE_OPTIONS: "--max-old-space-size=192"
+    volumes:
+      - ./bin:/dsh-bin:ro
+      # 只读挂载：策略只能在管理面板（另一个容器）里改，代理自己改不了自己的策略。
+      - ./data/egress:/etc/dsh-egress:ro
     networks:
       # default 提供出网，dsh-internal 让隔离后的 dsh 能找到它。不发布任何宿主端口。
       - default
