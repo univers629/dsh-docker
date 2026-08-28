@@ -22,6 +22,7 @@ import {
   APT_EXECUTABLES,
   DEFAULT_LOCKOUT,
   PolicyError,
+  buildFixPermsCommand,
   attemptDelayMs,
   emptyLockoutState,
   findProtectedRemovals,
@@ -216,6 +217,17 @@ async function authenticate(password) {
   throw new RequestError(EXIT_AUTH_FAILED, 'root 密码错误')
 }
 
+// 运行账户的 uid/gid 只从 /etc/passwd 读，绝不采信请求里的值。
+function readRunUserIds() {
+  const entry = fs
+    .readFileSync('/etc/passwd', 'utf8')
+    .split('\n')
+    .find((line) => line.startsWith(`${RUN_USER}:`))
+  if (!entry) throw new PolicyError(`镜像里没有运行账户 ${RUN_USER}`)
+  const fields = entry.split(':')
+  return { uid: Number(fields[2]), gid: Number(fields[3]) }
+}
+
 function resolveRequest(request) {
   if (!request || typeof request !== 'object') {
     throw new PolicyError('请求必须是 JSON 对象')
@@ -231,6 +243,17 @@ function resolveRequest(request) {
       // 卸载类请求要在执行前多走一次 apt -s 模拟，见 findBlockedRemovalPlan。
       subcommand: resolved.subcommand,
       removal: resolved.removal === true,
+    }
+  }
+  // 属主自愈：把运行账户自己的几棵树改回它名下。免密，因为目标属主和路径都由
+  // 策略侧固定，请求里没有任何可以左右它的参数。
+  if (action === 'fix-perms') {
+    const resolved = buildFixPermsCommand(readRunUserIds())
+    return {
+      description: resolved.argv.join(' '),
+      executable: resolved.executable,
+      argv: resolved.argv,
+      requiresPassword: false,
     }
   }
   if (action === 'update-dsh') {

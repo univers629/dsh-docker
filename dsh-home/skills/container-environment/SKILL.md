@@ -37,7 +37,7 @@ Important environment variables:
     DSH_CAN_INSTALL_SYSTEM_PACKAGES=@@DSH_CAN_INSTALL_SYSTEM_PACKAGES@@
     DSH_PRIVILEGED_APT=@@DSH_PRIVILEGED_APT@@
     NODE_PATH=/app/dsh/node_modules:/data/dsh/profiles/node_modules
-    PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/data/home/.local/share/pnpm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 ## Storage and persistence
 
@@ -91,6 +91,8 @@ updater replaces the whole directory.
   in a loop and do not probe other package names to get the same effect. Report
   the removal you need to the user instead.
 - Reclaim downloaded apt archives when needed: apt-get clean.
+- dsh-root fix-perms is the one other privileged action open to you, and it only
+  restores your own ownership of the paths listed above.
 - Anything else that genuinely needs root, including dsh-root run <command>,
   cannot be completed from inside the container. Report the operation to the
   user, who can run it from the host.
@@ -99,7 +101,14 @@ updater replaces the whole directory.
 - Python projects and MCP servers: create a virtual environment inside the
   project, for example uv venv /data/mcp/<name>/.venv.
 - Node CLIs: npm install -g <package>; the configured npm prefix is
-  /data/home/.npm-global.
+  /data/home/.npm-global and the cache is /data/home/.npm. pnpm add -g works
+  too; PNPM_HOME is /data/home/.local/share/pnpm. Global installs need no
+  privilege at all.
+- If npm, pnpm, or pip fails with EACCES on a path under /data/home, a file
+  there is owned by another account. Run dsh-root fix-perms once: it needs no
+  password and restores your ownership of /data/home, /data/dsh, /data/agents,
+  /data/mcp, and /workspace. Then retry the install. Do not work around it with
+  a different cache directory.
 - Standalone tools: place executables in /data/home/.local/bin or
   /data/home/bin.
 - Large language toolchains, including JDK, Android SDK, Gradle, .NET, Rust, and
@@ -191,9 +200,10 @@ The policy cannot be changed from inside this container.
 - no-new-privileges is on, so there is no setuid path to root. sudo here is a
   wrapper for the privileged helper, not real sudo; sudo -i and sudo <arbitrary
   command> do not give you a root shell.
-- Escalation is only possible through a policy-constrained internal helper. apt
-  and update-dsh are inside its allow list; every other privileged operation is
-  closed from inside the container and only the user can run it from the host.
+- Escalation is only possible through a policy-constrained internal helper. apt,
+  update-dsh, and fix-perms are inside its allow list; every other privileged
+  operation is closed from inside the container and only the user can run it
+  from the host.
 - You cannot escalate to root, and you should not try. Report anything that
   genuinely needs container root to the user and let them decide.
 
@@ -221,6 +231,22 @@ restores the last complete profile if a swap was interrupted. The content-
 addressable pnpm store under /data/home is a deliberate persistent download
 cache, not transaction garbage; use `pnpm store prune` only when reclaiming
 space is more important than avoiding future downloads.
+
+Install plugins only with this helper. npx @deepseek-ai/dsh plugin add fetches a
+second, unpatched DSH from the registry and edits the live profile with no
+validation, no rollback, and no scheduled restart.
+
+A few plugins need small compatibility fixes for the DSH release in this image.
+Those are maintained by the environment and re-applied on their own after any
+plugin change, including restart-free marketplace installs, so no manual step is
+needed after installing or updating a plugin.
+
+DSH runs as a supervised child process here, so the Supervisor owns restarts. A
+plugin that relaunches DSH itself would leave a second process competing for the
+loopback port; the environment already advertises the Supervisor so such plugins
+disable that path on their own. If one offers a restart button of its own,
+prefer manage-dsh-plugin restart or the settings header **Restart DSH**. After a
+restart you can confirm the service came back with restart-dsh wait-ready.
 
 The helper schedules one targeted DSH child-process restart after the current
 Agent turn. The Supervisor, Debian container, and Nginx process remain alive.

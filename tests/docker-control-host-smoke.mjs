@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -261,6 +262,35 @@ try {
     await new Promise(resolve => setTimeout(resolve, 50))
   }
   assert.equal(await readFile(restartMarker, 'utf8'), '1')
+  assert.equal(acceptedBody.supervisor, 'running')
+
+  // restart-dsh check 退出码 3 = Supervisor 在跑、DSH 子进程当前不在（刚退出，或
+  // 正处在重启 backoff 窗口）。这不是"重启失败"：Supervisor 自己会把它拉起来，
+  // 所以面板必须照样回 202，而且不再多发一次重启请求。
+  await rm(restartMarker, { force: true })
+  await writeFile(join(testHome, 'check'), 'process.exit(3)\n')
+  const starting = response()
+  await restartRoute.handler({
+    method: 'POST', socket: { remoteAddress: '127.0.0.1' },
+    headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
+  }, starting)
+  assert.equal(starting.status, 202, starting.body)
+  const startingBody = JSON.parse(starting.body)
+  assert.equal(startingBody.ok, true)
+  assert.equal(startingBody.supervisor, 'starting')
+  assert.equal(startingBody.helperPid, null)
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.equal(existsSync(restartMarker), false)
+
+  // Supervisor 本身不在才是真的失败：这时面板必须报错，而不是假装已经安排重启。
+  await writeFile(join(testHome, 'check'), 'process.exit(1)\n')
+  const unavailable = response()
+  await restartRoute.handler({
+    method: 'POST', socket: { remoteAddress: '127.0.0.1' },
+    headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
+  }, unavailable)
+  assert.equal(unavailable.status, 500, unavailable.body)
+  assert.equal(JSON.parse(unavailable.body).ok, false)
 
   console.log('docker-control host smoke: ok')
 } finally {

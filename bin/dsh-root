@@ -5,6 +5,7 @@
 // 代理执行，输出和退出码原样透传。
 //
 //   dsh-root apt-get install -y ripgrep     # 默认无需密码，白名单内的 apt 操作
+//   dsh-root fix-perms                      # 免密，把自己的家目录/数据目录属主改回来
 //   dsh-root update-dsh [版本]              # 容器内 DSH 更新器
 //   dsh-root run <命令> [参数...]           # 任意 root 命令，需要容器 root 密码
 //
@@ -22,6 +23,7 @@ function usage(stream = process.stderr) {
       '用法：',
       '  dsh-root apt-get install -y <包名...>',
       '  dsh-root apt <子命令> [参数...]',
+      '  dsh-root fix-perms                   # 修回自己家目录/数据目录的属主',
       '  dsh-root update-dsh [版本]',
       '  dsh-root run <命令> [参数...]        # 需要容器 root 密码',
       '',
@@ -115,6 +117,10 @@ function parseArguments(argv) {
   if (APT_COMMANDS.has(command)) {
     request.payload = { action: 'apt', command, args }
     request.needsPassword = (process.env.DSH_PRIVILEGED_APT ?? 'nopasswd') === 'password'
+  } else if (command === 'fix-perms') {
+    if (args.length > 0) throw new Error('fix-perms 不接受参数')
+    request.payload = { action: 'fix-perms' }
+    request.needsPassword = false
   } else if (command === 'update-dsh') {
     if (args.length > 1) throw new Error('update-dsh 最多接受一个版本参数')
     request.payload = { action: 'update-dsh', version: args[0] ?? 'latest' }

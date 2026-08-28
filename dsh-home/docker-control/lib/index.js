@@ -108,6 +108,128 @@ async function dshInfo() {
       pythonVersion: await commandVersion('python3', ['--version']),
     },
     update: updateStatus(),
+    websocketKeepalive: wsKeepalive,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 下行 WebSocket 保活
+//
+// Cloudflare、DPanel 之类的外层反代会回收空闲 WebSocket，而浏览器 JS 发不了 ping
+// 这种控制帧，所以保活只能由源站做。这段逻辑原来是打在
+// @deepseek-ai/dsh-client-connection 产物上的文本补丁，锚点是 handleUpgrade 里那一
+// 段 AbortController 代码——上游改动一个字符就整条失效。搬到插件里之后，依赖面从
+// "那一段代码的字面形状"缩小到"ws 仍然叫 ws、仍然有 handleUpgrade"。
+//
+// 之所以能在插件里做到：DSH 的下行 WebSocket 用的是普通的 ws 包
+// （client-connection 里 new WebSocketServer({ noServer: true })），而 ws 是 CJS，
+// 所以 createRequire + NODE_PATH 拿到的就是 client-connection 自己在用的那一份
+// require.cache 条目，包装 prototype 上的 handleUpgrade 对它同样生效。
+// ---------------------------------------------------------------------------
+
+const WS_KEEPALIVE_INTERVAL_MS = Number(process.env.DSH_WS_KEEPALIVE_INTERVAL_MS) || 25_000
+// client-connection 导出了这两个常量；能 import 到就用导出值，import 不到才退回
+// 字面量。/info 会如实报告用的是哪一种，免得上游改名之后保活静默失效。
+const WS_DOWNLINK_FALLBACK_PATHS = ['/api/events.mux', '/api/events.host']
+
+let wsKeepalive = { state: 'pending', detail: '尚未安装' }
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+async function downlinkPaths() {
+  try {
+    const connection = await import('@deepseek-ai/dsh-client-connection')
+    const exported = [connection.MUX_EVENTS_PATH, connection.HOST_EVENTS_PATH]
+      .filter((value) => typeof value === 'string' && value.startsWith('/'))
+    if (exported.length === 2) return { paths: new Set(exported), source: 'exported' }
+  } catch {}
+  return { paths: new Set(WS_DOWNLINK_FALLBACK_PATHS), source: 'fallback' }
+}
+
+function isDownlinkUpgrade(request, paths) {
+  const target = request?.url
+  if (typeof target !== 'string' || target === '') return false
+  try {
+    return paths.has(new URL(target, 'http://127.0.0.1').pathname)
+  } catch {
+    return false
+  }
+}
+
+// 每 25s 发一次 ping；上一轮的 pong 没回来就直接 terminate，否则半开连接会一直
+// 占着 pump。计时器 unref，免得它把进程留住。
+function attachKeepalive(websocket) {
+  let receivedPong = true
+  websocket.on('pong', () => { receivedPong = true })
+  const timer = setInterval(() => {
+    if (websocket.readyState !== 1) return
+    if (!receivedPong) {
+      websocket.terminate()
+      return
+    }
+    receivedPong = false
+    try {
+      websocket.ping()
+    } catch {
+      websocket.terminate()
+    }
+  }, WS_KEEPALIVE_INTERVAL_MS)
+  timer.unref()
+  const stop = () => clearInterval(timer)
+  websocket.once('close', stop)
+  websocket.once('error', stop)
+}
+
+// 返回一个 disposer，交给 ctx.effect。安装过程要读模块，是异步的，所以先把
+// disposer 交出去，装好之后再把真正的还原逻辑挂进去；期间被卸载就不再安装。
+function installWebSocketKeepalive() {
+  let active = true
+  let restore = () => {}
+
+  void (async () => {
+    let WebSocketServer
+    try {
+      ;({ WebSocketServer } = require('ws'))
+      if (typeof WebSocketServer?.prototype?.handleUpgrade !== 'function') {
+        throw new Error('ws 没有可包装的 handleUpgrade')
+      }
+    } catch (error) {
+      wsKeepalive = { state: 'unavailable', detail: `拿不到 ws 模块：${errorMessage(error)}` }
+      return
+    }
+
+    const { paths, source } = await downlinkPaths()
+    if (!active) return
+
+    const original = WebSocketServer.prototype.handleUpgrade
+    const patched = function (request, socket, head, callback) {
+      return original.call(this, request, socket, head, (websocket, ...rest) => {
+        if (active && isDownlinkUpgrade(request, paths)) attachKeepalive(websocket)
+        return callback(websocket, ...rest)
+      })
+    }
+    WebSocketServer.prototype.handleUpgrade = patched
+    restore = () => {
+      // 只在还是我们那一份时还原，避免把后装的其它包装一起掀掉。
+      if (WebSocketServer.prototype.handleUpgrade === patched) {
+        WebSocketServer.prototype.handleUpgrade = original
+      }
+    }
+    wsKeepalive = {
+      state: 'active',
+      detail: `每 ${Math.round(WS_KEEPALIVE_INTERVAL_MS / 1000)}s 发一次 ping`,
+      intervalMs: WS_KEEPALIVE_INTERVAL_MS,
+      paths: [...paths],
+      pathSource: source,
+    }
+  })()
+
+  return () => {
+    active = false
+    restore()
+    wsKeepalive = { state: 'pending', detail: '已卸载' }
   }
 }
 
@@ -286,12 +408,30 @@ function trustedLoopbackRequest(request) {
   }
 }
 
+// restart-dsh check 的退出码：0 = Supervisor 与 DSH 子进程都在，3 = Supervisor 在但
+// 当前没有子进程（刚退出，或正处在重启 backoff 窗口），其它 = Supervisor 不在。
+// 只有最后一种才是"重启不了"。3 以前会被当成错误抛给面板，于是按钮报
+// "Command failed: restart-dsh check … DSH child process is not running"，
+// 而实际上 Supervisor 正在把 DSH 拉起来。
+async function supervisorState(executable) {
+  try {
+    await execFileAsync(executable, ['check'], { timeout: 5000, windowsHide: true })
+    return 'running'
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && error.code === 3) return 'starting'
+    throw error
+  }
+}
+
 async function scheduleRestart() {
   const executable = restartExecutable()
   if (!existsSync(executable)) {
     throw new Error('容器内没有 DSH Supervisor 重启程序 / DSH supervisor restart helper is not installed')
   }
-  await execFileAsync(executable, ['check'], { timeout: 5000, windowsHide: true })
+  const state = await supervisorState(executable)
+  if (state === 'starting') {
+    return { boot: BOOT_ID, pid: process.pid, helperPid: null, supervisor: state }
+  }
   const helper = spawn(executable, ['request', '1'], {
     detached: true,
     stdio: 'ignore',
@@ -299,11 +439,18 @@ async function scheduleRestart() {
     windowsHide: true,
   })
   helper.unref()
-  return { boot: BOOT_ID, pid: process.pid, helperPid: helper.pid }
+  return { boot: BOOT_ID, pid: process.pid, helperPid: helper.pid, supervisor: state }
 }
 
 export function apply(ctx) {
   const webServer = ctx.webServer
+  // 保活要在第一个 upgrade 到达之前把 prototype 包好。插件 apply 发生在启动期，
+  // 浏览器连上来总在这之后，所以这个顺序是够的。
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => installWebSocketKeepalive(), 'dsh-docker-control: WebSocket keepalive')
+  } else {
+    installWebSocketKeepalive()
+  }
   webServer.register({
     kind: 'exact',
     path: '/dsh-docker-control/info',

@@ -100,47 +100,6 @@ export const artifactPatches = [
     replace: `isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname) || (typeof document !== "undefined" && document.cookie.split(";").some((entry) => entry.trim() === "DSH_PUBLIC_LOCAL_MODE=1")),`,
   },
   {
-    id: "websocket-keepalive",
-    package: "@deepseek-ai/dsh-client-connection",
-    file: "lib/index.js",
-    why: "Cloudflare/面板反代会回收空闲 WebSocket；由源站发 ping 保活，浏览器 JS 无法发控制帧。",
-    marker: `keepalive.unref();`,
-    find: `			const abort = new AbortController();
-			websocket.once("close", () => {
-				abort.abort();
-			});
-			websocket.once("error", () => {
-				abort.abort();
-			});`,
-    replace: `			const abort = new AbortController();
-			let receivedPong = true;
-			websocket.on("pong", () => {
-				receivedPong = true;
-			});
-			const keepalive = setInterval(() => {
-				if (websocket.readyState !== 1) return;
-				if (!receivedPong) {
-					websocket.terminate();
-					return;
-				}
-				receivedPong = false;
-				try {
-					websocket.ping();
-				} catch {
-					websocket.terminate();
-				}
-			}, 25000);
-			keepalive.unref();
-			websocket.once("close", () => {
-				clearInterval(keepalive);
-				abort.abort();
-			});
-			websocket.once("error", () => {
-				clearInterval(keepalive);
-				abort.abort();
-			});`,
-  },
-  {
     id: "workspace-pending-attachments-field",
     package: "@deepseek-ai/dsh-client-runtime",
     file: "lib/client.js",

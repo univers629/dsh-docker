@@ -29,6 +29,9 @@ button.danger { color: var(--bad); }
 .models { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 2px 12px; margin-top: 10px; max-height: 280px; overflow: auto; }
 .models label { display: flex; gap: 6px; align-items: center; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 .models input { width: auto; }
+.levels { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 4px; }
+.levels label { display: flex; gap: 6px; align-items: center; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.levels input { width: auto; }
 pre { background: #101216; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; max-height: 320px; white-space: pre-wrap; margin: 0; font-size: 12px; }
 .status { min-height: 22px; margin: 10px 0 0; }
 .status.bad { color: var(--bad); }

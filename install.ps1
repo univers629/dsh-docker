@@ -1,6 +1,6 @@
 param(
     [Alias('Action')]
-    [ValidateSet('','install','configure','update','model-key','key-panel','start','stop','restart','logs','status','delete')]
+    [ValidateSet('','install','configure','upgrade','update','model-key','key-panel','start','stop','restart','logs','status','delete')]
     [string]$DshAction,
     [ValidateSet('','local','trusted-proxy','basic')]
     [string]$Access = '',
@@ -997,10 +997,36 @@ function Get-NodeToolImage {
     return $image
 }
 
+# 删除时"保留一部分数据"这个二级分支要保留的相对路径，以及留在目录里的标记文件。
+# 只有这三样：会话、工作目录、插件装在的 profile。密钥、root 密码哈希、.env、
+# 工具链（data/home）和 DSH 自己的配置都不留，它们由下一次安装重新生成。
+# 标记文件是下一次安装的识别依据：看到它就把项目源码取回同一个目录，而不是报
+# "已存在但不是 dsh-docker 工程"。
+$DshDeleteKeepPaths = @('workspace', 'data\dsh\sessions', 'data\dsh\profiles')
+$DshDeleteKeepMarker = '.dsh-preserved'
+
 function Confirm-DshDelete {
     if ($env:DSH_DELETE_CONFIRMED -eq '1') { return }
     if ($NonInteractive) { throw '删除是破坏性操作，需要交互确认；请不要使用 -NonInteractive。' }
-    Write-Host "[警告] 将删除 dsh 容器、DSH 镜像（dsh:* 与 .env 记录的预构建引用）、本项目挂载和网络、全局 Docker 构建缓存，以及 $Dir。" -ForegroundColor Yellow
+    # 先问范围，再让人输 DELETE：最后那一下是不可逆的闸门，它前面不该再有别的问题，
+    # 而且警告文案要能反映刚选的范围。
+    Write-Host '数据范围：'
+    Write-Host '1) 全部删除（容器、镜像、.env、模型密钥、root 密码哈希，以及 data\ 和 workspace\ 里的一切）'
+    Write-Host '2) 保留会话、工作目录和插件：workspace\、data\dsh\sessions\、data\dsh\profiles\'
+    Write-Host '    其余照样删干净：密钥、密码哈希、.env、data\home 里的工具链都不留。'
+    Write-Host '    重新安装到同一个目录时，安装器会自己把项目源码取回来，这三样接着用。'
+    switch (Ask '请选择' '1') {
+        '1' { $env:DSH_DELETE_KEEP = '0' }
+        '2' { $env:DSH_DELETE_KEEP = '1' }
+        default { throw '无效选项。' }
+    }
+    Write-Host ''
+    Write-Host '[警告] 将删除 dsh 容器、DSH 镜像（dsh:* 与 .env 记录的预构建引用）、本项目挂载和网络、全局 Docker 构建缓存。' -ForegroundColor Yellow
+    if ($env:DSH_DELETE_KEEP -eq '1') {
+        Write-Host "[警告] $Dir 里除 workspace\、data\dsh\sessions\、data\dsh\profiles\ 之外的一切也会删除，包括项目源码、.env、模型密钥和 root 密码哈希。" -ForegroundColor Yellow
+    } else {
+        Write-Host "[警告] $Dir 整个目录都会删除，包括 data\ 和 workspace\ 里的一切。" -ForegroundColor Yellow
+    }
     $answer = Read-Host '请输入 DELETE 继续，其他输入取消'
     if ($answer -ne 'DELETE') { Write-Host '已取消。'; exit 0 }
 }
@@ -1128,12 +1154,55 @@ function Remove-DshProject {
             }
             # Windows 会锁定进程当前目录，Set-Location 不改变进程 cwd，这里显式移出目标目录。
             [Environment]::CurrentDirectory = (Get-Location).Path
-            Remove-Item -LiteralPath $resolvedDir -Recurse -Force
+            if ($env:DSH_DELETE_KEEP -eq '1') {
+                Remove-DshProjectKeepingWork -ProjectDir $resolvedDir
+            } else {
+                Remove-Item -LiteralPath $resolvedDir -Recurse -Force
+            }
         } else {
             Write-Host "==> $resolvedDir 不是可识别的 dsh-docker 工程，已保留。"
         }
     }
     Write-Host '==> DSH 删除完成。' -ForegroundColor Green
+}
+
+# 删掉 $Dir 里除白名单之外的所有直接子项（含隐藏项）。
+# 只按名字比对直接子项、且全程用 -LiteralPath，避免把路径拼进字符串再交给别的 shell。
+function Remove-DshDirExcept {
+    param([string]$Dir, [string[]]$Keep)
+    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return }
+    foreach ($item in Get-ChildItem -LiteralPath $Dir -Force) {
+        if ($Keep -contains $item.Name) { continue }
+        Remove-Item -LiteralPath $item.FullName -Recurse -Force
+    }
+}
+
+# 保留会话 / 工作目录 / 插件，其余全部删掉。
+#
+# 做法是逐层按白名单删，而不是"先备份、删完再搬回来"：中途失败时要保留的数据一直
+# 待在原地。项目源码（含 .git）也一并删掉，这样下一次安装会取一份新的源码，而不是
+# 继续用旧版脚本。
+function Remove-DshProjectKeepingWork {
+    param([string]$ProjectDir)
+    Remove-DshDirExcept -Dir $ProjectDir -Keep @('workspace','data')
+    Remove-DshDirExcept -Dir (Join-Path $ProjectDir 'data') -Keep @('dsh')
+    Remove-DshDirExcept -Dir (Join-Path $ProjectDir 'data\dsh') -Keep @('sessions','profiles')
+    $kept = @($DshDeleteKeepPaths | Where-Object { Test-Path -LiteralPath (Join-Path $ProjectDir $_) })
+    # 标记文件同时也是给人看的：目录里只剩这些东西时，光看文件名很难说清它们是什么。
+    $notes = [Collections.Generic.List[string]]::new()
+    $notes.Add('# 这个目录是 dsh-docker 删除时选择「保留会话 / 工作目录 / 插件」后的残留。')
+    $notes.Add('# 保留下来的路径：')
+    foreach ($path in $kept) { $notes.Add("#   $path") }
+    $notes.Add('# 重新安装：irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex')
+    $notes.Add('# 安装器看到这个文件就会把项目源码取回到同一个目录，上面这些路径原地接着用。')
+    Set-Content -LiteralPath (Join-Path $ProjectDir $DshDeleteKeepMarker) -Value $notes -Encoding utf8
+    if ($kept.Count -gt 0) {
+        Write-Host ("==> 已保留：" + ($kept -join ' ')) -ForegroundColor Green
+    } else {
+        Write-Host '==> 会话 / 工作目录 / 插件这三个路径都不存在，没有东西需要保留。'
+    }
+    Write-Host '==> 其余内容（项目源码、.env、模型密钥、root 密码哈希、data\home 里的工具链）已删除。'
+    Write-Host "==> 重新安装到 $ProjectDir 即可接着用；安装器会自己把项目源码取回来。"
 }
 
 function Get-DockerDesktopExecutable {
@@ -1343,6 +1412,14 @@ function Fetch-Project {
     } elseif (Test-Path (Join-Path $Dir '.dsh-docker-archive-source')) {
         Write-Host '==> 正在通过 GitHub ZIP 同步工程文件...' -ForegroundColor Yellow
         Fetch-ArchiveProject
+    } elseif (Test-Path (Join-Path $Dir $DshDeleteKeepMarker)) {
+        # 上一次删除选择了「保留会话 / 工作目录 / 插件」：目录里只剩那几样，源码是被删掉的。
+        # 这里必须把源码取回同一个目录（而不是报错让人手工搬），否则"删除→重装→接着用"
+        # 这条路走不通。Fetch-ArchiveProject 是往现有目录里覆盖复制，不会动保留的数据，
+        # 失败时也只在目录原本不存在的情况下才清理，所以保留的数据是安全的。
+        Write-Host "==> $Dir 里只剩上次删除时保留的数据，正在取回项目源码..." -ForegroundColor Yellow
+        Fetch-ArchiveProject
+        Remove-Item -LiteralPath (Join-Path $Dir $DshDeleteKeepMarker) -Force -ErrorAction SilentlyContinue
     } else { throw "$Dir 已存在但不是 dsh-docker 工程。" }
 }
 
@@ -1355,10 +1432,26 @@ if ($UsernsPreflight) {
 
 if (-not $DshAction -and $interactive) {
     $installLabel = if (Test-Path $Dir) { '重新配置并重建容器（保留挂载数据）' } else { '全新安装' }
-    Write-Host "1) $installLabel`n2) 在容器内更新 DSH`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态`n8) 删除`n9) 补填模型 API 密钥（只新增密钥代理容器，不重建 dsh）`n10) 模型密钥管理面板（浏览器里填密钥、拉模型列表，不重建 dsh）"
+    Write-Host "1) $installLabel`n2) 更新（容器内更新 DSH，或换成新镜像重建容器）`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态`n8) 删除`n9) 补填模型 API 密钥（只新增密钥代理容器，不重建 dsh）`n10) 模型密钥管理面板（浏览器里填密钥、拉模型列表，不重建 dsh）"
     switch (Ask '这次要做什么' '1') {
-        '1' { $DshAction = 'install' }; '2' { $DshAction = 'update' }; '3' { $DshAction = 'start' }; '4' { $DshAction = 'stop' }
-        '5' { $DshAction = 'restart' }; '6' { $DshAction = 'logs' }; '7' { $DshAction = 'status' }; '8' { $DshAction = 'delete' }
+        '1' { $DshAction = 'install' }
+        # "更新"是两件不同粒度的事，合成一个入口再分支：日常更新 DSH 本体不需要碰镜像，
+        # 只有发布了新镜像（容器里那套脚本、控制层、基础层变了）才需要重建容器。
+        '2' {
+            Write-Host ''
+            Write-Host '更新哪一层：'
+            Write-Host '1) 只更新容器内的 DSH（重装 npm 包，容器和镜像都不动，最快）'
+            Write-Host '2) 换成新镜像并重建容器（沿用现有配置不重问；会话、插件、项目文件、'
+            Write-Host '   密钥全部保留，只有容器里 apt 装的系统包要重装）'
+            switch (Ask '请选择' '1') {
+                '1' { $DshAction = 'update' }
+                '2' { $DshAction = 'upgrade' }
+                default { throw '无效操作。' }
+            }
+        }
+        '3' { $DshAction = 'start' }; '4' { $DshAction = 'stop' }; '5' { $DshAction = 'restart' }
+        '6' { $DshAction = 'logs' }; '7' { $DshAction = 'status' }
+        '8' { $DshAction = 'delete' }
         '9' { $DshAction = 'model-key' }
         '10' { $DshAction = 'key-panel' }
         default { throw '无效操作。' }
@@ -1657,6 +1750,190 @@ if ($DshAction -in @('install','configure')) {
     }
 }
 
+# ---------------------------------------------------------------------------
+# upgrade：只换镜像，不重问配置
+#
+# 为什么单独做一个动作：install/configure 见到 dsh 容器就会直接拒绝（那是为了保护容器
+# 可写层里 apt 装的东西），而它本身还要把整个向导走一遍；dsh.bat 只在本地没有那个 tag
+# 时才拉，:latest 拉过一次之后就再也不会更新。于是"发布了新镜像"这件最常做的事以前只
+# 能靠删掉重装，代价是会话、插件、项目文件、密钥全丢。
+#
+# 这条路沿用现有 .env，一个问题都不问，data\ 与 workspace\ 全程不动。
+# ---------------------------------------------------------------------------
+
+# upgrade 和 status 都不走安装问答，叠加文件只能从落盘的 .env 反推。少了它们，旁路容器
+# 不在本次 Compose 文档里，--remove-orphans 会把正常运行的 broker / egress 当孤儿删掉。
+function Get-DshComposeFileArgs {
+    param([string]$EnvPath = '.env')
+    $fileArgs = @('-f','docker-compose.yml')
+    if ((Get-ComposeEnvValue $EnvPath 'DSH_MODEL_BROKER' 'off') -eq 'on' -and (Test-Path -LiteralPath 'docker-compose.keys.yml' -PathType Leaf)) {
+        $fileArgs += @('-f','docker-compose.keys.yml')
+        if ((Get-ComposeEnvValue $EnvPath 'DSH_KEY_ADMIN' 'off') -eq 'on' -and (Test-Path -LiteralPath 'docker-compose.keys-admin.yml' -PathType Leaf)) {
+            $fileArgs += @('-f','docker-compose.keys-admin.yml')
+        }
+    }
+    if ((Get-ComposeEnvValue $EnvPath 'DSH_EGRESS_MODE' 'open') -ne 'open' -and (Test-Path -LiteralPath 'docker-compose.isolated.yml' -PathType Leaf)) {
+        $fileArgs += @('-f','docker-compose.isolated.yml')
+    }
+    return $fileArgs
+}
+
+# 镜像身份：ID 判断"这次到底有没有换"，RepoDigest 是发布侧的唯一标识。本机构建的镜像
+# 没有 RepoDigest，那时返回空串，调用方按空处理。
+function Get-DshImageId {
+    param([string]$Reference)
+    $value = (& docker image inspect --format '{{.Id}}' $Reference 2>$null | Select-Object -First 1)
+    if ($value) { return $value.ToString().Trim() }
+    return ''
+}
+
+function Get-DshImageDigest {
+    param([string]$Reference)
+    $value = (& docker image inspect --format '{{ if .RepoDigests }}{{ index .RepoDigests 0 }}{{ end }}' $Reference 2>$null | Select-Object -First 1)
+    if ($value) { return $value.ToString().Trim() }
+    return ''
+}
+
+# 升级会留下的 Docker 垃圾，按类精确回收。
+#
+# 刻意不用 docker system prune、也不用不带过滤的 image prune：那两条会把宿主上别的项目
+# 一起清掉。下面每一条都用 Compose 项目标签或镜像自己的 OCI 标签收窄到本项目。
+function Remove-DshDockerLeftovers {
+    param([string]$ImageSource)
+    $projectName = (& docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' dsh 2>$null | Select-Object -First 1)
+    if (-not $projectName -or $projectName.ToString().Trim() -in @('','<no value>')) { $projectName = 'dsh-docker' }
+    $projectName = $projectName.ToString().Trim()
+    Write-Host '==> 正在回收升级留下的 Docker 垃圾（只动本项目的东西）...' -ForegroundColor Yellow
+
+    # 1) 悬空镜像。拉到新的 :latest 之后旧的那一份会丢掉标签变成 <none>，而它仍然带着镜像
+    #    自己的 OCI 标签，所以能精确回收而不碰宿主上别人的悬空镜像。旧容器已经被上一步的
+    #    --force-recreate 删掉了，这时才真的删得动。
+    & docker image prune -f --filter 'label=org.opencontainers.image.title=dsh-docker' *> $null
+    # 更老的镜像可能没有那个 LABEL（早期 Dockerfile 还没加），按项目标签再扫一遍。
+    foreach ($id in @(& docker image ls -q --filter dangling=true --filter "label=com.docker.compose.project=$projectName" 2>$null)) {
+        if ($id) { & docker image rm $id *> $null }
+    }
+
+    # 2) 构建缓存。只有本机构建这条路才会产生它；不加 -a，当前镜像还在用的层要留着，否则
+    #    下一次构建等于从零开始。
+    if ($ImageSource -eq 'build') { & docker builder prune -f *> $null }
+
+    # 3) 本项目已经退出的容器。--force-recreate 会顺手删掉被替换的那几个，但更早的失败尝试
+    #    可能留下 created / exited / dead 状态的残骸。
+    foreach ($id in @(& docker container ls -aq --filter "label=com.docker.compose.project=$projectName" --filter status=created --filter status=exited --filter status=dead 2>$null)) {
+        if ($id) { & docker container rm -f $id *> $null }
+    }
+
+    # 4) 本项目的悬空卷。当前部署全是 bind mount，所以这里只会捞到历史遗留。
+    foreach ($id in @(& docker volume ls -q --filter dangling=true --filter "label=com.docker.compose.project=$projectName" 2>$null)) {
+        if ($id) { & docker volume rm $id *> $null }
+    }
+
+    # 5) 没有容器再接着的本项目网络。从隔离模式切回 open 之后 dsh-internal 就是这样。外部
+    #    网络（比如面板那张 dpanel-local）不带本项目标签，不会被选中。
+    foreach ($id in @(& docker network ls -q --filter "label=com.docker.compose.project=$projectName" 2>$null)) {
+        if (-not $id) { continue }
+        $attached = (& docker network inspect --format '{{ len .Containers }}' $id 2>$null | Select-Object -First 1)
+        if ($attached -and $attached.ToString().Trim() -eq '0') { & docker network rm $id *> $null }
+    }
+
+    # 6) 崩掉的历史运行留在工程目录里的临时 .env。只删一天以前的，避免碰到另一个正在跑的
+    #    安装器自己那一份。
+    Get-ChildItem -LiteralPath (Get-Location) -Filter '.env.pending.*' -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+}
+
+function Invoke-DshUpgrade {
+    if (-not (Test-Path -LiteralPath '.env' -PathType Leaf)) {
+        throw "$(Get-Location) 里没有 .env，说明这里还没有装过 DSH；请先在向导里选择安装。"
+    }
+    $upgradeImageSource = if ($ImageSource) { $ImageSource } else { Get-ComposeEnvValue '.env' 'DSH_IMAGE_SOURCE' 'prebuilt' }
+    if ($upgradeImageSource -notin @('prebuilt','build')) { $upgradeImageSource = 'prebuilt' }
+    $upgradeImage = if ($Image) { $Image }
+        elseif ($upgradeImageSource -eq 'build') { Get-ComposeEnvValue '.env' 'DSH_IMAGE' $DefaultLocalImage }
+        else { Get-ComposeEnvValue '.env' 'DSH_IMAGE' $DefaultPrebuiltImage }
+    $upgradeBroker = Get-ComposeEnvValue '.env' 'DSH_MODEL_BROKER' 'off'
+    if ($upgradeBroker -notin @('on','off')) { $upgradeBroker = 'off' }
+    # 面板设置要走 Resolve-KeyAdmin：Assert-KeyAdmin 和 Show-KeyAdminAccess 读的是它设的
+    # 那两个 script 作用域变量。Interactive 传 false，升级不问任何问题。
+    $upgradeKeyAdmin = Resolve-KeyAdmin -EnvFile '.env' -BrokerOn ($upgradeBroker -eq 'on') -Interactive $false
+    $upgradeEgress = Get-ComposeEnvValue '.env' 'DSH_EGRESS_MODE' 'open'
+    if ($upgradeEgress -notin @('open','blocklist','allowlist')) { $upgradeEgress = 'open' }
+    # 黑白名单之间的切换是在密钥管理面板里做的，那时 .env 不跟着变；以策略文件为准，否则
+    # 一次升级就会把面板里的选择悄悄改回 .env 里那个旧值。
+    if ($upgradeEgress -ne 'open') {
+        $policyMode = Get-EgressPolicyMode
+        if ($policyMode -in @('blocklist','allowlist')) { $upgradeEgress = $policyMode }
+    }
+    $upgradeBind = Get-ComposeEnvValue '.env' 'DSH_BIND_HOST' '127.0.0.1'
+    $upgradeFileArgs = Get-DshComposeFileArgs '.env'
+
+    $beforeId = Get-DshImageId $upgradeImage
+    $beforeDigest = Get-DshImageDigest $upgradeImage
+    Write-Host '==> 沿用 .env 里的现有配置，不会重问：' -ForegroundColor Yellow
+    Write-Host "    镜像：$upgradeImage（来源 $upgradeImageSource）"
+    Write-Host "    访问模式：$(Get-ComposeEnvValue '.env' 'DSH_ACCESS_MODE' 'local')，宿主端口绑定 ${upgradeBind}:3080"
+    Write-Host "    密钥代理：$upgradeBroker，管理面板：$upgradeKeyAdmin，出站模式：$upgradeEgress"
+
+    if ($upgradeImageSource -eq 'prebuilt') {
+        Write-Host "==> 正在拉取镜像：$upgradeImage" -ForegroundColor Yellow
+        & docker pull $upgradeImage
+        if ($LASTEXITCODE -ne 0) { throw '拉取失败。容器没有被改动，现有部署照旧运行。' }
+    } else {
+        Write-Host "==> 正在用当前工程的 Dockerfile 重新构建镜像：$upgradeImage" -ForegroundColor Yellow
+        $env:DSH_IMAGE = $upgradeImage
+        # 只有 dsh 服务带 build 段，叠加文件里的旁路服务都直接复用 ${DSH_IMAGE}，
+        # 所以构建不叠加 -f；叠加了反而会因为缺少 --env-file 里的变量而刷一堆插值警告。
+        & docker compose build dsh
+        if ($LASTEXITCODE -ne 0) { throw '构建失败。容器没有被改动，现有部署照旧运行。' }
+    }
+
+    $afterId = Get-DshImageId $upgradeImage
+    $afterDigest = Get-DshImageDigest $upgradeImage
+    if ($beforeId -and $beforeId -eq $afterId) {
+        Write-Host '==> 镜像已经是最新的（没有变化），仍然重建容器以套用当前 .env。' -ForegroundColor Yellow
+    }
+
+    Write-Host '==> 正在重建容器（挂载数据、会话、插件、密钥全部保留）...' -ForegroundColor Yellow
+    $upgradeKeys = @('DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL','DSH_IMAGE','DSH_IMAGE_SOURCE','DSH_MODEL_BROKER','DSH_MODEL_BROKER_BASE','DSH_KEY_ADMIN','DSH_KEY_ADMIN_BIND_HOST','DSH_KEY_ADMIN_HOST_PORT','DSH_EGRESS_MODE','DSH_EGRESS_ALLOWED_HOSTS')
+    # --remove-orphans：关掉密钥面板、或者从隔离模式退回 open 之后，上一份配置起的旁路
+    # 容器会变成孤儿一直挂着。-f 组合是按当前 .env 算出来的，所以不会误删。
+    $upgradeExit = Invoke-ComposeWithEnvFile -Path '.env' -Arguments @('up','-d','--no-build','--force-recreate','--remove-orphans') -EnvironmentKeys $upgradeKeys -FileArguments $upgradeFileArgs
+    if ($upgradeExit -ne 0) { throw '容器重建失败。.env 未被改动，用 .\dsh.bat logs 查看原因。' }
+    # 记下这次真正跑起来的镜像摘要，下一次升级就能直接对比出换没换。
+    if ($afterDigest) { Set-ComposeEnvValue '.env' 'DSH_IMAGE_DIGEST' $afterDigest }
+
+    Assert-DshHardening
+    if ($upgradeBroker -eq 'on') { Assert-ModelBroker }
+    if ($upgradeKeyAdmin -eq 'on') { Assert-KeyAdmin }
+    if ($upgradeEgress -ne 'open') { Assert-EgressIsolation -ProbeHost $upgradeBind }
+    Remove-DshDockerLeftovers -ImageSource $upgradeImageSource
+
+    Write-Host ''
+    Write-Host '==> 升级完成，配置和数据都没有被改动：' -ForegroundColor Green
+    Write-Host '    .env：沿用（本次只补写 DSH_IMAGE_DIGEST）'
+    Write-Host '    会话 data\dsh\sessions、插件 data\dsh\profiles、项目 workspace\：原样保留'
+    Write-Host '    模型密钥 data\broker\keys.json、root 密码哈希 data\secret\root.hash：原样保留'
+    Write-Host '    工具链 data\home（npm / pnpm / pip / uv 装的东西）：原样保留'
+    if ($afterDigest) {
+        if ($beforeDigest -and $beforeDigest -ne $afterDigest) {
+            Write-Host "    镜像：$beforeDigest"
+            Write-Host "      -> $afterDigest"
+        } else {
+            Write-Host "    镜像：$afterDigest"
+        }
+    } else {
+        Write-Host "    镜像：$upgradeImage（本机构建，没有发布摘要）"
+    }
+    Write-Host ''
+    Write-Host '    apt 装的系统包在容器可写层，重建容器会丢，需要的话重新 apt install 一次。' -ForegroundColor Yellow
+    Write-Host '    工程文件（docker-compose*.yml、install.ps1、dsh.bat）这次没有动：升级只换镜像。' -ForegroundColor Yellow
+    Write-Host '    发布说明提到 Compose 有变化时，先在工程目录里 git pull --ff-only 再升级一次。' -ForegroundColor Yellow
+    Show-KeyAdminAccess ($upgradeKeyAdmin -eq 'on')
+    & docker system df
+}
+
 switch ($DshAction) {
     { $_ -in @('install','configure') } {
         # 预构建优先，但公网拉取可能因为网络或尚未发布而失败；这时退回本机构建，
@@ -1744,6 +2021,8 @@ switch ($DshAction) {
             if ($keyAdmin -eq 'on') { Assert-KeyAdmin }
             # blocklist 和 allowlist 是同一套隔离形态，出站链路要一样地核验。
             if ($egressMode -ne 'open') { Assert-EgressIsolation -ProbeHost $bind }
+            # .\dsh.bat remove 之后重装是常见路径，那会留下失去标签的旧镜像和退出的旁路容器。
+            Remove-DshDockerLeftovers -ImageSource $imageSource
         } finally {
             if ($pendingEnvFile -and (Test-Path -LiteralPath $pendingEnvFile)) {
                 Remove-Item -LiteralPath $pendingEnvFile -Force -ErrorAction SilentlyContinue
@@ -1852,6 +2131,7 @@ switch ($DshAction) {
         Write-Host '    DSH 热加载这两份文件，刷新 WebUI 就能在「设置 → 模型」里选到。' -ForegroundColor Green
         Show-KeyAdminAccess $true
     }
+    'upgrade' { Invoke-DshUpgrade }
     'update' { & .\dsh.bat update }
     'start' { & .\dsh.bat start }
     'stop' { & .\dsh.bat stop }

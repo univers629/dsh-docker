@@ -76,6 +76,35 @@ if [ "$(id -u)" = 0 ]; then
   esac
 fi
 
+# npm 撞到 root 属主的缓存时，报错里会直接教人跑
+# `sudo chown -R 1000:1000 "/data/home/.npm"`。这条命令在这个容器里的正解就是免密的
+# fix-perms（把运行账户自己的几棵树改回它名下），所以形态吻合时直接改道，不必让
+# 调用方去找容器 root 密码。参数形态不吻合的 chown 仍然走需要密码的 run。
+if [ "$1" = chown ]; then
+  chown_owner=''
+  chown_recursive=false
+  for chown_argument in "$@"; do
+    case "$chown_argument" in
+      chown) ;;
+      -R|-Rh|-hR|--recursive) chown_recursive=true ;;
+      -*) chown_owner='unsupported' ;;
+      *)
+        if [ -z "$chown_owner" ]; then
+          chown_owner=$chown_argument
+        fi
+        ;;
+    esac
+  done
+  if [ "$chown_recursive" = true ]; then
+    case "$chown_owner" in
+      "$(id -u):$(id -g)"|"$(id -u)"|"$(id -un):$(id -gn)"|"$(id -un)")
+        echo '[sudo] 已改用免密的 dsh-root fix-perms：把运行账户自己的目录属主改回来。' >&2
+        exec /usr/local/bin/dsh-root fix-perms
+        ;;
+    esac
+  fi
+fi
+
 case "$1" in
   apt|apt-get|apt-cache|apt-mark)
     exec /usr/local/bin/dsh-root "$@"

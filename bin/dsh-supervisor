@@ -10,24 +10,29 @@ DSH_PREPARE_EXECUTABLE=${DSH_PREPARE_EXECUTABLE:-}
 DSH_NGINX_EXECUTABLE=${DSH_NGINX_EXECUTABLE:-nginx}
 DSH_NGINX_CONFIG=${DSH_NGINX_CONFIG:-/usr/local/share/dsh/nginx.conf}
 DSH_PRIVILEGED_HELPER=${DSH_PRIVILEGED_HELPER:-/usr/local/lib/dsh/dsh-privileged-helper.mjs}
+DSH_PROFILE_WATCHER=${DSH_PROFILE_WATCHER:-/usr/local/bin/watch-profile-plugins.mjs}
 DSH_RUN_USER=${DSH_RUN_USER:-dsh}
 DSH_RUN_UID=${DSH_RUN_UID:-}
 DSH_RUN_GID=${DSH_RUN_GID:-}
+DSH_USER_HOME=${DSH_USER_HOME:-/data/home}
 
 stopping=false
 dsh_pid=
 nginx_pid=
 helper_pid=
+watcher_pid=
 
 # Supervisor 自己是 root（Nginx 主进程和特权代理需要），但 DSH 本体、它派生的
 # Agent 会话以及所有运行时准备脚本都降到非特权的 dsh 账户。setpriv 不依赖
 # setuid 位，所以容器可以同时保留 no-new-privileges。
+# HOME 要显式传：setpriv 只换身份不改环境，而镜像故意没给全容器设 HOME（否则宿主
+# 上以 root 进来的 docker exec 会继承 dsh 的家目录，把 npm 缓存写成 root 属主）。
 run_unprivileged() {
   if [ -z "$DSH_RUN_UID" ] || [ -z "$DSH_RUN_GID" ]; then
     "$@"
     return
   fi
-  setpriv --reuid "$DSH_RUN_UID" --regid "$DSH_RUN_GID" --init-groups -- "$@"
+  HOME="$DSH_USER_HOME" setpriv --reuid "$DSH_RUN_UID" --regid "$DSH_RUN_GID" --init-groups -- "$@"
 }
 
 write_pid_record() {
@@ -78,6 +83,34 @@ start_privileged_helper() {
   fi
 }
 
+# profile 补丁的兜底进程：prepare_dsh 只在拉起 DSH 之前补一次，而 dsh-market 的
+# hot-mount 安装完全不重启进程，那一次补不到。watcher 以 dsh 身份跑——它只改 profile
+# 里的文件，不需要任何特权——并且刻意不阻断启动：它挂了 DSH 照常起，只是少了兜底。
+start_profile_watcher() {
+  [ -f "$DSH_PROFILE_WATCHER" ] || return 0
+  if [ -n "$watcher_pid" ]; then
+    if process_running "$watcher_pid"; then return 0; fi
+    wait "$watcher_pid" 2>/dev/null || true
+    watcher_pid=
+  fi
+  # 和 DSH 本体同理：必须直接后台启动外部命令，不能包 run_unprivileged 这层函数，
+  # 否则 $! 记录的是子 shell 而不是 node，stop_all 的 SIGTERM 传不到真正的进程。
+  # setpriv 会 exec node，所以 exec 之后 PID 不变。
+  if [ -n "$DSH_RUN_UID" ] && [ -n "$DSH_RUN_GID" ]; then
+    HOME="$DSH_USER_HOME" setpriv --reuid "$DSH_RUN_UID" --regid "$DSH_RUN_GID" --init-groups -- node "$DSH_PROFILE_WATCHER" &
+  else
+    HOME="$DSH_USER_HOME" node "$DSH_PROFILE_WATCHER" &
+  fi
+  watcher_pid=$!
+  sleep 1
+  if ! process_running "$watcher_pid"; then
+    wait "$watcher_pid" 2>/dev/null || true
+    watcher_pid=
+    echo '[dsh-supervisor] profile 补丁 watcher 起不来；DSH 继续启动，插件补丁只在重启前生效' >&2
+    return 0
+  fi
+}
+
 start_nginx() {
   [ "${DSH_DISABLE_NGINX:-false}" != true ] || return 0
   if [ -n "$nginx_pid" ]; then
@@ -100,6 +133,7 @@ stop_all() {
   [ -z "$dsh_pid" ] || kill -TERM "$dsh_pid" 2>/dev/null || true
   [ -z "$nginx_pid" ] || kill -TERM "$nginx_pid" 2>/dev/null || true
   [ -z "$helper_pid" ] || kill -TERM "$helper_pid" 2>/dev/null || true
+  [ -z "$watcher_pid" ] || kill -TERM "$watcher_pid" 2>/dev/null || true
 }
 
 cleanup() {
@@ -108,6 +142,25 @@ cleanup() {
 
 trap stop_all HUP INT TERM
 trap cleanup EXIT
+
+# 告诉插件"这台 host 由外部 Supervisor 托管，重启权不在你手上"。
+#
+# 这不是装饰。第三方插件（例如 dsh-market）装完包后会自己重启 DSH：做法是 detach
+# 一个替身进程、重放原来的启动命令行。在容器里这会打成一团——替身抢到 3081，
+# Supervisor 的新孩子每次都撞 EADDRINUSE，/run/dsh.pid 一直写不出来，WebUI 的重启
+# 按钮只会报 "DSH child process is not running"，运气不好就是 502。
+#
+# 这类插件的通用判据是 systemd 那一套：环境里有 INVOCATION_ID/JOURNAL_STREAM，
+# 且自己的父进程就是 PID 1。本 Supervisor 正好就是容器的 PID 1，DSH 是它的直接
+# 子进程，所以补上 INVOCATION_ID 之后判据成立，插件会默认关掉自重启，改由这里
+# 或 restart-dsh 统一重启。JOURNAL_STREAM 故意不设：那会让日志库以为能写 journald。
+# DSH_SUPERVISED 是本工程自己的显式标记，给容器内的脚本和排查用。
+if [ "${DSH_ANNOUNCE_SUPERVISOR:-true}" = true ] && [ -z "${INVOCATION_ID:-}" ]; then
+  INVOCATION_ID="$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  [ -n "$INVOCATION_ID" ] || INVOCATION_ID="$(printf '%032x' "$$")"
+  export INVOCATION_ID
+fi
+export DSH_SUPERVISED=1
 
 rm -f "$DSH_PID_FILE" "$DSH_RESTART_REQUEST_FILE"
 write_pid_record "$DSH_SUPERVISOR_PID_FILE" "$$" || {
@@ -135,14 +188,16 @@ while [ "$stopping" != true ]; do
     continue
   fi
 
+  start_profile_watcher
+
   started_at=$(date +%s)
   echo "[dsh-supervisor] starting DSH as a managed child process running as $DSH_RUN_USER" >&2
   # 这里必须直接后台启动外部命令，不能包一层函数或子 shell：$! 记录的 PID 要正好
   # 是降权后的 DSH 进程本身，restart-dsh 和安装器的身份核验都依赖这一点。
   if [ -n "$DSH_RUN_UID" ] && [ -n "$DSH_RUN_GID" ]; then
-    setpriv --reuid "$DSH_RUN_UID" --regid "$DSH_RUN_GID" --init-groups -- "$DSH_EXECUTABLE" "$@" &
+    HOME="$DSH_USER_HOME" setpriv --reuid "$DSH_RUN_UID" --regid "$DSH_RUN_GID" --init-groups -- "$DSH_EXECUTABLE" "$@" &
   else
-    "$DSH_EXECUTABLE" "$@" &
+    HOME="$DSH_USER_HOME" "$DSH_EXECUTABLE" "$@" &
   fi
   dsh_pid=$!
   if ! write_pid_record "$DSH_PID_FILE" "$dsh_pid"; then
@@ -161,6 +216,7 @@ while [ "$stopping" != true ]; do
     if ! start_nginx; then
       echo '[dsh-supervisor] Nginx exited while DSH was running; retrying' >&2
     fi
+    start_profile_watcher
     sleep 1
   done
   if wait "$dsh_pid"; then status=0; else status=$?; fi
@@ -188,3 +244,4 @@ done
 [ -z "$dsh_pid" ] || wait "$dsh_pid" 2>/dev/null || true
 [ -z "$nginx_pid" ] || wait "$nginx_pid" 2>/dev/null || true
 [ -z "$helper_pid" ] || wait "$helper_pid" 2>/dev/null || true
+[ -z "$watcher_pid" ] || wait "$watcher_pid" 2>/dev/null || true

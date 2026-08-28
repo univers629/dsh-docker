@@ -237,6 +237,32 @@ export function validateAptCommand(command, args) {
   return { executable, argv: [command, ...args], subcommand, packages, removal }
 }
 
+// 属主自愈。
+//
+// Agent 以 dsh 账户干活，工具链全都装在它自己的家目录里。这些目录里一旦混进 root
+// 属主的文件（历史上最常见的来源是宿主机上以 root 身份 docker exec 跑过 npm/npx），
+// npm 会直接以 EACCES 失败，并且只会建议 "sudo chown"——而容器里的 Agent 没有 root，
+// 自己修不了，只能等下一次容器重启。所以这里开一个免密的窄动作。
+//
+// 它不扩大提权面：目标 uid/gid 由代理侧按运行账户决定（不接受请求里的值），路径是
+// 固定白名单，chown 带 -h 不跟随符号链接（-R 本来也不跟随），所以 dsh 没法用一个
+// 指向 /etc 的软链把系统文件改成自己的。能做的只有"把这几棵树改回自己名下"。
+export const FIX_PERMS_TARGETS = ['/data/home', '/data/dsh', '/data/agents', '/data/mcp', '/workspace']
+
+export const CHOWN_EXECUTABLE = '/usr/bin/chown'
+
+export function buildFixPermsCommand(owner) {
+  const uid = Number(owner?.uid)
+  const gid = Number(owner?.gid)
+  if (!Number.isInteger(uid) || uid <= 0 || !Number.isInteger(gid) || gid <= 0) {
+    throw new PolicyError('属主自愈只能把文件改回非 root 的运行账户')
+  }
+  return {
+    executable: CHOWN_EXECUTABLE,
+    argv: ['chown', '-Rh', `${uid}:${gid}`, ...FIX_PERMS_TARGETS],
+  }
+}
+
 export const DEFAULT_LOCKOUT = {
   maxFailures: 5,
   failureWindowSeconds: 900,

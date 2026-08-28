@@ -45,7 +45,7 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | i
 | 2 在容器内更新 DSH | 在运行中的容器内从 npm 安装新版本并重打补丁，只重启 DSH 进程 |
 | 3 启动 / 4 停止 / 5 重启 | 只操作已有容器，不重建，保留 apt 安装的工具链 |
 | 6 查看日志 / 7 查看状态 | 转发到 `./dsh.sh logs` 与 `status` |
-| 8 删除 | 输入 `DELETE` 确认后清理容器、镜像、挂载、网络、构建缓存与工程目录 |
+| 8 删除 | 先选数据范围（可保留会话、工作目录和插件），输入 `DELETE` 确认后清理容器、镜像、挂载、网络、构建缓存与工程目录 |
 | 9 补填模型 API 密钥 | 为已有部署写入密钥并启动密钥代理容器，不重建 `dsh` |
 
 只有第 1 项会询问镜像来源，其余各项直接作用于现有容器。
@@ -73,11 +73,19 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [服务]|status|shell|root-sh
 
 - `start` 只在容器不存在时准备镜像，之后复用同一个容器；`stop`、`restart` 与容器内的 `apt install` 都保留可写层。
 - `update` 只在容器内重装 DSH 的 npm 包，不是项目或镜像更新；`remove` 会删除容器可写层，绑定挂载保留。
+- 菜单第 2 项是"更新"，进去再分两支：更新容器内的 DSH（等同 `./install.sh update`，容器和镜像都不动），或换成新镜像并重建容器（等同 `./install.sh upgrade`）。后者沿用现有 `.env`，不重问配置，会话、插件、`workspace/` 与模型密钥全部保留，只有容器可写层里 `apt` 装的系统包要重装；收尾按项目标签回收换下来的悬空镜像、残留容器与空网络，不碰宿主上其他项目。
 - `shell` 进入非特权 `dsh` 账户，`root-shell` 是宿主机侧的管理通道（容器内部无法以此提权）。
-- `verify` 在容器内运行 24 项加固自检，`keys` 与 `egress` 打印密钥代理和出站代理的状态，`key-panel` 打印密钥管理面板的地址与访问令牌。
+- `verify` 在容器内运行整套加固自检，`keys` 与 `egress` 打印密钥代理和出站代理的状态，`key-panel` 打印密钥管理面板的地址与访问令牌。
 - 健康检查同时探测 Nginx 入口与 DSH 自身端口，DSH 崩溃循环时容器状态为 `unhealthy`。
 
 彻底清空本项目：在工程目录运行菜单第 8 项，或执行 `./install.sh delete`（Windows：`powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`）。删除按精确名称清理本项目的容器、镜像、挂载、网络和工程目录，不使用子串匹配，也不会删除外部共享网络。
+
+删除会先问数据范围，最后才让人输入 `DELETE` 确认：
+
+- 全部删除：容器、镜像、`.env`、模型密钥、root 密码哈希，以及 `data/` 和 `workspace/` 里的一切。
+- 保留会话、工作目录和插件：只留下 `workspace/`、`data/dsh/sessions/`、`data/dsh/profiles/`，其余照样删干净（含项目源码与 `data/home` 里的工具链），目录里留下一个 `.dsh-preserved` 说明文件。重新安装到同一个目录时，安装器认得这个文件，会自己把项目源码取回来，这三样原地接着用。属主由容器启动时重新对齐，不需要手工 `chown`。
+
+脚本化删除可以用环境变量 `DSH_DELETE_KEEP=1` 选中"保留"这一支（删除本身仍要求交互确认）。
 
 ## 公网访问与认证
 
@@ -210,7 +218,7 @@ Debian 系统目录留在容器可写层，不使用 overlay 覆盖，因此同�
 - 访问：默认 `http://127.0.0.1:3082/`，访问令牌在 `data/broker/admin.token`（0600）。远程用 SSH 隧道：`ssh -N -L 3082:127.0.0.1:3082 <用户名@宿主地址>`。地址与端口由 `DSH_KEY_ADMIN_BIND_HOST`、`DSH_KEY_ADMIN_HOST_PORT` 决定。
 - 面板刻意不做进 DSH 的 WebUI：那个页面运行在 DSH 容器内，填进去的密钥就落在 Agent 能读的地方。面板作为独立容器只接入 `dsh-admin` 网络，`dsh` 容器不在其上；安装器会从 `dsh` 容器内实测这条连接必须失败，否则安装失败。
 - 令牌连续输错会触发递增延迟与锁定；面板容器自身 `read_only`、`cap_drop: ALL`、以 1000:1000 运行，只能读写 `data/broker` 与 `data/dsh`。
-- 推理强度：DSH 的模型页只对声明过档位的模型显示「推理强度」菜单，所以面板里那一栏留空时没有这个下拉。填 `off, low, medium, high` 这样的档位（可用 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）会写进这个上游的每个模型；给不支持 `reasoning_effort` 的模型声明档位会被上游拒绝，所以按上游实际支持的填。
+- 推理强度：面板上是一排勾选框（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），新建上游默认勾上 `off`、`low`、`medium`、`high`、`max`。勾上的档位会写进这个上游的每个模型；DSH 的模型页只对声明过档位的模型显示「推理强度」菜单，所以全不勾等于没有这个下拉，而给不支持 `reasoning_effort` 的模型声明档位会被上游拒绝——按上游实际支持的勾。
 - 请求限额：每分钟请求上限 + 每日请求配额（UTC 零点清零），数的是请求次数，不是 token 也不是金额，撞到上限时代理返回 429。`0` 表示不限，留空表示沿用现值。按 token 或金额限额需要逐家解析用量字段并维护价格表，面板不做；要按钱卡住就在上游平台后台给这把密钥单独设额度。
 - 空的 `keys.json` 是合法状态：安装时可以先不填密钥，这期间模型请求返回 503，等在面板里填完第一把密钥即可。
 - 代理托管的上游不要在 DSH 的 WebUI 卡片里填密钥：那个密钥框是 `type=password`，浏览器的密码管理器会自动往里填一个保存过的密码，随手保存一次就把它明文写进容器里的 `.credentials.yaml`。面板每 30 秒会把这类值换回占位串并在日志里点名（提醒轮换），但填进去的那把仍应视为已经进过容器。

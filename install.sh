@@ -75,7 +75,8 @@ usage() {
   cat <<'EOF'
 用法：install.sh [操作] [选项]
 
-操作：install（默认）、configure、update（容器内更新 DSH）、model-key（给已装好的部署补填模型密钥）、
+操作：install（默认）、configure、upgrade（换成新镜像并重建容器，沿用现有 .env，不重问配置）、
+      update（容器内更新 DSH）、model-key（给已装好的部署补填模型密钥）、
       key-panel（给已装好的部署开/关模型密钥管理面板）、
       start、stop、restart、logs、status、delete（删除）
 选项：
@@ -106,6 +107,10 @@ usage() {
   --non-interactive               不显示问答，使用参数或安全默认值
   --dir PATH                      工程目录（默认 ./dsh-docker）
 
+关于删除：先问数据范围——全部删除，或者只保留会话（data/dsh/sessions）、工作目录
+（workspace）和插件（data/dsh/profiles）——最后才让人输入 DELETE 确认。脚本里可以
+用 DSH_DELETE_KEEP=1 预先选中"保留"这一支，删除本身仍要求交互确认。
+
 关于模型密钥：写在命令行上的密钥会出现在 ps 里，所以人工安装请直接跑向导逐个输入
 （不回显），自动化请用 --model-keys-file 指向一份 0600 的 keys.json；--model-key 只是
 给没法交互的流水线留的后路。真实密钥永远不会写进 .env。
@@ -114,7 +119,7 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    install|configure|update|model-key|key-panel|start|stop|restart|logs|status|delete)
+    install|configure|upgrade|update|model-key|key-panel|start|stop|restart|logs|status|delete)
       ACTION="$1"
       ;;
     --action)
@@ -255,7 +260,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$ACTION" in
-  ''|install|configure|update|model-key|key-panel|start|stop|restart|logs|status|delete) ;;
+  ''|install|configure|upgrade|update|model-key|key-panel|start|stop|restart|logs|status|delete) ;;
   *) echo "[错误] 未知操作：$ACTION" >&2; exit 2 ;;
 esac
 case "$ACCESS_MODE_OVERRIDE" in
@@ -343,7 +348,7 @@ if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
     else
       echo "1) 全新安装"
     fi
-    echo "2) 在容器内更新 DSH"
+    echo "2) 更新（容器内更新 DSH，或换成新镜像重建容器）"
     echo "3) 启动"
     echo "4) 停止"
     echo "5) 重启"
@@ -355,7 +360,21 @@ if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
     prompt "这次要做什么" "1"
     case "$PROMPT_RESULT" in
       1) ACTION=install ;;
-      2) ACTION=update ;;
+      # "更新"是两件不同粒度的事，合成一个入口再分支：日常更新 DSH 本体不需要碰镜像，
+      # 只有发布了新镜像（容器里那套脚本、控制层、基础层变了）才需要重建容器。
+      2)
+        echo
+        echo "更新哪一层："
+        echo "1) 只更新容器内的 DSH（重装 npm 包，容器和镜像都不动，最快）"
+        echo "2) 换成新镜像并重建容器（沿用现有配置不重问；会话、插件、项目文件、"
+        echo "   密钥全部保留，只有容器里 apt 装的系统包要重装）"
+        prompt "请选择" "1"
+        case "$PROMPT_RESULT" in
+          1) ACTION=update ;;
+          2) ACTION=upgrade ;;
+          *) echo "[错误] 无效选项。" >&2; exit 2 ;;
+        esac
+        ;;
       3) ACTION=start ;;
       4) ACTION=stop ;;
       5) ACTION=restart ;;
@@ -512,10 +531,45 @@ fetch_project() {
     fi
   elif [ -f "$TARGET_DIR/docker-compose.yml" ]; then
     echo "==> 使用现有工程文件；不会自动同步或更新项目源码。"
+  elif [ -f "$TARGET_DIR/$DELETE_KEEP_MARKER" ]; then
+    # 上一次删除选择了"保留会话 / 工作目录 / 插件"：目录里只剩那几样，源码是被删掉的。
+    # 这里必须把源码取回同一个目录（而不是报错让人手工搬），否则"删除→重装→接着用"
+    # 这条路走不通。
+    echo "==> $TARGET_DIR 里只剩上次删除时保留的数据，正在取回项目源码..."
+    fetch_into_existing_dir
   else
     echo "[错误] $TARGET_DIR 已存在但不是 Git 工程，请移动该目录后重试。" >&2
     exit 1
   fi
+}
+
+# 往一个非空目录里放项目源码：先取到临时目录，再整目录搬进去。
+# 用 tar 管道而不是 cp/mv 加通配，是因为源码里有 .git、.github、.gitignore 这些点
+# 开头的条目，通配是否包含它们取决于 shell 选项。
+fetch_into_existing_dir() {
+  local tmp src
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/dsh-src-XXXXXX")" || { echo "[错误] 无法创建临时目录。" >&2; exit 1; }
+  src="$tmp/src"
+  if command -v git >/dev/null 2>&1; then
+    git clone https://github.com/univers629/dsh-docker.git "$src"
+  else
+    mkdir -p "$src"
+    curl -fsSL https://github.com/univers629/dsh-docker/archive/refs/heads/main.tar.gz \
+      | tar -xz -C "$src" --strip-components=1
+  fi
+  if [ ! -f "$src/docker-compose.yml" ]; then
+    rm -rf -- "$tmp"
+    echo "[错误] 取回的源码不完整，已放弃（保留的数据没有被改动）。" >&2
+    exit 1
+  fi
+  # 属主只对新搬进来的源码对齐：保留下来的 data/ 与 workspace/ 属于容器里的 1000:1000，
+  # 把它们 chown 给宿主用户只会让容器再修一遍。
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    chown -R "$SUDO_USER:$SUDO_USER" "$src" 2>/dev/null || true
+  fi
+  ( cd "$src" && tar cf - . ) | ( cd "$TARGET_DIR" && tar xf - )
+  rm -rf -- "$tmp"
+  rm -f -- "$TARGET_DIR/$DELETE_KEEP_MARKER"
 }
 
 require_project() {
@@ -538,7 +592,27 @@ confirm_delete() {
     echo "[错误] delete 是破坏性操作，需要交互确认；请不要使用 --non-interactive。" >&2
     exit 2
   fi
-  echo "[警告] 将删除 dsh 容器、DSH 镜像（dsh:* 与 .env 记录的预构建引用）、本项目 Compose 挂载和网络、全局 Docker 构建缓存，以及 $TARGET_DIR。"
+  # 先问范围，再让人输 DELETE：最后那一下是不可逆的闸门，它前面不该再有别的问题，
+  # 而且警告文案要能反映刚选的范围——否则"全都删"和"留下会话"两种结局共用一句话。
+  echo "数据范围："
+  echo "1) 全部删除（容器、镜像、.env、模型密钥、root 密码哈希，以及 data/ 和 workspace/ 里的一切）"
+  echo "2) 保留会话、工作目录和插件：workspace/、data/dsh/sessions/、data/dsh/profiles/"
+  echo "    其余照样删干净：密钥、密码哈希、.env、data/home 里的工具链都不留。"
+  echo "    重新安装到同一个目录时，安装器会自己把项目源码取回来，这三样接着用。"
+  prompt "请选择" "1"
+  case "$PROMPT_RESULT" in
+    1) DSH_DELETE_KEEP=0 ;;
+    2) DSH_DELETE_KEEP=1 ;;
+    *) echo "[错误] 无效选项。" >&2; exit 2 ;;
+  esac
+  export DSH_DELETE_KEEP
+  echo
+  echo "[警告] 将删除 dsh 容器、DSH 镜像（dsh:* 与 .env 记录的预构建引用）、本项目 Compose 挂载和网络、全局 Docker 构建缓存。"
+  if [ "$DSH_DELETE_KEEP" = 1 ]; then
+    echo "[警告] $TARGET_DIR 里除 workspace/、data/dsh/sessions/、data/dsh/profiles/ 之外的一切也会删除，包括项目源码、.env、模型密钥和 root 密码哈希。"
+  else
+    echo "[警告] $TARGET_DIR 整个目录都会删除，包括 data/ 和 workspace/ 里的一切。"
+  fi
   printf '请输入 DELETE 继续，其他输入取消: ' > /dev/tty
   IFS= read -r answer < /dev/tty || exit 1
   if [ "$answer" != DELETE ]; then
@@ -577,7 +651,8 @@ detach_delete() {
   chmod +x "$tmp_copy"
   echo "==> 删除脚本位于将被删除的目录内，已复制到 $tmp_copy 后从副本继续。"
   status=0
-  DSH_DELETE_DETACHED=1 DSH_DELETE_CONFIRMED=1 bash "$tmp_copy" delete --dir "$target_abs" || status=$?
+  DSH_DELETE_DETACHED=1 DSH_DELETE_CONFIRMED=1 DSH_DELETE_KEEP="${DSH_DELETE_KEEP:-0}" \
+    bash "$tmp_copy" delete --dir "$target_abs" || status=$?
   rm -f -- "$tmp_copy"
   exit "$status"
 }
@@ -673,7 +748,9 @@ delete_project() {
     esac
     if [ -f "$target_abs/docker-compose.yml" ] && [ -f "$target_abs/Dockerfile" ] && [ -f "$target_abs/install.sh" ]; then
       cd "$(dirname "$target_abs")"
-      if ! rm -rf -- "$target_abs" 2>/dev/null; then
+      if [ "${DSH_DELETE_KEEP:-0}" = 1 ]; then
+        prune_project_keep "$target_abs" || exit 1
+      elif ! rm -rf -- "$target_abs" 2>/dev/null; then
         if command -v sudo >/dev/null 2>&1; then
           sudo rm -rf -- "$target_abs"
         else
@@ -686,6 +763,85 @@ delete_project() {
     fi
   fi
   echo "==> DSH 删除完成。"
+}
+
+# 删除时"保留一部分数据"这个二级分支要保留的相对路径。
+# 只有这三样：会话、工作目录、插件装在的 profile。密钥、root 密码哈希、.env、
+# 工具链（data/home）和 DSH 自己的配置都不在其中——它们由下一次安装重新生成。
+DELETE_KEEP_PATHS='workspace data/dsh/sessions data/dsh/profiles'
+# 目录里留下的标记文件：下一次安装靠它认出"这里只剩上次保留下来的数据"，从而把
+# 项目源码取回来，而不是报"已存在但不是 Git 工程"。
+DELETE_KEEP_MARKER=.dsh-preserved
+
+# 容器以 root 身份写下的文件宿主用户删不掉，所以每一次删除都要有 sudo 兜底。
+remove_path() {
+  local target="$1"
+  [ -e "$target" ] || [ -L "$target" ] || return 0
+  rm -rf -- "$target" 2>/dev/null && return 0
+  if command -v sudo >/dev/null 2>&1 && sudo rm -rf -- "$target"; then
+    return 0
+  fi
+  echo "[错误] 删不掉 $target（容器 root 写下的文件），请用 root 重跑删除。" >&2
+  return 1
+}
+
+# 删掉 $1 目录里除白名单之外的所有直接子项（含点开头的条目）。
+prune_dir_except() {
+  local dir="$1" child base keep matched status=0
+  shift
+  [ -d "$dir" ] || return 0
+  while IFS= read -r child; do
+    [ -n "$child" ] || continue
+    base="${child##*/}"
+    matched=false
+    for keep in "$@"; do
+      if [ "$base" = "$keep" ]; then
+        matched=true
+        break
+      fi
+    done
+    [ "$matched" = true ] && continue
+    remove_path "$child" || status=1
+  done <<EOF
+$(find "$dir" -mindepth 1 -maxdepth 1 2>/dev/null)
+EOF
+  return "$status"
+}
+
+# 保留会话 / 工作目录 / 插件，其余全部删掉。
+#
+# 做法是逐层按白名单删，而不是"先备份、删完再搬回来"：中途失败时要保留的数据一直
+# 待在原地，不会出现"已经 rm -rf 了、备份却没搬回来"的窗口。项目源码（含 .git）
+# 也一并删掉，这样下一次安装会重新取一份新的，而不是继续用旧版脚本。
+prune_project_keep() {
+  local dir="$1" keep status=0
+  prune_dir_except "$dir" workspace data || status=1
+  prune_dir_except "$dir/data" dsh || status=1
+  prune_dir_except "$dir/data/dsh" sessions profiles || status=1
+  # 标记文件同时也是给人看的：目录里只剩这些东西时，光看文件名很难说清它们是什么。
+  {
+    echo "# 这个目录是 dsh-docker 删除时选择「保留会话 / 工作目录 / 插件」后的残留。"
+    echo "# 保留下来的路径："
+    for keep in $DELETE_KEEP_PATHS; do
+      [ -e "$dir/$keep" ] && echo "#   $keep"
+    done
+    echo "# 重新安装：curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash"
+    echo "# 安装器看到这个文件就会把项目源码取回到同一个目录，上面这些路径原地接着用。"
+  } > "$dir/$DELETE_KEEP_MARKER" 2>/dev/null || true
+  local kept=""
+  for keep in $DELETE_KEEP_PATHS; do
+    if [ -e "$dir/$keep" ]; then
+      kept="$kept $keep"
+    fi
+  done
+  if [ -n "$kept" ]; then
+    echo "==> 已保留：$kept"
+  else
+    echo "==> 会话 / 工作目录 / 插件这三个路径都不存在，没有东西需要保留。"
+  fi
+  echo "==> 其余内容（项目源码、.env、模型密钥、root 密码哈希、data/home 里的工具链）已删除。"
+  echo "==> 重新安装到 $dir 即可接着用；安装器会自己把项目源码取回来。"
+  return "$status"
 }
 
 if [ "$ACTION" = delete ]; then
@@ -2374,6 +2530,205 @@ assert_egress_isolation() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# upgrade：只换镜像，不重问配置
+#
+# 为什么单独做一个动作：install/configure 见到 dsh 容器就会直接拒绝（那是为了保护
+# 容器可写层里 apt 装的东西），而它本身还要把整个向导走一遍；dsh.sh 的 ensure_image
+# 只在本地没有那个 tag 时才拉，:latest 拉过一次之后就再也不会更新。于是"发布了新
+# 镜像"这件最常做的事以前只能靠删掉重装，代价是会话、插件、项目文件、密钥全丢。
+#
+# 这条路沿用现有 .env，一个问题都不问，data/ 与 workspace/ 全程不动。
+# ---------------------------------------------------------------------------
+
+# 从 .env 反推出本次要用的配置。upgrade 不走问答，所以 PENDING_* 只能从落盘的配置
+# 读回来——set_compose_args 和后面那几个核验函数读的都是这些变量。
+load_upgrade_config() {
+  PENDING_ACCESS_MODE="$(get_compose_env DSH_ACCESS_MODE local)"
+  PENDING_BIND_HOST="$(get_compose_env DSH_BIND_HOST 127.0.0.1)"
+  PENDING_TRUSTED_HOSTS="$(get_compose_env DSH_TRUSTED_HOSTS '')"
+  PENDING_NETWORK="$(get_compose_env DSH_DOCKER_NETWORK dsh-private)"
+  PENDING_NETWORK_EXTERNAL="$(get_compose_env DSH_DOCKER_NETWORK_EXTERNAL false)"
+  PENDING_IMAGE_SOURCE="${IMAGE_SOURCE_OVERRIDE:-$(get_compose_env DSH_IMAGE_SOURCE prebuilt)}"
+  case "$PENDING_IMAGE_SOURCE" in prebuilt|build) ;; *) PENDING_IMAGE_SOURCE=prebuilt ;; esac
+  if [ -n "$IMAGE_OVERRIDE" ]; then
+    PENDING_IMAGE="$IMAGE_OVERRIDE"
+  elif [ "$PENDING_IMAGE_SOURCE" = build ]; then
+    PENDING_IMAGE="$(get_compose_env DSH_IMAGE "$DEFAULT_LOCAL_IMAGE")"
+  else
+    PENDING_IMAGE="$(get_compose_env DSH_IMAGE "$DEFAULT_PREBUILT_IMAGE")"
+  fi
+  PENDING_MODEL_BROKER="$(get_compose_env DSH_MODEL_BROKER off)"
+  case "$PENDING_MODEL_BROKER" in on|off) ;; *) PENDING_MODEL_BROKER=off ;; esac
+  PENDING_KEY_ADMIN="$(get_compose_env DSH_KEY_ADMIN off)"
+  case "$PENDING_KEY_ADMIN" in on|off) ;; *) PENDING_KEY_ADMIN=off ;; esac
+  PENDING_KEY_ADMIN_BIND_HOST="$(get_compose_env DSH_KEY_ADMIN_BIND_HOST "$DEFAULT_KEY_ADMIN_BIND_HOST")"
+  PENDING_KEY_ADMIN_PORT="$(get_compose_env DSH_KEY_ADMIN_HOST_PORT "$DEFAULT_KEY_ADMIN_PORT")"
+  PENDING_EGRESS_MODE="$(get_compose_env DSH_EGRESS_MODE open)"
+  case "$PENDING_EGRESS_MODE" in open|blocklist|allowlist) ;; *) PENDING_EGRESS_MODE=open ;; esac
+  # 黑白名单之间的切换是在密钥管理面板里做的，那时 .env 不跟着变。以策略文件为准，
+  # 否则一次升级就会把面板里的选择悄悄改回 .env 里那个旧值。
+  if [ "$PENDING_EGRESS_MODE" != open ]; then
+    case "$(egress_policy_mode)" in
+      blocklist) PENDING_EGRESS_MODE=blocklist ;;
+      allowlist) PENDING_EGRESS_MODE=allowlist ;;
+    esac
+  fi
+  PENDING_EGRESS_ALLOWED_HOSTS="$(get_compose_env DSH_EGRESS_ALLOWED_HOSTS '')"
+}
+
+# 镜像身份：ID 用来判断"这次到底有没有换"，RepoDigest 是发布侧的唯一标识。
+# 本机构建的镜像没有 RepoDigest，那时第二个函数返回空串，调用方按空处理。
+dsh_image_id() {
+  DOCKER image inspect --format '{{.Id}}' "$1" 2>/dev/null | sed -n 1p || true
+}
+
+dsh_image_digest() {
+  DOCKER image inspect --format '{{ if .RepoDigests }}{{ index .RepoDigests 0 }}{{ end }}' "$1" 2>/dev/null | sed -n 1p || true
+}
+
+upgrade_compose_up() {
+  (
+    unset DSH_ACCESS_MODE DSH_BIND_HOST DSH_TRUSTED_HOSTS
+    unset DSH_DOCKER_NETWORK DSH_DOCKER_NETWORK_EXTERNAL DSH_IMAGE DSH_IMAGE_SOURCE
+    unset DSH_MODEL_BROKER DSH_MODEL_BROKER_BASE DSH_EGRESS_MODE DSH_EGRESS_ALLOWED_HOSTS
+    unset DSH_KEY_ADMIN DSH_KEY_ADMIN_BIND_HOST DSH_KEY_ADMIN_HOST_PORT
+    # --remove-orphans：关掉密钥面板、或者从隔离模式退回 open 之后，上一份配置起的
+    # 旁路容器会变成孤儿一直挂着。-f 组合是按当前 .env 算出来的，所以不会误删。
+    DOCKER compose --env-file .env "${COMPOSE_ARGS[@]}" up -d --no-build --force-recreate --remove-orphans
+  )
+}
+
+# 升级会留下的 Docker 垃圾，按类精确回收。
+#
+# 刻意不用 docker system prune、也不用不带过滤的 image prune：那两条会把宿主上别的
+# 项目一起清掉。下面每一条都用 Compose 项目标签或镜像自己的 OCI 标签收窄到本项目。
+prune_project_leftovers() {
+  local project_name ids id
+  project_name="$(DOCKER inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' dsh 2>/dev/null || true)"
+  case "$project_name" in ''|'<no value>') project_name=dsh-docker ;; esac
+  echo "==> 正在回收升级留下的 Docker 垃圾（只动本项目的东西）..."
+
+  # 1) 悬空镜像。拉到新的 :latest 之后旧的那一份会丢掉标签变成 <none>，而它仍然带着
+  #    镜像自己的 OCI 标签，所以能精确回收而不碰宿主上别人的悬空镜像。旧容器已经被
+  #    上一步的 --force-recreate 删掉了，这时才真的删得动。
+  DOCKER image prune -f --filter 'label=org.opencontainers.image.title=dsh-docker' >/dev/null 2>&1 || true
+  # 更老的镜像可能没有那个 LABEL（早期 Dockerfile 还没加），按项目标签再扫一遍。
+  ids="$(DOCKER image ls -q --filter dangling=true --filter "label=com.docker.compose.project=$project_name" 2>/dev/null | sort -u || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] && DOCKER image rm "$id" >/dev/null 2>&1 || true
+  done <<< "$ids"
+
+  # 2) 构建缓存。只有本机构建这条路才会产生它；不加 -a，当前镜像还在用的层要留着，
+  #    否则下一次构建等于从零开始。
+  if [ "$PENDING_IMAGE_SOURCE" = build ]; then
+    DOCKER builder prune -f >/dev/null 2>&1 || true
+  fi
+
+  # 3) 本项目已经退出的容器。--force-recreate 会顺手删掉被替换的那几个，但更早的失败
+  #    尝试可能留下 created / exited / dead 状态的残骸。
+  ids="$(DOCKER container ls -aq --filter "label=com.docker.compose.project=$project_name" \
+    --filter status=created --filter status=exited --filter status=dead 2>/dev/null | sort -u || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] && DOCKER container rm -f "$id" >/dev/null 2>&1 || true
+  done <<< "$ids"
+
+  # 4) 本项目的悬空卷。当前部署全是 bind mount，所以这里只会捞到历史遗留。
+  ids="$(DOCKER volume ls -q --filter dangling=true --filter "label=com.docker.compose.project=$project_name" 2>/dev/null || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] && DOCKER volume rm "$id" >/dev/null 2>&1 || true
+  done <<< "$ids"
+
+  # 5) 没有容器再接着的本项目网络。从隔离模式切回 open 之后 dsh-internal 就是这样。
+  #    外部网络（比如面板那张 dpanel-local）不带本项目标签，不会被选中。
+  ids="$(DOCKER network ls -q --filter "label=com.docker.compose.project=$project_name" 2>/dev/null || true)"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if [ "$(DOCKER network inspect --format '{{ len .Containers }}' "$id" 2>/dev/null || echo 1)" = 0 ]; then
+      DOCKER network rm "$id" >/dev/null 2>&1 || true
+    fi
+  done <<< "$ids"
+
+  # 6) 崩掉的历史运行留在工程目录里的临时 .env。只删一天以前的，避免碰到另一个正在
+  #    跑的安装器自己那一份。
+  find . -maxdepth 1 -name '.env.pending.*' -type f -mtime +0 -delete 2>/dev/null || true
+}
+
+print_upgrade_summary() {
+  local before_digest="$1" after_digest="$2"
+  echo
+  echo "==> 升级完成，配置和数据都没有被改动："
+  echo "    .env：沿用（本次只补写 DSH_IMAGE_DIGEST）"
+  echo "    会话 data/dsh/sessions、插件 data/dsh/profiles、项目 workspace/：原样保留"
+  echo "    模型密钥 data/broker/keys.json、root 密码哈希 data/secret/root.hash：原样保留"
+  echo "    工具链 data/home（npm / pnpm / pip / uv 装的东西）：原样保留"
+  if [ -n "$after_digest" ]; then
+    if [ -n "$before_digest" ] && [ "$before_digest" != "$after_digest" ]; then
+      echo "    镜像：$before_digest"
+      echo "      -> $after_digest"
+    else
+      echo "    镜像：$after_digest"
+    fi
+  else
+    echo "    镜像：$PENDING_IMAGE（本机构建，没有发布摘要）"
+  fi
+  echo
+  echo "    apt 装的系统包在容器可写层，重建容器会丢，需要的话重新 apt install 一次。"
+  echo "    工程文件（docker-compose*.yml、install.sh、dsh.sh）这次没有动：升级只换镜像。"
+  echo "    发布说明提到 Compose 有变化时，先在工程目录里 git pull --ff-only 再升级一次。"
+  DOCKER system df 2>/dev/null || true
+}
+
+upgrade_dsh() {
+  local before_id after_id before_digest after_digest
+  if [ ! -f .env ]; then
+    echo "[错误] $(pwd) 里没有 .env，说明这里还没有装过 DSH；请先在向导里选择安装。" >&2
+    exit 1
+  fi
+  load_upgrade_config
+  set_compose_args
+  before_id="$(dsh_image_id "$PENDING_IMAGE")"
+  before_digest="$(dsh_image_digest "$PENDING_IMAGE")"
+  echo "==> 沿用 .env 里的现有配置，不会重问："
+  echo "    镜像：$PENDING_IMAGE（来源 $PENDING_IMAGE_SOURCE）"
+  echo "    访问模式：$PENDING_ACCESS_MODE，宿主端口绑定 $PENDING_BIND_HOST:3080"
+  echo "    密钥代理：$PENDING_MODEL_BROKER，管理面板：$PENDING_KEY_ADMIN，出站模式：$PENDING_EGRESS_MODE"
+
+  if [ "$PENDING_IMAGE_SOURCE" = prebuilt ]; then
+    echo "==> 正在拉取镜像：$PENDING_IMAGE"
+    if ! pull_dsh_image; then
+      echo "[错误] 拉取失败。容器没有被改动，现有部署照旧运行。" >&2
+      exit 1
+    fi
+  else
+    echo "==> 正在用当前工程的 Dockerfile 重新构建镜像：$PENDING_IMAGE"
+    if ! build_dsh_image; then
+      echo "[错误] 构建失败。容器没有被改动，现有部署照旧运行。" >&2
+      exit 1
+    fi
+  fi
+
+  after_id="$(dsh_image_id "$PENDING_IMAGE")"
+  after_digest="$(dsh_image_digest "$PENDING_IMAGE")"
+  if [ -n "$before_id" ] && [ "$before_id" = "$after_id" ]; then
+    echo "==> 镜像已经是最新的（没有变化），仍然重建容器以套用当前 .env。"
+  fi
+
+  echo "==> 正在重建容器（挂载数据、会话、插件、密钥全部保留）..."
+  if ! upgrade_compose_up; then
+    echo "[错误] 容器重建失败。.env 未被改动，用 ./dsh.sh logs 查看原因。" >&2
+    exit 1
+  fi
+  # 记下这次真正跑起来的镜像摘要，下一次升级就能直接对比出换没换。
+  [ -z "$after_digest" ] || set_compose_env DSH_IMAGE_DIGEST "$after_digest"
+  assert_dsh_hardening
+  assert_model_broker
+  assert_key_admin
+  assert_egress_isolation
+  prune_project_leftovers
+  print_upgrade_summary "$before_digest" "$after_digest"
+}
+
 print_config_summary() {
   local upstream_name
   echo
@@ -2584,8 +2939,11 @@ case "$ACTION" in
     assert_model_broker
     assert_key_admin
     assert_egress_isolation
+    # ./dsh.sh remove 之后重装是常见路径，那会留下失去标签的旧镜像和退出的旁路容器。
+    prune_project_leftovers
     print_config_summary
     ;;
+  upgrade) upgrade_dsh ;;
   model-key) add_model_key ;;
   key-panel) manage_key_admin ;;
   update) ./dsh.sh update ;;

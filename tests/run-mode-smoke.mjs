@@ -410,7 +410,11 @@ assert.doesNotMatch(files.installSh, /fetch origin main/)
 assert.doesNotMatch(files.installSh, /merge --ff-only FETCH_HEAD/)
 assert.match(files.installSh, /compose .*build dsh/)
 assert.match(files.installSh, /compose .*up -d --no-build --force-recreate/)
-assert.doesNotMatch(files.installSh, /DOCKER image prune/)
+// 升级要回收自己换下来的悬空镜像，但不带过滤的 prune 会连宿主上别的项目一起清掉，
+// 所以每一条 image prune 都必须自带 --filter。
+for (const line of files.installSh.split('\n').filter((entry) => entry.includes('DOCKER image prune'))) {
+  assert.match(line, /--filter /, `install.sh must always filter image prune: ${line}`)
+}
 assert.doesNotMatch(files.dshSh, /PREPARE_SYSTEM_VOLUMES/)
 assert.match(files.dshSh, /DOCKER exec dsh \/usr\/local\/bin\/update-dsh/)
 assert.match(files.dshSh, /compose .*stop dsh/)
