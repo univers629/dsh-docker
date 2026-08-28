@@ -41,7 +41,7 @@
 
 ## 自检
 
-`./dsh.sh verify` 在容器内运行 `verify-dsh-hardening`，共 24 项，覆盖运行 UID、能力集、`no-new-privileges`、特权代理 socket、启动链文件是否 root 独占写（`boot-chain-immutable`）、Supervisor / Nginx 主进程 / 特权代理与 `dsh` 的 UID 分离（`signal-isolation`）、apt 卸载保护是否生效（`apt-removal-guard`）、root 密码状态，以及 `/proc`、`/sys` 与 cgroup 的挂载情况。任一项不合格即以非零码退出。
+`./dsh.sh verify` 在容器内运行 `verify-dsh-hardening`，覆盖运行 UID、能力集、`no-new-privileges`、特权代理 socket、启动链文件是否 root 独占写（`boot-chain-immutable`）、Supervisor / Nginx 主进程 / 特权代理与 `dsh` 的 UID 分离（`signal-isolation`）、apt 卸载保护是否生效（`apt-removal-guard`）、root 密码状态，以及 `/proc`、`/sys` 与 cgroup 的挂载情况。任一项不合格即以非零码退出。
 
 ## 模型密钥代理
 
@@ -132,7 +132,7 @@
 - 目录里没有的自建网关必须有模型 id，少了它 DSH 会拒绝整个 `llm-pi-ai` 命名空间，结果是所有供应商一起消失。所以安装器在写配置前会先用刚拿到的密钥请求上游的 `/models`（`bin/discover-upstream-models.mjs`，走 SSRF 防护的解析器，最多取 200 个 id），拉到就自动填；拉不到就打印失败原因，此时用 `--model-id NAME=ID[,ID]`（PowerShell：`-ModelId`）或在管理面板里补。安装器写入前还会用 DSH 自己的校验函数过一遍，不通过就一个字都不写。
 - `baseURL`、`apiKeyEnv` 和凭据引用的值每次都按当前部署重写；`api`、`models`、`agent-default-model` 只在缺失时补，不覆盖用户在 WebUI 里的选择。
 - `keys.json` 里那条上游的 `baseUrl` 少了版本段时会被自动补上。这件事只能在拉模型清单的时候顺手发现：拉取会同时试 `<base>/models` 和 `<base>/v1/models`，第二个成功就说明版本段在 base_url 里缺了一段。而 pi-ai 的 OpenAI 兼容客户端发的是 `/responses`、`/chat/completions`、`/models`，一个版本段都不补，于是所有请求落到上游根路径上，DSH 里显示成 403 或「API key is invalid」——而面板那边看起来一切正常。Anthropic 与 Gemini 相反，它们的客户端自己发 `/v1/messages`、`/v1beta/models`，所以这两种形态的 base_url 不补版本段。
-- 推理强度菜单需要模型显式声明档位：pi-ai 对手写声明的模型（安装器和面板写出来的都是）一律报告"不提供任何档位"，模型页因此没有那个下拉。管理面板的「推理强度档位」栏会把 `reasoningEfforts`（`off` 的 wire 值是 `null`，其余用档位名）写到这个上游的每个模型上，包括上一次已经写过 `models` 的路由——那时逐条模型补，已经带着 `reasoningEfforts`（包括用户自己写的 `false`）的不动。默认不声明：给不支持 `reasoning_effort` 的模型声明档位会被上游拒绝。
+- 推理强度菜单需要模型显式声明档位：pi-ai 对手写声明的模型（安装器和面板写出来的都是）一律报告"不提供任何档位"，模型页因此没有那个下拉。管理面板的「推理强度档位」是一排勾选框（新建上游默认勾上 `off`、`low`、`medium`、`high`、`max`，全不勾 = 不声明），勾上的档位会把 `reasoningEfforts`（`off` 的 wire 值是 `null`，其余用档位名）写到这个上游的每个模型上，包括上一次已经写过 `models` 的路由——那时逐条模型补，已经带着 `reasoningEfforts`（包括用户自己写的 `false`）的不动。keys.json 里没有这个字段依旧表示不声明，勾选只是面板表单的初值：给不支持 `reasoning_effort` 的模型声明档位会被上游拒绝，所以按上游实际支持的勾。
 - 凭据引用被写死成占位串，不是"缺失时才补"：这个上游的真实密钥在代理手里，代理转发时会把认证头换成自己那把，所以容器里留一把真的既不起作用，又会被 WebUI 的供应商卡片明文显示、被 Agent 直接读走。写入前发现引用里存的不是占位串时，会换回占位串并在输出里点明，此时应当认为那把密钥已经进过容器，到上游控制台轮换它。
 - 回收范围不限于 `keys.json` 里还在的上游：只要 `settings.yaml` 里那条路由的 `baseURL` 正好等于本部署的代理地址，对应引用里的非占位串就会被换回占位串。上游从面板删掉之后引用会变成孤儿（路由和引用都还留着，却再没人写过它），这一条覆盖的就是它。用户自己加的直连供应商 `baseURL` 不指向代理，不受影响。
 - 这项检查除了保存时做，`dsh-key-admin` 还会定时巡检（默认 30 秒，`DSH_KEY_ADMIN_SCRUB_INTERVAL_MS=0` 关闭；`.credentials.yaml` 的 mtime 没变就跳过）。原因是浏览器：DSH 的模型页把密钥框渲染成 `type=password`，密码管理器会往同源的这类输入框里自动填一个保存过的密码，用户在那页上改任何东西点一次保存，那个值就明文落进 `.credentials.yaml`。管理面板自己的两个密码框用 `autocomplete="new-password"`（`off` 对密码框在 Chrome 上无效）避免同样的问题。
@@ -245,6 +245,7 @@ Linux 上还有一条比 `userns-remap` 更强的路径：rootless Docker，整�
 ## 其他实现说明
 
 - **内置控制插件**：镜像自带 `dsh-docker-control`，首次启动空 profile 时自动恢复，在设置窗口左侧导航新增“DSH 环境”页。
-- **WebUI 与反代稳定性**：配置编辑器使用独立 portal 与固定高度滚动区域，避免设置页闪烁与输入框高度跳动；内置 WebSocket keepalive 补丁降低空闲反代断开导致的 UI 假死。
+- **WebUI 与反代稳定性**：配置编辑器使用独立 portal 与固定高度滚动区域，避免设置页闪烁与输入框高度跳动；`dsh-docker-control` 插件为事件下行链路装上 WebSocket keepalive，降低空闲反代断开导致的 UI 假死。
 - **认证转发语义**：通过公网域名访问时，容器 Nginx 只在请求已通过内置 Basic Auth 或可信外层认证后，才转为 DSH 的内部回环访问。`DSH_TRUSTED_HOSTS` 只校验浏览器 authority，不等同于登录认证，也不会自动打开插件的远程设置写权限。
-- **插件与工具链**：插件安装、会话管理与 MCP 部署所需的 `/data` 写权限已纳入沙箱。apt 安装的软件写入标准 Debian 路径并持久化在容器可写层；Python/Node 工具链分别位于 `/data/home/.local` 与 `/data/home/.npm-global`。容器启动时根据实际系统、架构与权限变量渲染 `container-environment` skill。
+- **插件与工具链**：插件安装、会话管理与 MCP 部署所需的 `/data` 写权限已纳入沙箱。apt 安装的软件写入标准 Debian 路径并持久化在容器可写层；Python/Node 工具链分别位于 `/data/home/.local` 与 `/data/home/.npm-global`。镜像故意不设全容器的 `HOME`：否则宿主机上默认以 root 身份进来的 `docker exec` 会继承 `dsh` 的家目录，root 跑过一次 npm/npx 就会在缓存里留下 root 属主的文件，之后 Agent 自己装工具链只会拿到 EACCES。`HOME` 由 Supervisor 显式传给 DSH 子进程；entrypoint 每次启动扫一遍属主并自愈，特权代理另外开了一个免密动作 `fix-perms`（固定路径、只把属主改回运行账户、`chown -Rh` 不跟随符号链接），让 Agent 无需 root 密码即可自救。容器启动时根据实际系统、架构与权限变量渲染 `container-environment` skill。
+- **插件兼容修补**：少数社区插件与当前 DSH 版本存在已知不兼容点，容器会在插件目录变化后自动重打这些兼容补丁，因此插件市场的免重启安装同样覆盖。结果写进一份报告，`verify-dsh-hardening` 的 `profile-patches` 一项会读它：上游改动导致补丁认不出代码形状时报 warn，而不是静默失效。

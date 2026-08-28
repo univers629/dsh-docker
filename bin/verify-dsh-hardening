@@ -228,6 +228,89 @@ def check_runtime_identity():
     )
 
 
+def check_user_tool_dirs():
+    """Agent 能不能自己装工具链。
+
+    工具链（npm i -g、pnpm add -g、pip install --user、rustup……）全都装在运行账户的
+    家目录里。那里只要混进一个别的属主的文件，npm 就会直接以 EACCES 失败，并且只会
+    建议 "sudo chown" —— 而容器内的 Agent 没有 root，自救不了。这不是加固失败，所以
+    只报 warn，并把免密的修复命令一起打出来。
+    """
+    try:
+        expected = pwd.getpwnam(RUN_USER)
+    except KeyError:
+        record_skip("user-tool-dirs", f"镜像里没有运行账户 {RUN_USER}")
+        return
+    home = os.environ.get("DSH_USER_HOME") or expected.pw_dir
+    if not os.path.isdir(home):
+        record_skip("user-tool-dirs", f"{home} 不存在")
+        return
+
+    offender = None
+    scanned = 0
+    for current, directories, files in os.walk(home, onerror=lambda error: None):
+        for name in list(directories) + list(files):
+            path = os.path.join(current, name)
+            scanned += 1
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            if info.st_uid != expected.pw_uid or info.st_gid != expected.pw_gid:
+                offender = path
+                break
+        # 家目录里可能已经装了整套工具链，不值得为一次自检把几十万个 inode 全走一遍。
+        if offender is not None or scanned > 200000:
+            break
+
+    if offender is None:
+        record(
+            "user-tool-dirs",
+            True,
+            f"{home} 下已扫描的 {scanned} 项都属于 {RUN_USER}（npm/pnpm/pip 的全局安装可用）",
+        )
+        return
+    record_warn(
+        "user-tool-dirs",
+        f"{home} 里有不属于 {RUN_USER} 的文件（{offender}）：npm 会以 EACCES 失败。"
+        "在容器内执行 dsh-root fix-perms 即可修回，无需 root 密码",
+    )
+
+
+def check_profile_patches():
+    """profile 插件补丁有没有打上。
+
+    插件可以被热挂载（不重启就生效），所以补丁由常驻 watcher 在插件目录变化后重打，
+    并把结果写成一份报告。上游插件改了代码形状时锚点会失配，补丁静默不生效——这里
+    专门把那种情况报出来，只报 warn：功能仍然可用，只是少了兼容修补。
+    """
+    report_path = os.environ.get("DSH_PROFILE_PATCH_REPORT") or "/run/dsh-state/profile-patches.json"
+    raw = read_text(report_path)
+    if not raw:
+        record_skip("profile-patches", f"{report_path} 还没生成（profile 里没有需要修补的插件）")
+        return
+    try:
+        report = json.loads(raw)
+    except ValueError:
+        record_warn("profile-patches", f"{report_path} 不是合法 JSON，无法判断补丁状态")
+        return
+
+    patches = report.get("patches") or []
+    unrecognized = report.get("unrecognized") or []
+    if unrecognized:
+        record_warn(
+            "profile-patches",
+            "这些补丁认不出上游形状，未生效：" + ", ".join(str(item) for item in unrecognized),
+        )
+        return
+    if not patches:
+        record_skip("profile-patches", "报告里没有补丁条目（profile 里没有需要修补的插件）")
+        return
+
+    summary = ", ".join(f"{item.get('id')}={item.get('state')}" for item in patches)
+    record("profile-patches", True, f"{len(patches)} 项插件补丁状态正常：{summary}")
+
+
 def check_pid1():
     fields = proc_status(1)
     uid = int(fields["Uid"].split()[0])
@@ -739,6 +822,8 @@ def main():
     check_docker_socket()
     check_masked_paths()
     check_mounts()
+    check_user_tool_dirs()
+    check_profile_patches()
     # 旁路服务与 namespace：默认部署（broker off + egress open）下这几项报 skip 或
     # warn，退出码不变，安装器的成败判定仍然只看真正的加固失败。
     check_broker_mount()

@@ -4,6 +4,7 @@ import {
   DEFAULT_LOCKOUT,
   PolicyError,
   attemptDelayMs,
+  buildFixPermsCommand,
   emptyLockoutState,
   findProtectedRemovals,
   isProtectedPackage,
@@ -201,4 +202,33 @@ assert.deepEqual(findProtectedRemovals('这行提到了 Remv 但不在行首以�
 assert.deepEqual(findProtectedRemovals(''), [])
 assert.deepEqual(findProtectedRemovals(null), [])
 assert.deepEqual(findProtectedRemovals(undefined), [])
+// --- 属主自愈：免密，但只能把固定的几棵树改回非 root 的运行账户 ---
+const fixPerms = buildFixPermsCommand({ uid: 1000, gid: 1000 })
+assert.equal(fixPerms.executable, '/usr/bin/chown')
+assert.deepEqual(fixPerms.argv, [
+  'chown',
+  '-Rh',
+  '1000:1000',
+  '/data/home',
+  '/data/dsh',
+  '/data/agents',
+  '/data/mcp',
+  '/workspace',
+])
+// -Rh：递归但不跟随符号链接，否则 dsh 放一个指向 /etc 的软链就能把系统文件改到自己名下。
+assert.ok(fixPerms.argv.includes('-Rh'))
+for (const owner of [
+  { uid: 0, gid: 0 },
+  { uid: 0, gid: 1000 },
+  { uid: 1000, gid: 0 },
+  { uid: -1, gid: 1000 },
+  { uid: 1.5, gid: 1000 },
+  { uid: '1000; rm -rf /', gid: 1000 },
+  {},
+  null,
+  undefined,
+]) {
+  assert.throws(() => buildFixPermsCommand(owner), PolicyError, `必须拒绝：${JSON.stringify(owner)}`)
+}
+
 console.log('privileged policy smoke: ok')

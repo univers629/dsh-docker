@@ -244,6 +244,16 @@ export function normalizeExtraHeaders(raw, shape) {
 export const THINKING_LEVELS = Object.freeze(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
 /**
+ * 面板上新建上游时默认勾上的档位。
+ *
+ * 只是表单的初值，不是后端默认：keys.json 里没有 reasoningEfforts 的上游依旧是"不声明"，
+ * 面板把这几档预勾上，是因为绝大多数上游都吃这几个值，而"一个都不勾"的结果是模型页
+ * 干脆没有推理强度菜单——那正是最容易让人以为坏了的状态。minimal / xhigh 认得的上游少，
+ * 默认不勾；上游不吃某一档就把它取消勾选，全不勾就回到"不声明"。
+ */
+export const DEFAULT_PANEL_THINKING_LEVELS = Object.freeze(['off', 'low', 'medium', 'high', 'max'])
+
+/**
  * 逗号或换行分隔的档位 -> 规范顺序的数组。空 = 不声明（沿用目录能力，手写模型则没有菜单）。
  * 只有 off 是不合法的：pi-ai 要求至少给出一个 off 之外的档位。
  */

@@ -11,6 +11,13 @@ const S = { token: '', state: null, editing: '', fetched: [] }
 
 const byId = (id) => document.getElementById(id)
 
+// 服务端会在 /api/state 里给出这两份清单（档位全集 + 默认勾选），这里的常量只是它到达
+// 之前的兜底，保持和 dsh-key-admin-policy.mjs 一致。
+const FALLBACK_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+const FALLBACK_DEFAULT_THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'max']
+
+const defaultThinkingLevels = () => (S.state ? S.state.defaultThinkingLevels : FALLBACK_DEFAULT_THINKING_LEVELS)
+
 function log(text) {
   byId('log').textContent = text
 }
@@ -160,7 +167,9 @@ function fillForm(view) {
   byId('base-url').value = view ? view.baseUrl : ''
   byId('key').value = ''
   byId('models').value = view ? view.models.join(', ') : ''
-  byId('reasoning').value = view ? view.reasoningEfforts.join(', ') : ''
+  renderThinkingLevels(view && view.reasoningEfforts.length > 0
+    ? view.reasoningEfforts
+    : defaultThinkingLevels())
   byId('rpm').value = view ? String(view.requestsPerMinute) : '0'
   byId('daily').value = view ? String(view.dailyRequestBudget) : '0'
   byId('key-hint').textContent = view && view.hasKey
@@ -186,7 +195,7 @@ function readForm() {
   return {
     name: byId('name').value.trim(),
     shape: byId('shape').value,
-    reasoningEfforts: byId('reasoning').value,
+    reasoningEfforts: checkedThinkingLevels().join(', '),
     baseUrl: byId('base-url').value.trim(),
     key: byId('key').value,
     rename: S.editing,
@@ -196,6 +205,41 @@ function readForm() {
     requestsPerMinute: byId('rpm').value.trim(),
     dailyRequestBudget: byId('daily').value.trim(),
   }
+}
+
+/**
+ * 推理强度档位 = 一排勾选框。
+ *
+ * 用勾选而不是输入框，是因为合法档位就那几个，手写只会拼错然后被后端拒。已存的上游按
+ * keys.json 里的实际值回显；从没声明过的（新建，或旧数据里没有这个字段）按面板默认
+ * 勾上——后端的"空 = 不声明"没变，全不勾保存回去就是取消声明。
+ */
+function renderThinkingLevels(selected) {
+  const box = byId('reasoning-levels')
+  box.textContent = ''
+  const chosen = new Set(selected || [])
+  // 还没连上令牌时（点了"新增上游"就会走到这里）S.state 是 null，用同一份兜底清单，
+  // 连上之后 fillForm 会再渲染一遍，以服务端给的顺序为准。
+  for (const level of (S.state ? S.state.thinkingLevels : FALLBACK_THINKING_LEVELS)) {
+    const label = document.createElement('label')
+    const input = document.createElement('input')
+    input.type = 'checkbox'
+    input.value = level
+    input.checked = chosen.has(level)
+    label.appendChild(input)
+    const text = document.createElement('span')
+    text.textContent = level
+    label.appendChild(text)
+    box.appendChild(label)
+  }
+}
+
+function checkedThinkingLevels() {
+  const out = []
+  for (const input of byId('reasoning-levels').querySelectorAll('input')) {
+    if (input.checked) out.push(input.value)
+  }
+  return out
 }
 
 function renderModelChoices(models) {
@@ -390,6 +434,8 @@ function main() {
     const shape = S.state.defaultShapes[name]
     if (shape) byId('shape').value = shape
   })
+  byId('reasoning-default').addEventListener('click', () => renderThinkingLevels(defaultThinkingLevels()))
+  byId('reasoning-none').addEventListener('click', () => renderThinkingLevels([]))
   byId('check-all').addEventListener('click', () => {
     for (const input of byId('model-list').querySelectorAll('input')) input.checked = true
   })

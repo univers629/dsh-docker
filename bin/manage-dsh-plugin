@@ -85,8 +85,17 @@ restart_after_turn() {
   exit 0
 }
 
+# 事务只要求 Supervisor 在跑。DSH 子进程可能正好不在（刚崩、或正处在重启 backoff
+# 窗口），restart-dsh 用退出码 3 表示这种情况：Supervisor 会把它拉起来，不该因此
+# 中止插件事务，更不该把它当成"重启失败"报给用户。
+supervisor_available() {
+  supervisor_status=0
+  "$RESTART_EXECUTABLE" check || supervisor_status=$?
+  [ "$supervisor_status" = 0 ] || [ "$supervisor_status" = 3 ]
+}
+
 schedule_restart() {
-  "$RESTART_EXECUTABLE" check || fail '容器内 DSH Supervisor 不可用，未安排重启。'
+  supervisor_available || fail '容器内 DSH Supervisor 不可用，未安排重启。'
 
   session_log=${DSH_SESSION_JSONL:-}
   baseline_bytes=0
@@ -126,7 +135,7 @@ profile=${DSH_PROFILE_ROOT:-/data/dsh/profiles/web}
 DSH_PROFILE_ROOT="$profile" "$CLEANUP_EXECUTABLE"
 [ -d "$profile" ] || fail "找不到 web profile：$profile"
 profiles_root=$(dirname "$profile")
-"$RESTART_EXECUTABLE" check || fail '容器内 DSH Supervisor 不可用，实时 profile 尚未修改。'
+supervisor_available || fail '容器内 DSH Supervisor 不可用，实时 profile 尚未修改。'
 
 trap cleanup EXIT
 trap 'exit 129' HUP

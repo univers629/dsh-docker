@@ -45,7 +45,7 @@ The installer asks what to do, where the image comes from, how access is protect
 | 2 Update DSH inside the container | Installs the new version from npm in the running container, reapplies the patch set, and restarts only the DSH process |
 | 3 Start / 4 Stop / 5 Restart | Acts on the existing container only, keeping apt-installed toolchains |
 | 6 Logs / 7 Status | Forwarded to `./dsh.sh logs` and `status` |
-| 8 Delete | Removes the container, images, mounts, networks, build cache, and project directory after a `DELETE` confirmation |
+| 8 Delete | Asks for the data scope first (sessions, workspace, and plugins can be kept), then removes the container, images, mounts, networks, build cache, and project directory after a `DELETE` confirmation |
 | 9 Add model API keys | Writes the keys and starts the broker container for an existing deployment without recreating `dsh` |
 
 Only item 1 asks for the image source; the others act on the existing container.
@@ -73,11 +73,19 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [service]|status|shell|root-s
 
 - `start` prepares the image only when the container does not exist and reuses it afterwards; `stop`, `restart`, and in-container `apt install` all keep the writable layer.
 - `update` only reinstalls the DSH npm package inside the container; it is not a project or image update. `remove` deletes the writable layer while bind mounts remain.
+- Menu item 2 is "update" and branches in two: update DSH inside the container (same as `./install.sh update`, which touches neither the container nor the image), or move to a new image and recreate the container (same as `./install.sh upgrade`). The latter reuses the existing `.env` without asking anything again, keeps sessions, plugins, `workspace/`, and model keys, and only loses system packages installed with `apt` into the container's writable layer; cleanup afterwards reclaims the replaced dangling image, leftover containers, and empty networks by project label, leaving other projects on the host untouched.
 - `shell` enters the unprivileged `dsh` account; `root-shell` is a host-side administration channel that cannot be reached from inside the container.
-- `verify` runs 24 hardening checks inside the container; `keys` and `egress` print the status of the key broker and the egress proxy, and `key-panel` prints the key admin panel URL and access token.
+- `verify` runs the full hardening self-check inside the container; `keys` and `egress` print the status of the key broker and the egress proxy, and `key-panel` prints the key admin panel URL and access token.
 - The healthcheck probes both the Nginx entry and DSH's own port, so a DSH crash loop shows the container as `unhealthy`.
 
 To remove the project completely, run menu item 8 from the project directory or `./install.sh delete` (Windows: `powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`). Deletion targets this project's container, images, mounts, networks, and directory by exact name; it never uses substring matching and never removes external shared networks.
+
+Deletion asks for the data scope first and takes the `DELETE` confirmation last:
+
+- Delete everything: container, images, `.env`, model keys, the root password hash, and everything under `data/` and `workspace/`.
+- Keep sessions, the workspace, and plugins: only `workspace/`, `data/dsh/sessions/`, and `data/dsh/profiles/` survive; everything else still goes, including the project source and the toolchains in `data/home`. A `.dsh-preserved` note is left in the directory, and installing into the same directory again makes the installer fetch the project source back so those three keep working in place. Ownership is realigned when the container starts, so no manual `chown` is needed.
+
+For scripted deletion, `DSH_DELETE_KEEP=1` selects the keep branch (the deletion itself still requires interactive confirmation).
 
 ## Public access and authentication
 
@@ -209,7 +217,7 @@ The panel is the browser alternative to typing keys in a terminal: add or remove
 - Access: `http://127.0.0.1:3082/` by default, with the token in `data/broker/admin.token` (0600). For remote use, tunnel it: `ssh -N -L 3082:127.0.0.1:3082 <user@host>`. `DSH_KEY_ADMIN_BIND_HOST` and `DSH_KEY_ADMIN_HOST_PORT` control the published address.
 - The panel deliberately is not part of DSH's WebUI: that page runs inside the DSH container, so anything typed into it lands where the agent can read it. The panel is a separate container joined only to the `dsh-admin` network, which `dsh` is not on, and the installer proves from inside `dsh` that the connection fails before it reports success.
 - Repeated wrong tokens trigger incremental delay and lockout. The panel container itself is `read_only`, `cap_drop: ALL`, runs as 1000:1000, and can only touch `data/broker` and `data/dsh`.
-- Reasoning efforts: DSH shows the reasoning-effort menu only for models that declare the levels they offer, so leaving that field empty means no menu. Values such as `off, low, medium, high` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) apply to every model of that upstream; declaring levels for a model that does not accept `reasoning_effort` makes the upstream reject the request, so match what the upstream actually supports.
+- Reasoning efforts: the panel offers one checkbox per level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), with `off`, `low`, `medium`, `high`, and `max` checked by default for a new upstream. Checked levels are written onto every model of that upstream; DSH shows the reasoning-effort menu only for models that declare levels, so checking nothing means no menu, and declaring levels for a model that does not accept `reasoning_effort` makes the upstream reject the request — check what the upstream actually supports.
 - An empty `keys.json` is a valid state: install without any key, accept 503 for model requests in the meantime, and enter the first key in the panel.
 - With both the broker and the panel skipped, entering keys in the WebUI still works, at the cost of this protection.
 

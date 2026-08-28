@@ -69,13 +69,13 @@
     <div id="model-list" class="models"></div>
 
     <h2>推理强度档位</h2>
-    <p class="hint">留空 = 不声明。DSH 只对声明过档位的模型显示「推理强度」菜单，所以这一栏空着时那个下拉不会出现；
-    但给不吃 <code>reasoning_effort</code> 的模型声明档位，上游会直接返回 400，因此要按上游自己支持的填。
-    逗号分隔，可用：<code>off</code>、<code>minimal</code>、<code>low</code>、<code>medium</code>、<code>high</code>、<code>xhigh</code>、<code>max</code>
-    （<code>off</code> 表示“不思考”，单独写它无效，至少再给一个档位）。</p>
-    <div class="row">
-      <label class="field"><span>档位（应用到这个上游的所有模型）</span>
-        <input id="reasoning" autocomplete="off" spellcheck="false" placeholder="off, low, medium, high"></label>
+    <p class="hint">勾上的档位会写进这个上游的所有模型。DSH 只对声明过档位的模型显示「推理强度」菜单，
+    所以全不勾时那个下拉不会出现；给不吃 <code>reasoning_effort</code> 的上游声明档位则会被它返回 400，
+    按上游实际支持的勾。<code>off</code> 是“不思考”，只勾它无效，至少再勾一个别的。</p>
+    <div id="reasoning-levels" class="levels"></div>
+    <div class="actions">
+      <button id="reasoning-default" type="button">恢复默认勾选</button>
+      <button id="reasoning-none" type="button">全不选（不声明）</button>
     </div>
 
     <h2>请求限额</h2>

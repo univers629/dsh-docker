@@ -11,6 +11,8 @@ $project = Join-Path $temporary 'dsh-docker'
 $dockerLog = Join-Path $temporary 'docker.log'
 $script:NonInteractive = $false
 $script:Dir = $project
+# 这一段测的是"全部删除"，环境里残留的 DSH_DELETE_KEEP 会让它悄悄走成保留模式。
+$env:DSH_DELETE_KEEP = $null
 
 function Confirm-DshDelete { }
 function docker {
@@ -53,6 +55,31 @@ try {
         if ($calls -notmatch $pattern) { throw "Missing Docker call matching $pattern`n$calls" }
     }
     if ($calls -match 'name=dsh|dpanel-local') { throw "Unsafe Docker filter or external network call found:`n$calls" }
+    # --- 二级分支：保留会话 / 工作目录 / 插件 ---
+    $keepProject = Join-Path $temporary 'dsh-docker-keep'
+    $script:Dir = $keepProject
+    New-Item -ItemType Directory -Path $keepProject -Force | Out-Null
+    foreach ($file in @('docker-compose.yml','Dockerfile','install.ps1','.env')) {
+        [IO.File]::WriteAllText((Join-Path $keepProject $file), $file)
+    }
+    $keepPaths = @('workspace\notes.txt', 'data\dsh\sessions\2026-08-28.jsonl', 'data\dsh\profiles\web\package.json')
+    $gonePaths = @('data\dsh\settings.yaml', 'data\dsh\.credentials.yaml', 'data\broker\keys.json', 'data\secret\root.hash', 'data\home\.npmrc')
+    foreach ($relative in ($keepPaths + $gonePaths)) {
+        $full = Join-Path $keepProject $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $full) -Force | Out-Null
+        [IO.File]::WriteAllText($full, $relative)
+    }
+    $env:DSH_DELETE_KEEP = '1'
+    try { Remove-DshProject } finally { $env:DSH_DELETE_KEEP = $null }
+    if (-not (Test-Path -LiteralPath $keepProject)) { throw '保留模式不能删掉整个工程目录。' }
+    foreach ($relative in $keepPaths) {
+        if (-not (Test-Path -LiteralPath (Join-Path $keepProject $relative))) { throw "保留模式把 $relative 删掉了。" }
+    }
+    foreach ($relative in ($gonePaths + @('docker-compose.yml','Dockerfile','install.ps1','.env'))) {
+        if (Test-Path -LiteralPath (Join-Path $keepProject $relative)) { throw "保留模式没有删掉 $relative。" }
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $keepProject '.dsh-preserved'))) { throw '保留模式没有写下 .dsh-preserved 标记。' }
+
     Write-Output 'PowerShell installer delete smoke: ok'
 } finally {
     Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue

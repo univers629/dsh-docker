@@ -45,6 +45,8 @@ import {
   AdminInputError,
   API_SHAPES,
   DEFAULT_BASE_URLS,
+  DEFAULT_PANEL_THINKING_LEVELS,
+  THINKING_LEVELS,
   baseUrlLooksUnversioned,
   defaultShapeOf,
   findUpstream,
@@ -491,6 +493,8 @@ function stateResponse() {
     apiShapes: Object.entries(API_SHAPES).map(([id, shape]) => ({ id, label: shape.label })),
     defaultBaseUrls: { ...DEFAULT_BASE_URLS },
     defaultShapes,
+    thinkingLevels: [...THINKING_LEVELS],
+    defaultThinkingLevels: [...DEFAULT_PANEL_THINKING_LEVELS],
     upstreams: document.upstreams.map((entry) => toUpstreamView(entry)),
     egress: egressState(),
   }

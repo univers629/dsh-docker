@@ -36,8 +36,11 @@ assert.match(installSh, /set_compose_env DSH_IMAGE "\$PENDING_IMAGE"/)
 assert.match(installSh, /up -d --no-build --force-recreate/)
 assert.match(installPs1, /\[ValidateSet\('',\s*'prebuilt',\s*'build'\)\]/)
 assert.match(installPs1, /docker pull \$imageRef/)
+// 只看动作分发之后那一段：upgrade 用的函数定义在 switch 之前，也含同一条构建命令，
+// 而这里要检查的是安装分支里"先拉、拉不到再本机构建"的顺序。
+const powershellDispatch = installPs1.slice(installPs1.indexOf('switch ($DshAction) {'))
 assert.ok(
-  installPs1.indexOf('docker pull $imageRef') < installPs1.indexOf('docker compose build dsh'),
+  powershellDispatch.indexOf('docker pull $imageRef') < powershellDispatch.indexOf('docker compose build dsh'),
   'install.ps1 must try the pull before falling back to a local build',
 )
 assert.match(installPs1, /Set-ComposeEnvValue \$pendingEnvFile 'DSH_IMAGE' \$imageRef/)

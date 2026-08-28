@@ -73,6 +73,7 @@ COPY bin/hash-dsh-password /usr/local/bin/hash-dsh-password
 COPY bin/verify-dsh-hardening /usr/local/bin/verify-dsh-hardening
 COPY bin/configure-nginx-auth /usr/local/bin/configure-nginx-auth
 COPY bin/patch-profile-plugins.mjs /usr/local/bin/patch-profile-plugins.mjs
+COPY bin/watch-profile-plugins.mjs /usr/local/bin/watch-profile-plugins.mjs
 COPY bin/install-docker-control.mjs /usr/local/bin/install-docker-control.mjs
 # 旁路服务：真实模型密钥只存在于 dsh-key-broker 容器，出站白名单由 dsh-egress
 # 容器执行。两者复用同一个镜像（都只用 Node 内置模块），但以独立容器、非 root、
@@ -89,7 +90,8 @@ COPY nginx/dsh-ingress.conf /usr/local/share/dsh/ingress.conf
 RUN chmod +x /usr/local/bin/dsh /usr/local/bin/dsh-supervisor /usr/local/bin/restart-dsh \
       /usr/local/bin/manage-dsh-plugin /usr/local/bin/cleanup-dsh-plugin-transactions \
       /usr/local/bin/entrypoint.sh /usr/local/bin/configure-nginx-auth \
-      /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/install-docker-control.mjs \
+      /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/watch-profile-plugins.mjs \
+      /usr/local/bin/install-docker-control.mjs \
       /usr/local/bin/install-dsh-runtime /usr/local/bin/update-dsh \
       /usr/local/lib/dsh/update-dsh.sh /usr/local/bin/dsh-root /usr/local/bin/apt \
       /usr/local/bin/sudo /usr/local/bin/hash-dsh-password \
@@ -101,15 +103,21 @@ RUN chmod +x /usr/local/bin/dsh /usr/local/bin/dsh-supervisor /usr/local/bin/res
     && npm install --omit=dev --no-package-lock \
     && npm cache clean --force \
     && mkdir -p /opt /data/dsh /data/agents /data/mcp /data/home /workspace \
+       /data/home/.npm /data/home/.npm-global/bin /data/home/.local/bin \
+       /data/home/.local/share/pnpm /data/home/.cache /data/home/.config \
        /run/dsh-priv /run/dsh-state /root/dsh-secret /etc/dsh-broker \
        /usr/bin /usr/sbin /usr/lib /usr/share /usr/include /usr/libexec \
        /usr/games /usr/src /var/lib /var/cache /var/backups \
-    && chown 1000:1000 /data/dsh /data/agents /data/mcp /data/home /workspace \
+    && chown 1000:1000 /data/dsh /data/agents /data/mcp /workspace \
+    && chown -R 1000:1000 /data/home \
     && chown 0:1000 /run/dsh-priv /run/dsh-state \
     && chmod 750 /run/dsh-priv \
     && chmod 770 /run/dsh-state \
     && chmod 700 /root/dsh-secret \
-    && printf '%s\n' 'export PATH="/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:$PATH"' > /etc/profile.d/dsh-toolchain.sh
+    && printf '%s\n' \
+       'export PATH="/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/data/home/.local/share/pnpm:$PATH"' \
+       'if [ -z "${HOME:-}" ]; then HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"; export HOME; fi' \
+       > /etc/profile.d/dsh-toolchain.sh
 
 # DSH 本体是上游发布在 npm 上的预构建包，装完直接对产物打补丁，不克隆源码也不编译。
 # 默认装 latest：上游改动导致补丁锚点失效时这一步会直接失败，而不是静默产出一个
@@ -123,18 +131,24 @@ RUN /usr/local/bin/install-dsh-runtime /app/dsh "${DSH_VERSION}" \
 
 ENV DSH_RUN_USER=dsh \
     DSH_RESTART_REQUEST_FILE=/run/dsh-state/restart \
+    DSH_PROFILE_PATCH_REPORT=/run/dsh-state/profile-patches.json \
     DSH_ROOT_HASH_FILE=/root/dsh-secret/root.hash
+# 这里故意不设全容器的 HOME。镜像里一旦有 ENV HOME=/data/home，宿主上默认以 root
+# 身份进来的 docker exec 也会继承它：root 跑一次 npm/npx，/data/home/.npm 里就留下
+# root 属主的缓存，之后 dsh 账户自己装工具链只会以 EACCES 失败。改成不设之后 root
+# 用 passwd 里的 /root，dsh 的 HOME 由 Supervisor 显式传给 DSH 子进程（DSH_USER_HOME）。
 ENV DSH_HOME=/data/dsh \
     DSH_AGENTS_HOME=/data/agents \
     DSH_UPDATE_STATE=/data/dsh/update \
     DSH_NGINX_CONFIG=/usr/local/share/dsh/nginx.conf \
-    HOME=/data/home \
+    DSH_USER_HOME=/data/home \
+    PNPM_HOME=/data/home/.local/share/pnpm \
     DSH_PERMISSION_MODE=danger-full-access \
     DSH_HOST_ACCESS=mounted-paths-only \
     DSH_WRITABLE_PATHS=/data/dsh,/data/home,/data/mcp,/data/agents,/workspace \
     DSH_SYSTEM_PACKAGES_PERSISTENT=false \
     NODE_PATH=/app/dsh/node_modules:/data/dsh/profiles/node_modules \
-    PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/data/home/.local/bin:/data/home/bin:/data/home/.npm-global/bin:/data/home/.local/share/pnpm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 WORKDIR /workspace
 

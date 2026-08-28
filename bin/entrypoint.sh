@@ -17,6 +17,11 @@ if ! DSH_RUN_UID="$(id -u "$DSH_RUN_USER" 2>/dev/null)"; then
   exit 78
 fi
 DSH_RUN_GID="$(id -g "$DSH_RUN_USER")"
+# 运行账户的家目录取自 passwd，镜像不再给全容器设 HOME：root 侧的 docker exec
+# 一旦继承 HOME=/data/home，root 跑过的 npm/npx 就会在 dsh 的缓存里留下 root
+# 属主的文件，之后 dsh 自己装工具链只会拿到 EACCES。
+DSH_USER_HOME="$(getent passwd "$DSH_RUN_USER" 2>/dev/null | cut -d: -f6 || true)"
+[ -n "$DSH_USER_HOME" ] || DSH_USER_HOME="${DSH_USER_HOME:-/data/home}"
 DSH_ROOT_HASH_FILE="${DSH_ROOT_HASH_FILE:-/root/dsh-secret/root.hash}"
 
 # 容器 root 口令：安装器把 sha512crypt 哈希写进挂载文件，这里同步进 /etc/shadow。
@@ -50,7 +55,7 @@ chown "0:$DSH_RUN_GID" /run/dsh-priv /run/dsh-state
 chmod 750 /run/dsh-priv
 chmod 770 /run/dsh-state
 
-export DSH_RUN_USER DSH_RUN_UID DSH_RUN_GID
+export DSH_RUN_USER DSH_RUN_UID DSH_RUN_GID DSH_USER_HOME
 
 /usr/local/bin/configure-nginx-auth
 
@@ -257,9 +262,53 @@ align_data_ownership() {
   chown "$expected" "$marker" 2>/dev/null || true
 }
 
+# Agent 自己装工具链（npm i -g、pnpm add -g、pip install --user、cargo、go……）全都
+# 写在运行账户的家目录里，所以这些目录必须存在、且属主是运行账户。npm 尤其脆弱：
+# 缓存目录里只要混进一个 root 属主的文件，它就直接以 EACCES 失败，并且只会提示
+# "sudo chown"——而容器里的 Agent 恰好没有 root。历史上最常见的来源是宿主机上
+# `docker exec`（默认 root）跑过 npm/npx，那时镜像还给全容器设了 HOME=/data/home。
+# 镜像侧已经改掉了源头，这里再补一道自愈：属主不对就改回来，别让人手工救场。
+prepare_user_tool_dirs() {
+  expected="$DSH_RUN_UID:$DSH_RUN_GID"
+  for directory in \
+    "$DSH_USER_HOME/.npm" \
+    "$DSH_USER_HOME/.npm-global/bin" \
+    "$DSH_USER_HOME/.local/bin" \
+    "$DSH_USER_HOME/.local/share/pnpm" \
+    "$DSH_USER_HOME/.cache" \
+    "$DSH_USER_HOME/.config"
+  do
+    mkdir -p "$directory" 2>/dev/null || true
+    chown "$expected" "$directory" 2>/dev/null || true
+  done
+
+  # -quit 让扫描在第一个异常属主处停下：正常情况下这是一次纯读的遍历，发现问题
+  # 才付出递归 chown 的代价。跨设备的绑定挂载不跟进（-xdev），符号链接不跟随。
+  offender="$(find "$DSH_USER_HOME" -xdev \( ! -uid "$DSH_RUN_UID" -o ! -gid "$DSH_RUN_GID" \) -print -quit 2>/dev/null || true)"
+  [ -n "$offender" ] || return 0
+  echo "[dsh] $DSH_USER_HOME 里有不属于 $DSH_RUN_USER 的文件（例如 $offender），正在改回 $expected..." >&2
+  chown -Rh "$expected" "$DSH_USER_HOME" 2>/dev/null || \
+    echo "[dsh] 属主修正未完全成功；如果宿主启用了 userns-remap，请在宿主机上对齐 ./data/home" >&2
+}
+
+# npm 的全局前缀必须落在运行账户可写的位置，否则 `npm i -g` 会去写 /usr/local。
+# 文件可能被历史部署或 root 写坏，所以每次启动都补齐缺失的键并纠正属主。
+ensure_npm_config() {
+  npmrc="$DSH_USER_HOME/.npmrc"
+  if [ ! -f "$npmrc" ]; then
+    printf 'prefix=%s/.npm-global\ncache=%s/.npm\n' "$DSH_USER_HOME" "$DSH_USER_HOME" > "$npmrc"
+  else
+    grep -q '^prefix=' "$npmrc" || printf 'prefix=%s/.npm-global\n' "$DSH_USER_HOME" >> "$npmrc"
+    grep -q '^cache=' "$npmrc" || printf 'cache=%s/.npm\n' "$DSH_USER_HOME" >> "$npmrc"
+  fi
+  chown "$DSH_RUN_UID:$DSH_RUN_GID" "$npmrc" 2>/dev/null || true
+  chmod 644 "$npmrc" 2>/dev/null || true
+}
+
 mkdir -p /workspace /data/dsh/profiles /data/home /data/agents /data/mcp
 rm -rf "$DSH_HOME/profiles/node_modules" "$DSH_HOME/node_modules" 2>/dev/null || true
 align_data_ownership
+prepare_user_tool_dirs
 
 if [ ! -f "$DSH_HOME/cordis.patch.yml" ]; then
   install -o "$DSH_RUN_UID" -g "$DSH_RUN_GID" -m 600 \
@@ -268,11 +317,11 @@ fi
 
 find /data -name "*credentials*" -exec chmod 600 {} + 2>/dev/null || true
 find /data -name ".*credentials*" -exec chmod 600 {} + 2>/dev/null || true
-if [ -d "$HOME/.ssh" ]; then
-  chmod 700 "$HOME/.ssh"
-  find "$HOME/.ssh" -type f -exec chmod 600 {} + 2>/dev/null || true
-  find "$HOME/.ssh" -type f -name "*.pub" -exec chmod 644 {} + 2>/dev/null || true
-  find "$HOME/.ssh" -type f -name "known_hosts*" -exec chmod 644 {} + 2>/dev/null || true
+if [ -d "$DSH_USER_HOME/.ssh" ]; then
+  chmod 700 "$DSH_USER_HOME/.ssh"
+  find "$DSH_USER_HOME/.ssh" -type f -exec chmod 600 {} + 2>/dev/null || true
+  find "$DSH_USER_HOME/.ssh" -type f -name "*.pub" -exec chmod 644 {} + 2>/dev/null || true
+  find "$DSH_USER_HOME/.ssh" -type f -name "known_hosts*" -exec chmod 644 {} + 2>/dev/null || true
 fi
 
 configure_egress_proxy
@@ -281,10 +330,7 @@ render_container_skill
 if [ -f "$DSH_HOME/.credentials.yaml" ]; then
   chmod 600 "$DSH_HOME/.credentials.yaml" 2>/dev/null || true
 fi
-if [ ! -f "$HOME/.npmrc" ]; then
-  printf "prefix=%s/.npm-global\n" "$HOME" > "$HOME/.npmrc"
-  chown "$DSH_RUN_UID:$DSH_RUN_GID" "$HOME/.npmrc" 2>/dev/null || true
-fi
+ensure_npm_config
 
 echo "[dsh] starting the in-container DSH supervisor; DSH itself will run as $DSH_RUN_USER($DSH_RUN_UID:$DSH_RUN_GID)" >&2
 exec /usr/local/bin/dsh-supervisor "$@"

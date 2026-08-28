@@ -5,10 +5,16 @@ DSH_PID_FILE=${DSH_PID_FILE:-/run/dsh.pid}
 DSH_SUPERVISOR_PID_FILE=${DSH_SUPERVISOR_PID_FILE:-/run/dsh-supervisor.pid}
 DSH_RESTART_REQUEST_FILE=${DSH_RESTART_REQUEST_FILE:-/run/dsh-state/restart}
 
+# 退出码约定（调用方按它决定要不要报错）：
+#   0  Supervisor 与 DSH 子进程都在
+#   1  Supervisor 不在：容器里没人能重启 DSH，这才是真的失败
+#   3  Supervisor 在、DSH 子进程当前不在（刚退出，或正处在重启 backoff 窗口）
 usage() {
-  echo 'usage: restart-dsh check | request [delay-seconds]' >&2
+  echo 'usage: restart-dsh check | request [delay-seconds] | wait-ready [timeout-seconds]' >&2
   exit 2
 }
+
+EXIT_NO_CHILD=3
 
 read_record() {
   file=$1
@@ -29,7 +35,7 @@ check_processes() {
   supervisor_pid=$pid
   read_record "$DSH_PID_FILE" || {
     echo '[restart-dsh] DSH child process is not running' >&2
-    return 1
+    return "$EXIT_NO_CHILD"
   }
   dsh_pid=$pid
   dsh_start=$expected_start
@@ -46,12 +52,42 @@ case "$action" in
     delay=${2:-0}
     case "$delay" in ''|*[!0-9.]*) usage ;; esac
     [ "$delay" = 0 ] || sleep "$delay"
-    check_processes
+    status=0
+    check_processes || status=$?
+    # 没有子进程可杀不等于重启失败：Supervisor 已经在 backoff 里准备把 DSH 重新
+    # 拉起来，请求想要的结果本来就在发生。这里返回 0，免得调用方把它当错误。
+    if [ "$status" = "$EXIT_NO_CHILD" ]; then
+      echo '[restart-dsh] Supervisor 会自行拉起 DSH，无需重启请求' >&2
+      exit 0
+    fi
+    [ "$status" = 0 ] || exit "$status"
     temporary="${DSH_RESTART_REQUEST_FILE}.tmp.$$"
     printf '%s\n%s\n' "$dsh_pid" "$dsh_start" > "$temporary"
     chmod 600 "$temporary"
     mv "$temporary" "$DSH_RESTART_REQUEST_FILE"
     kill -TERM "$dsh_pid"
+    ;;
+  wait-ready)
+    # 重启之后确认服务真的回来了。只看进程还不够：端口没绑上（例如别的进程占着
+    # DSH 的回环端口）时进程可以活着但页面仍然是 502。
+    [ "$#" -le 2 ] || usage
+    timeout=${2:-90}
+    case "$timeout" in ''|*[!0-9]*) usage ;; esac
+    waited=0
+    while [ "$waited" -lt "$timeout" ]; do
+      if read_record "$DSH_PID_FILE" && node -e '
+        const port = process.env.DSH_WEB_PORT ?? "3081"
+        fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2000) })
+          .then((response) => process.exit(response.status >= 500 ? 1 : 0))
+          .catch(() => process.exit(1))
+      '; then
+        exit 0
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
+    echo "[restart-dsh] DSH 在 ${timeout}s 内没有重新就绪" >&2
+    exit 1
     ;;
   *) usage ;;
 esac

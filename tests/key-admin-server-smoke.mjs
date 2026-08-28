@@ -133,6 +133,10 @@ try {
   assert.deepEqual(state.payload.apiShapes.map((shape) => shape.id), ['any', 'chat', 'responses', 'messages', 'gemini'])
   assert.equal(state.payload.defaultBaseUrls.deepseek, 'https://api.deepseek.com')
   assert.equal(state.payload.defaultShapes.anthropic, 'messages')
+  // 面板的推理强度是勾选框，档位全集和默认勾选都由服务端给：前端只有兜底常量，
+  // 少了这两个字段页面就会退回兜底、和后端的合法档位悄悄分叉。
+  assert.deepEqual(state.payload.thinkingLevels, ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+  assert.deepEqual(state.payload.defaultThinkingLevels, ['off', 'low', 'medium', 'high', 'max'])
 
   // --- 保存一个上游 ---
   const saved = await call('/api/upstreams', {
