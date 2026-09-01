@@ -86,6 +86,7 @@ COPY dsh-home/ /usr/local/share/dsh-home/
 COPY dsh-home/docker-control/ /opt/dsh-docker-control/
 COPY nginx/dsh-nginx.conf /usr/local/share/dsh/nginx.conf
 COPY nginx/dsh-ingress.conf /usr/local/share/dsh/ingress.conf
+COPY pwa/ /usr/local/share/dsh-pwa/
 
 RUN chmod +x /usr/local/bin/dsh /usr/local/bin/dsh-supervisor /usr/local/bin/restart-dsh \
       /usr/local/bin/manage-dsh-plugin /usr/local/bin/cleanup-dsh-plugin-transactions \
