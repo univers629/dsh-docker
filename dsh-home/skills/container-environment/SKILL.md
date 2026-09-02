@@ -41,12 +41,24 @@ Important environment variables:
 
 ## Storage and persistence
 
+Before creating or editing project files, run `pwd`. Treat the Session working
+directory as the project root unless the user explicitly identifies another
+root. When the user says "current directory", "here", or "this workspace",
+they mean that resolved Session working directory. Keep project source, tests,
+configuration, documentation, scripts, build files, and generated project
+assets under that root, and keep subsequent tool calls scoped to it.
+
+The Session project root may be any user-created directory under `/data/home`,
+or it may be `/workspace`. Do not switch project work to `/workspace` merely
+because it is a persistent mount. Use `/workspace` only when it is the Session
+working directory or the user explicitly selects it as the project root.
+
 Use these bind-mounted paths for anything that must survive intentional
 container replacement:
 
-    /workspace       Project source and working trees
+    /workspace       Project source and working trees when selected as the project root
     /data/dsh        DSH sessions, settings, credentials, profiles, and skills
-    /data/home       HOME, SSH files, user-level tools, and caches
+    /data/home       HOME, Session workspaces, SSH files, user-level tools, and caches
     /data/mcp        MCP source, virtual environments, databases, and state
     /data/agents     Shared Agent state
 
@@ -98,8 +110,10 @@ updater replaces the whole directory.
   user, who can run it from the host.
 - Python CLIs: uv tool install <package>; binaries persist under
   /data/home/.local/bin.
-- Python projects and MCP servers: create a virtual environment inside the
-  project, for example uv venv /data/mcp/<name>/.venv.
+- Python projects: create the virtual environment inside the resolved project
+  root, for example `uv venv .venv`.
+- Custom MCP servers: keep them self-contained under `/data/mcp/<name>` unless
+  the user explicitly creates one as the current Session project.
 - Node CLIs: npm install -g <package>; the configured npm prefix is
   /data/home/.npm-global and the cache is /data/home/.npm. pnpm add -g works
   too; PNPM_HOME is /data/home/.local/share/pnpm. Global installs need no
@@ -134,7 +148,7 @@ Keep each custom MCP server self-contained:
 For one-shot servers, uvx and npx use caches below /data/home:
 
     uvx mcp-server-fetch
-    npx -y @modelcontextprotocol/server-filesystem /workspace
+    npx -y @modelcontextprotocol/server-filesystem "$PWD"
 
 ## DSH lifecycle
 
