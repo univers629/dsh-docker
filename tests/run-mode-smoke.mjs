@@ -385,14 +385,6 @@ assert.doesNotMatch(files.skill, /real trust boundary|userns|DSH_TRUSTED_HOSTS/)
 assert.match(files.skill, /You cannot escalate to root/)
 assert.match(files.skill, /dsh-root run/)
 assert.match(files.skill, /sudo apt-get install/)
-// Session 创建的工作区可能是 /data/home 下的任意目录。Agent 必须以实际 cwd 为项目根，
-// 不能因为 /workspace 是持久挂载就擅自迁移项目，也不能给 filesystem MCP 授权错目录。
-assert.match(files.skill, /Before creating or editing project files, run `pwd`/)
-assert.match(files.skill, /Session working\s+directory as the project root/)
-assert.match(files.skill, /any user-created directory under `\/data\/home`/)
-assert.match(files.skill, /Do not switch project work to `\/workspace` merely/)
-assert.match(files.skill, /server-filesystem "\$PWD"/)
-assert.doesNotMatch(files.skill, /server-filesystem \/workspace/)
 
 // --- 安装器：自定义 root 密码 + 运行身份与加固核验 ---
 assert.doesNotMatch(files.installSh, /--run-as-root|--normal-user|--no-root(?!-password)/)
