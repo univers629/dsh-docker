@@ -259,4 +259,13 @@ export const artifactPatches = [
     find: `isLoopback: transport?.ownsHost === true || pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),`,
     replace: `isLoopback: transport?.ownsHost === true || pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname) || (typeof document !== "undefined" && document.cookie.split(";").some((entry) => entry.trim() === "DSH_PUBLIC_LOCAL_MODE=1")),`,
   },
+  {
+    id: "trusted-proxy-auto-browser-auth",
+    package: "@deepseek-ai/dsh-client-connection",
+    file: "lib/index.js",
+    why: "Cloudflare Access 已完成外层认证时，由项目反代完成 DSH 启动 token exchange，避免每次进程重启都要求用户 SSH 取 token。",
+    marker: `x-dsh-trusted-proxy`,
+    find: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length > 0) {`,
+    replace: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && req.headers["x-dsh-trusted-proxy"] === "1" && !this.isAuthenticated(req)) {\n\t\t\tconst authority = requestAuthority(req.headers);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.writeHead(303, { "cache-control": "no-store", "location": "/", "referrer-policy": "no-referrer", "set-cookie": sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3)) });\n\t\t\t\tres.end();\n\t\t\t\treturn false;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
+  },
 ]

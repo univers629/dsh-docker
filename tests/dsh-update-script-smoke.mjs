@@ -16,6 +16,8 @@ assert.match(script, /mv "\$STAGE_DIR" "\$APP_DIR"/)
 assert.match(script, /DSH_UPDATE_NO_RESTART/)
 assert.match(script, /"\$RESTART_EXECUTABLE" check/)
 assert.match(script, /"\$RESTART_EXECUTABLE" request 1/)
+assert.match(script, /"\$RESTART_EXECUTABLE" wait-ready/)
+assert.match(script, /DSH_UPDATE_READY_TIMEOUT/)
 // 重启只针对 DSH 进程；容器是长期存活的 Debian 系统，绝不能被更新流程重建。
 assert.doesNotMatch(script, /gosu|node:node/)
 assert.doesNotMatch(script, /kill -TERM "\$\(cat \/run\/dsh\.pid\)"/)

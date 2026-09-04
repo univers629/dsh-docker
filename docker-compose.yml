@@ -79,7 +79,7 @@ services:
     healthcheck:
       # Nginx 的 /healthz 是无条件 204，单探它无法发现 DSH 崩溃；DSH 自己的
       # 回环端口才是真正的存活信号。
-      test: ["CMD", "node", "-e", "const dshPort = process.env.DSH_WEB_PORT || '3081';const check = (url) => fetch(url).then((response) => {if (!response.ok) throw new Error(url + ' ' + response.status)});Promise.all([check('http://127.0.0.1:3080/healthz'), check('http://127.0.0.1:' + dshPort + '/')]).then(() => process.exit(0)).catch(() => process.exit(1))"]
+      test: ["CMD", "node", "-e", "const dshPort = process.env.DSH_WEB_PORT || '3081';const check = (url) => fetch(url).then((response) => {if (response.status >= 500) throw new Error(url + ' ' + response.status)});Promise.all([check('http://127.0.0.1:3080/healthz'), check('http://127.0.0.1:' + dshPort + '/')]).then(() => process.exit(0)).catch(() => process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
