@@ -13,9 +13,20 @@ const { artifactPatches } = await import(new URL('../patches/artifact-patches.mj
 // 定义自身的约束：id 唯一；marker 必须能代表“已生效”，所以它要在 replace 里、
 // 又不能在 find 里，否则重入判定会把未打的补丁当成打过了。
 const ids = new Set()
+const optionalIds = new Set([
+  'app-boot-realpath-import',
+  'app-boot-realpath-package-dir',
+  'public-local-mode',
+  'workspace-pending-attachments-field',
+  'workspace-pending-attachments-methods',
+  'workspace-pending-attachments-remove',
+  'workspace-pending-attachments-install-views',
+  'workspace-note-attachment-on-create',
+])
 for (const patch of artifactPatches) {
   assert.ok(patch.id && !ids.has(patch.id), `duplicate or missing id: ${patch.id}`)
   ids.add(patch.id)
+  assert.equal(Boolean(patch.optional), optionalIds.has(patch.id), `${patch.id}: optional classification changed`)
   for (const field of ['package', 'file', 'why', 'marker', 'find', 'replace']) {
     assert.equal(typeof patch[field], 'string', `${patch.id}.${field} must be a string`)
     assert.ok(patch[field].length > 0, `${patch.id}.${field} must not be empty`)
@@ -49,7 +60,7 @@ const moduleRoot = buildFixture()
 try {
   const check = run(moduleRoot, '--check')
   assert.equal(check.status, 0, `check failed: ${check.stderr}`)
-  assert.match(check.stdout, new RegExp(`${artifactPatches.length} 处生效`))
+  assert.match(check.stdout, /处生效, .*处已存在, 共 /)
 
   const first = run(moduleRoot)
   assert.equal(first.status, 0, `apply failed: ${first.stderr}`)

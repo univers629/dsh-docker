@@ -38,10 +38,11 @@ for (const patch of artifactPatches) {
 let applied = 0
 let already = 0
 const failures = []
+const warnings = []
 
 for (const [file, patches] of byFile) {
   if (!existsSync(file)) {
-    for (const patch of patches) failures.push(`${patch.id}: 目标文件不存在 ${file}`)
+    for (const patch of patches) (patch.optional ? warnings : failures).push(`${patch.id}: 目标文件不存在 ${file}`)
     continue
   }
   const original = readFileSync(file, 'utf8')
@@ -59,7 +60,7 @@ for (const [file, patches] of byFile) {
       applied++
       continue
     }
-    failures.push(hits === 0
+    ;(patch.optional ? warnings : failures).push(hits === 0
       ? `${patch.id}: 锚点未命中（上游产物可能已变化）`
       : `${patch.id}: 锚点命中 ${hits} 次，必须唯一`)
   }
@@ -70,6 +71,11 @@ if (failures.length > 0) {
   console.error(`[dsh-patch] ${failures.length} 处补丁无法应用:`)
   for (const failure of failures) console.error(`  - ${failure}`)
   process.exit(1)
+}
+
+if (warnings.length > 0) {
+  console.warn(`[dsh-patch] ${warnings.length} 处可选补丁未应用（上游可能已内置或移除）:`)
+  for (const warning of warnings) console.warn(`  - ${warning}`)
 }
 
 const mode = checkOnly ? '校验' : '应用'
