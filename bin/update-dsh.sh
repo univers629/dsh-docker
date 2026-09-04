@@ -89,5 +89,10 @@ if [ "${DSH_UPDATE_NO_RESTART:-false}" != true ]; then
     write_status failed 'DSH 已更新，但容器内 Supervisor 当前不可用，请手动执行 restart-dsh request'
     exit 1
   fi
-  setsid "$RESTART_EXECUTABLE" request 1 </dev/null >/dev/null 2>&1 &
+  # 同步等待旧子进程退出并由 Supervisor 拉起新进程，避免更新完成信号
+  # 早于端口释放/插件树启动，导致网页看到半启动状态或 EADDRINUSE。
+  if ! "$RESTART_EXECUTABLE" request 1 </dev/null >/dev/null 2>&1 || ! "$RESTART_EXECUTABLE" wait-ready "${DSH_UPDATE_READY_TIMEOUT:-120}"; then
+    write_status failed 'DSH 已更新，但新进程未在超时时间内就绪，请检查容器日志'
+    exit 1
+  fi
 fi
