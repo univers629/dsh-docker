@@ -37,6 +37,32 @@ for (const patch of artifactPatches) {
   assert.ok(!patch.file.startsWith('/') && !patch.file.includes('..'), `${patch.id}: file must be package-relative`)
 }
 
+// 反代自动登录必须是「同一个响应里既种 cookie 又返回首页」，而不是「种 cookie
+// 之后 303 打回 /」。后者把「发 cookie」和「跳转」耦合在一起：只要浏览器没把
+// cookie 送回来（跨站导航链、隐私设置、扩展、时钟偏差……），就会无限 303，
+// 也就是 ERR_TOO_MANY_REDIRECTS。上游的 ?token= 流程要 303 是因为凭证在 URL
+// 里、必须洗掉地址栏；这条路的凭证在请求头里，URL 里没有秘密可洗，那次跳转
+// 纯属照抄，去掉它才让这个错误在结构上不可能出现。这条断言把该决定钉住。
+const trustedProxy = artifactPatches.find((patch) => patch.id === 'trusted-proxy-auto-browser-auth')
+assert.ok(trustedProxy, 'trusted-proxy-auto-browser-auth patch is missing')
+assert.ok(
+  trustedProxy.replace.includes('res.setHeader("set-cookie"'),
+  'trusted-proxy 分支必须在响应头里种 cookie，由调用方在同一个响应里发首页',
+)
+assert.ok(
+  trustedProxy.replace.includes('return true;'),
+  'trusted-proxy 分支必须 return true，让调用方直接返回首页',
+)
+assert.ok(
+  !/writeHead\(\s*3\d\d/.test(trustedProxy.replace) && !trustedProxy.replace.includes('"location"'),
+  'trusted-proxy 分支不得重定向：没有重定向，ERR_TOO_MANY_REDIRECTS 才在结构上不可能出现',
+)
+assert.ok(
+  !trustedProxy.replace.includes('dsh-proxy-auth')
+  && !trustedProxy.replace.includes('SameSite=Lax'),
+  'trusted-proxy 分支不得再引入一次性标记或放宽 SameSite（去掉重定向后两者都不需要）',
+)
+
 const run = (moduleRoot, ...args) => spawnSync(process.execPath, [applier, moduleRoot, ...args], {
   encoding: 'utf8',
   env: { ...process.env, DSH_PATCH_DIR: patchDir },

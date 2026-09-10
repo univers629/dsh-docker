@@ -263,9 +263,30 @@ export const artifactPatches = [
     id: "trusted-proxy-auto-browser-auth",
     package: "@deepseek-ai/dsh-client-connection",
     file: "lib/index.js",
-    why: "Cloudflare Access 已完成外层认证时，由项目反代完成 DSH 启动 token exchange，避免每次进程重启都要求用户 SSH 取 token。",
-    marker: `x-dsh-trusted-proxy`,
+    why: "外层（Cloudflare Access / VPN / Basic Auth / local）已经完成认证时，由项目反代断言「这个请求已被放行」，DSH 据此在自己的响应里种下浏览器会话 cookie，免除人工取 token。",
+    // 设计要点：**不重定向**。
+    //
+    // 上游 ?token= 流程要 303 回 "/"，唯一理由是必须把地址栏里那一串洗掉 ——
+    // 凭证来自 URL，所以得再发一次「干净」请求。而这条路的凭证来自请求头，
+    // URL 里没有任何秘密可洗。照抄那次 303 的唯一后果，是把「种 cookie」和
+    // 「跳转」耦合成了死循环的唯一来源：只要浏览器没把 cookie 送回来
+    // （跨站导航链、隐私设置、扩展……），就会无限 303 打回 "/"，也就是
+    // ERR_TOO_MANY_REDIRECTS。
+    //
+    // 正确做法是利用 authorizeIndex 已有的契约：它在 dist 的
+    // res.writeHead(200, ...) 之前执行，返回 true 即「调用方可以发首页」。
+    // 所以 setHeader 种 cookie 后直接 return true —— 同一个响应既种 cookie
+    // 又给首页。没有重定向，这个错误在结构上不可能出现，与接入方式和浏览器
+    // 策略都无关，也不需要一次性标记之类的兜底。
+    //
+    // 顺带两点：可以用回上游自己的 sessionCookie()，因此保留它的
+    // SameSite=Strict（不必为了绕开 cookie 往返而放宽成 Lax）；并显式带
+    // no-store —— 种 cookie 的响应绝不能进任何共享缓存。
+    //
+    // marker 取 "res.setHeader("：新形态独有，且上游产物里 0 次出现，
+    // 所以旧补丁打过的树不会被误判成「已生效」而静默跳过。
+    marker: `res.setHeader(`,
     find: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length > 0) {`,
-    replace: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && req.headers["x-dsh-trusted-proxy"] === "1" && !this.isAuthenticated(req)) {\n\t\t\tconst authority = requestAuthority(req.headers);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.writeHead(303, { "cache-control": "no-store", "location": "/", "referrer-policy": "no-referrer", "set-cookie": sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3)) });\n\t\t\t\tres.end();\n\t\t\t\treturn false;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
+    replace: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && req.headers["x-dsh-trusted-proxy"] === "1" && !this.isAuthenticated(req)) {\n\t\t\tconst authority = requestAuthority(req.headers);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.setHeader("set-cookie", sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3)));\n\t\t\t\tres.setHeader("cache-control", "no-store");\n\t\t\t\treturn true;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
   },
 ]
