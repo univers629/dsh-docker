@@ -19,6 +19,12 @@ window.__ModuleLoader__.load({
     // the floating opener is rendered by a module-scope component.
     let toggleSidebar = null
 
+    // 重启和更新等的是同一件事：DSH 换进程之后 boot 标识才会变化，所以两处必须共用
+    // 一个预算。原先重启路径写 60 秒、更新路径写 90 秒，重启稍慢一点（Supervisor 要
+    // 先跑 prepare_dsh，再冷启动 DSH）就会误报「重启失败」——而进程其实已经换掉了。
+    // 90 秒与 /usr/local/bin/restart-dsh wait-ready 的默认值一致。
+    const BOOT_WAIT_MILLISECONDS = 90000
+
     const UI_MODE_STORAGE_KEY = 'dsh-docker-control.ui-mode'
     const UI_MODE_STYLE_ID = 'dsh-docker-control-ui-mode'
     const UI_MODE_CSS = `/* Phone layout: the shipped shell is desktop-first (a fixed 800px settings
@@ -481,7 +487,7 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       const dismissToast = React.useCallback(() => { setToast(null) }, [])
 
       const waitForBoot = React.useCallback((previous) => {
-        const deadline = Date.now() + 60000
+        const deadline = Date.now() + BOOT_WAIT_MILLISECONDS
         const poll = () => {
           if (Date.now() > deadline) {
             setState('idle')
@@ -616,7 +622,7 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       }, [checking, t])
 
       const waitForBoot = React.useCallback(previousBoot => {
-        const deadline = Date.now() + 90000
+        const deadline = Date.now() + BOOT_WAIT_MILLISECONDS
         const poll = () => {
           if (Date.now() > deadline) {
             setPhase('idle')

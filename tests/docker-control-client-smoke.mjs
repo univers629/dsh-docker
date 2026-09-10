@@ -3,6 +3,24 @@ import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 
 const source = await readFile(new URL('../dsh-home/docker-control/client/client.js', import.meta.url), 'utf8')
+
+// 重启路径和更新路径等的是同一个事件 —— DSH 换了进程之后 boot 标识才会变化 —— 所以
+// 预算必须一致。曾经一处写 60 秒、一处写 90 秒：重启稍慢一点（Supervisor 要先跑
+// prepare_dsh，再冷启动 DSH）就会误报「重启失败」，而进程其实已经换掉了。这里钉死
+// 「不得出现裸数字」和「两处共用同一个常量」，防止再次各改各的。
+assert.deepEqual(
+  source.match(/Date\.now\(\) \+ (?!BOOT_WAIT_MILLISECONDS)/g) ?? [],
+  [],
+  '两个 waitForBoot 的期限都必须引用 BOOT_WAIT_MILLISECONDS，不得写裸数字',
+)
+assert.equal(
+  (source.match(/const deadline = Date\.now\(\) \+ BOOT_WAIT_MILLISECONDS/g) ?? []).length,
+  2,
+  '重启与更新两处都应使用同一个等待预算常量',
+)
+// 90 秒与 /usr/local/bin/restart-dsh wait-ready 的默认值一致。
+assert.equal(source.includes('const BOOT_WAIT_MILLISECONDS = 90000'), true)
+
 let registration
 const errors = []
 const fetches = []
