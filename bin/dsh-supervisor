@@ -15,6 +15,7 @@ DSH_RUN_USER=${DSH_RUN_USER:-dsh}
 DSH_RUN_UID=${DSH_RUN_UID:-}
 DSH_RUN_GID=${DSH_RUN_GID:-}
 DSH_USER_HOME=${DSH_USER_HOME:-/data/home}
+DSH_WEB_PORT=${DSH_WEB_PORT:-3081}
 
 stopping=false
 dsh_pid=
@@ -51,6 +52,39 @@ process_running() {
   [ -r "/proc/$target_pid/stat" ] || return 1
   process_state=$(sed -n 's/^.*) \([^ ]\).*/\1/p' "/proc/$target_pid/stat" 2>/dev/null || true)
   [ -n "$process_state" ] && [ "$process_state" != Z ]
+}
+
+# 正在监听 DSH 端口的进程号。这个端口只服务 DSH 本体（Nginx 把 / 反代到这里），
+# 所以"谁占着端口"是"谁是 DSH"最可靠、且不依赖启动命令行形状的判据 —— 命令行会因为
+# /usr/local/bin/dsh 这层包装而看不见本工程的路径，端口不会。
+listening_pid() {
+  port_hex=$(printf '%04X' "$DSH_WEB_PORT")
+  socket_inode=$(awk -v want=":${port_hex}" '$4 == "0A" && index($2, want) > 0 { print $10; exit }' /proc/net/tcp /proc/net/tcp6 2>/dev/null || true)
+  [ -n "$socket_inode" ] || return 1
+  for descriptor in /proc/[0-9]*/fd/*; do
+    [ "$(readlink "$descriptor" 2>/dev/null || true)" = "socket:[${socket_inode}]" ] || continue
+    candidate=${descriptor#/proc/}
+    candidate=${candidate%%/*}
+    process_running "$candidate" || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+# 可以接管的 DSH：端口被占、占用者又是预期身份。第三方插件（例如 dsh-market 的
+# "立即重启"）会 detach 一个替身进程重放启动命令行，那个进程同样是正确的 DSH，只是
+# 不是本 Shell 的孩子 —— 见文件后面关于这个的说明。
+adoptable_dsh_pid() {
+  candidate=$(listening_pid) || return 1
+  if [ -n "$DSH_RUN_UID" ]; then
+    owner=$(stat -c %u "/proc/$candidate" 2>/dev/null || true)
+    if [ "$owner" != "$DSH_RUN_UID" ]; then
+      echo "[dsh-supervisor] 127.0.0.1:${DSH_WEB_PORT} is held by pid=$candidate (uid=${owner:-?}); not adopting it" >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "$candidate"
 }
 
 prepare_dsh() {
@@ -150,11 +184,18 @@ trap cleanup EXIT
 # Supervisor 的新孩子每次都撞 EADDRINUSE，/run/dsh.pid 一直写不出来，WebUI 的重启
 # 按钮只会报 "DSH child process is not running"，运气不好就是 502。
 #
-# 这类插件的通用判据是 systemd 那一套：环境里有 INVOCATION_ID/JOURNAL_STREAM，
-# 且自己的父进程就是 PID 1。本 Supervisor 正好就是容器的 PID 1，DSH 是它的直接
-# 子进程，所以补上 INVOCATION_ID 之后判据成立，插件会默认关掉自重启，改由这里
-# 或 restart-dsh 统一重启。JOURNAL_STREAM 故意不设：那会让日志库以为能写 journald。
+# 这类插件的通用判据是 systemd 那一套：环境里有 INVOCATION_ID/JOURNAL_STREAM，且
+# 自己的父进程就是 PID 1（或父进程的 comm 是 systemd）。但那只对"只看环境变量"的
+# 插件成立：dsh-market 的 detectedSupervisor 还要求后半个条件，而本容器 compose 里的
+# init: true 让 docker-init 占着 PID 1、Supervisor 是 PID 7，两个附加条件都不成立。
+# 所以对 dsh-market 真正生效的是 patch-profile-plugins.mjs 打上的 allowRestart: false
+# （市场文档里给被托管部署的正式开关），不是这个环境变量 —— 早先以为 Supervisor 就是
+# 容器的 PID 1，才让这里看起来像是够了。
+# JOURNAL_STREAM 故意不设：那会让日志库以为能写 journald。
 # DSH_SUPERVISED 是本工程自己的显式标记，给容器内的脚本和排查用。
+#
+# 兜底不靠任何插件配合：下面的循环在拉起 DSH 之前先看端口，谁在服务就接管谁。替身
+# 进程同样是正确的 DSH，接管它比再起一个去抢端口好。
 if [ "${DSH_ANNOUNCE_SUPERVISOR:-true}" = true ] && [ -z "${INVOCATION_ID:-}" ]; then
   INVOCATION_ID="$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n')"
   [ -n "$INVOCATION_ID" ] || INVOCATION_ID="$(printf '%032x' "$$")"
@@ -190,23 +231,40 @@ while [ "$stopping" != true ]; do
 
   start_profile_watcher
 
-  started_at=$(date +%s)
-  echo "[dsh-supervisor] starting DSH as a managed child process running as $DSH_RUN_USER" >&2
-  # 这里必须直接后台启动外部命令，不能包一层函数或子 shell：$! 记录的 PID 要正好
-  # 是降权后的 DSH 进程本身，restart-dsh 和安装器的身份核验都依赖这一点。
-  if [ -n "$DSH_RUN_UID" ] && [ -n "$DSH_RUN_GID" ]; then
-    HOME="$DSH_USER_HOME" setpriv --reuid "$DSH_RUN_UID" --regid "$DSH_RUN_GID" --init-groups -- "$DSH_EXECUTABLE" "$@" &
-  else
-    HOME="$DSH_USER_HOME" "$DSH_EXECUTABLE" "$@" &
+  # 先看有没有已经在服务的 DSH：插件的"自己重启"会 detach 一个替身进程重放启动命令行，
+  # 那个进程是合法的 DSH，只是不是本 Shell 的孩子。接管它，别再起一个去抢端口 —— 两个
+  # 都抢的结局是替身占住端口、这里的孩子每次都撞 EADDRINUSE，/run/dsh.pid 写不出来。
+  adopted=false
+  if dsh_pid=$(adoptable_dsh_pid); then
+    adopted=true
+    started_at=$(stat -c %Y "/proc/$dsh_pid" 2>/dev/null || date +%s)
+    echo "[dsh-supervisor] adopted the DSH already serving 127.0.0.1:${DSH_WEB_PORT} (pid=$dsh_pid)" >&2
+    if ! write_pid_record "$DSH_PID_FILE" "$dsh_pid"; then
+      dsh_pid=
+      adopted=false
+      echo '[dsh-supervisor] failed to record the adopted DSH process' >&2
+    fi
   fi
-  dsh_pid=$!
-  if ! write_pid_record "$DSH_PID_FILE" "$dsh_pid"; then
-    kill -TERM "$dsh_pid" 2>/dev/null || true
-    wait "$dsh_pid" 2>/dev/null || true
-    dsh_pid=
-    echo '[dsh-supervisor] failed to record DSH process' >&2
-    sleep "$backoff"
-    continue
+
+  if [ -z "$dsh_pid" ]; then
+    started_at=$(date +%s)
+    echo "[dsh-supervisor] starting DSH as a managed child process running as $DSH_RUN_USER" >&2
+    # 这里必须直接后台启动外部命令，不能包一层函数或子 shell：$! 记录的 PID 要正好
+    # 是降权后的 DSH 进程本身，restart-dsh 和安装器的身份核验都依赖这一点。
+    if [ -n "$DSH_RUN_UID" ] && [ -n "$DSH_RUN_GID" ]; then
+      HOME="$DSH_USER_HOME" setpriv --reuid "$DSH_RUN_UID" --regid "$DSH_RUN_GID" --init-groups -- "$DSH_EXECUTABLE" "$@" &
+    else
+      HOME="$DSH_USER_HOME" "$DSH_EXECUTABLE" "$@" &
+    fi
+    dsh_pid=$!
+    if ! write_pid_record "$DSH_PID_FILE" "$dsh_pid"; then
+      kill -TERM "$dsh_pid" 2>/dev/null || true
+      wait "$dsh_pid" 2>/dev/null || true
+      dsh_pid=
+      echo '[dsh-supervisor] failed to record DSH process' >&2
+      sleep "$backoff"
+      continue
+    fi
   fi
 
   while process_running "$dsh_pid"; do
@@ -219,7 +277,11 @@ while [ "$stopping" != true ]; do
     start_profile_watcher
     sleep 1
   done
-  if wait "$dsh_pid"; then status=0; else status=$?; fi
+  if [ "$adopted" = true ]; then
+    # 接管来的进程不是本 Shell 的孩子，wait 必然立刻失败；能走到这里就说明它已经退出，
+    # 退出码无从得知，按 0 记账即可 —— 这只影响日志里的一个数字。
+    status=0
+  elif wait "$dsh_pid"; then status=0; else status=$?; fi
   dsh_pid=
   rm -f "$DSH_PID_FILE"
   [ "$stopping" != true ] || break
@@ -234,6 +296,16 @@ while [ "$stopping" != true ]; do
   runtime=$(( $(date +%s) - started_at ))
   if [ "$runtime" -ge 60 ]; then backoff=$DSH_RESTART_DELAY; fi
   echo "[dsh-supervisor] DSH exited with status $status; container remains running, retrying in ${backoff}s" >&2
+  # 端口还被占着就把话说清楚：否则这里只会每 ${backoff} 秒撞一次 EADDRINUSE，而唯一的
+  # 线索是 DSH 自己的 stderr —— 2026-09-10 那次死锁就是这样白白耗掉的。
+  if occupant=$(listening_pid); then
+    owner=$(stat -c %u "/proc/$occupant" 2>/dev/null || true)
+    if [ -z "$DSH_RUN_UID" ] || [ "$owner" = "$DSH_RUN_UID" ]; then
+      echo "[dsh-supervisor] 127.0.0.1:${DSH_WEB_PORT} is already served by pid=$occupant (a DSH of this container); the next round adopts it" >&2
+    else
+      echo "[dsh-supervisor] 127.0.0.1:${DSH_WEB_PORT} is held by pid=$occupant (uid=${owner:-?}, not a DSH of this container); the next DSH cannot bind until it exits — docker restart dsh clears it" >&2
+    fi
+  fi
   sleep "$backoff"
   if [ "$backoff" -lt 30 ]; then
     backoff=$((backoff * 2))

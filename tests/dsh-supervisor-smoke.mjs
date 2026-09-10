@@ -82,6 +82,47 @@ done
 [ -n "$third_dsh" ]
 [ "$third_dsh" != "$second_dsh" ]
 
+# 接管：插件市场"自己重启"留下的那个 DSH 不是 Supervisor 的孩子，但正占着 3081。
+# Supervisor 必须先接管它，而不是再起一个去撞 EADDRINUSE（2026-09-10 的死锁就是没人
+# 接管的结果）；restart-dsh 也要能杀掉接管来的进程，让下一个孩子正常顶上来。
+cat > /tmp/fake-dsh-listener.cjs <<'LISTENER'
+require('net').createServer().listen(3081, '127.0.0.1')
+LISTENER
+setpriv --reuid "$(id -u dsh)" --regid "$(id -g dsh)" --init-groups -- \
+  node /tmp/fake-dsh-listener.cjs &
+listener_job=$!
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+  attempt=$((attempt + 1))
+  sleep 0.1
+  if ss -ltn 2>/dev/null | grep -q '127.0.0.1:3081'; then break; fi
+done
+ss -ltn 2>/dev/null | grep -q '127.0.0.1:3081'
+
+/usr/local/bin/restart-dsh request
+attempt=0
+adopted_dsh=''
+while [ "$attempt" -lt 150 ]; do
+  attempt=$((attempt + 1))
+  sleep 0.1
+  adopted_dsh=$(sed -n '1p' /run/dsh.pid 2>/dev/null || printf '')
+  if [ "$adopted_dsh" = "$listener_job" ]; then break; fi
+done
+[ "$adopted_dsh" = "$listener_job" ]
+/usr/local/bin/restart-dsh check
+
+/usr/local/bin/restart-dsh request
+attempt=0
+fourth_dsh=''
+while [ "$attempt" -lt 150 ]; do
+  attempt=$((attempt + 1))
+  sleep 0.1
+  fourth_dsh=$(sed -n '1p' /run/dsh.pid 2>/dev/null || printf '')
+  if [ -n "$fourth_dsh" ] && [ "$fourth_dsh" != "$listener_job" ]; then break; fi
+done
+[ -n "$fourth_dsh" ]
+[ "$fourth_dsh" != "$listener_job" ]
+
 kill -TERM "$supervisor_pid"
 wait "$supervisor_job"
 printf '%s\n' "$supervisor_pid:$first_dsh:$second_dsh"
@@ -89,7 +130,7 @@ printf '%s\n' "$supervisor_pid:$first_dsh:$second_dsh"
 
 const result = spawnSync('docker', [
   'run', '--rm', '--entrypoint', '/bin/sh', image, '-c', script,
-], { encoding: 'utf8', timeout: 60000 })
+], { encoding: 'utf8', timeout: 120000 })
 
 assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
 assert.match(result.stdout, /^\d+:\d+:\d+$/m)
