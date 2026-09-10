@@ -18,9 +18,19 @@ const visionClientFile = `${root}/node_modules/dsh-vision-router/lib/client.js`
 const visionPermissionFile = `${root}/node_modules/dsh-vision-router/lib/local-remote-settings-permission.js`
 const marketClientFile = `${root}/node_modules/dshmarket/client/client.js`
 const marketHttpFile = `${root}/node_modules/dshmarket/lib/http.js`
+const marketPatchFile = `${root}/node_modules/dshmarket/cordis.patch.yml`
 
 const clientBefore = "const ALL_TOGGLE_KEYS = [...TOGGLE_KEYS, ...ADVANCED_TOGGLE_KEYS, ...LOCAL_TOGGLE_KEYS, ...PRIVACY_TOGGLE_KEYS]"
 const clientAfter = "const ALL_TOGGLE_KEYS = [...TOGGLE_KEYS, ...ADVANCED_TOGGLE_KEYS, ...LOCAL_TOGGLE_KEYS, ...PRIVACY_TOGGLE_KEYS, 'allowRemoteSettings']"
+
+// 市场在「没识别出 supervisor」时给的重启指引是「关闭当前 dsh 进程后重新运行（例如
+// dsh web）」—— 在本容器里这句话本身就是制造故障的命令：手起的 dsh 不是 Supervisor
+// 的孩子，它会占住 3081，而 Supervisor 的孩子每次都撞 EADDRINUSE。改成指向本工程真正
+// 的重启入口。中英两份要么一起改要么都不改，只改一半会让提示自相矛盾。
+const marketRestartHintBefore = 'restartHint: "重启方式：关闭当前 dsh 进程后重新运行（例如 dsh web）"'
+const marketRestartHintAfter = 'restartHint: "重启方式：点设置页里的「重启 DSH」按钮，或在宿主机执行 docker restart dsh"'
+const marketRestartHintEnBefore = 'restartHint: "To restart: stop the current dsh process and run it again (e.g. dsh web)"'
+const marketRestartHintEnAfter = 'restartHint: "To restart: use the Restart DSH button in Settings, or run docker restart dsh on the host"'
 
 const permissionBefore = `      var next = effective;
       var value = effective.value;
@@ -144,6 +154,32 @@ function patchMarketApplicationStatus(source) {
   return replaceExactly(source, before, after)
 }
 
+// 让市场把重启权交出来。它自己的文档写明：被 systemd/launchd/pm2 托管的部署用
+// `allowRestart: false` ——「有 supervisor 负责重启，市场的一键重启就不该再拉起第二个」。
+// 本容器正是被 bin/dsh-supervisor 托管的，而市场那套 systemd 判据在这里不成立（PID 1
+// 是 docker-init、Supervisor 是 PID 7，见 bin/dsh-supervisor 里的说明），所以这条显式
+// 声明才是真正生效的那一个。用户在市场的设置页里仍然可以自己把它打开。
+function patchMarketRestartOwnership(source) {
+  const anchor = source.indexOf('id: dsh-market')
+  if (anchor === -1) return undefined
+  const nameStart = source.indexOf('name:', anchor)
+  if (nameStart === -1) return undefined
+  const nameLineEnd = source.indexOf('\n', nameStart)
+  if (nameLineEnd === -1) return undefined
+  // 这一段里已经有 config 就说明上游换了写法：宁可不补，也不要写出第二个 config 键。
+  const rest = source.slice(nameLineEnd)
+  const nextItem = rest.search(/\n[ ]*- /)
+  if (/\bconfig:/.test(nextItem === -1 ? rest : rest.slice(0, nextItem))) return undefined
+  const indent = source.slice(source.lastIndexOf('\n', nameStart) + 1, nameStart)
+  return `${source.slice(0, nameLineEnd)}\n${indent}config:\n${indent}  allowRestart: false${source.slice(nameLineEnd)}`
+}
+
+function patchMarketRestartHint(source) {
+  const chinese = replaceExactly(source, marketRestartHintBefore, marketRestartHintAfter)
+  if (chinese === undefined) return undefined
+  return replaceExactly(chinese, marketRestartHintEnBefore, marketRestartHintEnAfter)
+}
+
 // 一条补丁的通用执行流程：文件不在就 absent，已经补过就 current，能补就写盘，
 // 认不出形状就 unrecognized。任何一条失败都不阻断其它条，也不阻断 DSH 启动。
 function apply({ id, file, marker, patch, success }) {
@@ -209,6 +245,22 @@ apply({
   marker: 'const responseStatus = status === 502 ? 422 : status;',
   patch: patchMarketApplicationStatus,
   success: 'kept dsh-market application errors out of gateway HTTP 502 responses',
+})
+
+apply({
+  id: 'market-restart-ownership',
+  file: marketPatchFile,
+  marker: 'allowRestart: false',
+  patch: patchMarketRestartOwnership,
+  success: 'told dsh-market the supervisor owns restarts (allowRestart: false)',
+})
+
+apply({
+  id: 'market-restart-hint',
+  file: marketClientFile,
+  marker: marketRestartHintAfter,
+  patch: patchMarketRestartHint,
+  success: 'pointed the dsh-market restart hint at the DSH environment restart button',
 })
 
 writeReport()
