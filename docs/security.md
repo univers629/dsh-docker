@@ -244,7 +244,7 @@ Linux 上还有一条比 `userns-remap` 更强的路径：rootless Docker，整�
 
 ## 其他实现说明
 
-- **内置控制插件**：镜像自带 `dsh-docker-control`，首次启动空 profile 时自动恢复，在设置窗口左侧导航新增“DSH 环境”页。
+- **内置控制插件**：镜像自带 `dsh-docker-control`，首次启动空 profile 时自动恢复，在设置窗口左侧导航新增“DSH 环境”页。插件的权威源放在持久数据目录 `/data/dsh/docker-control`，镜像里的 `/opt/dsh-docker-control` 只当种子（目录不可用、显式要求重播、或镜像换了另一份种子时才播种），每次拉起 DSH 前同步进 profile：**改这个插件只需要改数据目录那份，重启即生效，既不用重建镜像也不用 root**。同步与播种前都比对内容哈希，覆盖掉不一致的副本时会明确告警，并把来源写进 `/run/dsh-state/docker-control-source.json` —— `/info` 的 `plugin` 字段和 `verify-dsh-hardening` 的 `docker-control-source` 项都读它。显式设置 `DSH_DOCKER_CONTROL_SOURCE` 时该路径直接当权威用，数据目录不会被碰。
 - **WebUI 与反代稳定性**：配置编辑器使用独立 portal 与固定高度滚动区域，避免设置页闪烁与输入框高度跳动；`dsh-docker-control` 插件为事件下行链路装上 WebSocket keepalive，降低空闲反代断开导致的 UI 假死。
 - **认证转发语义**：通过公网域名访问时，容器 Nginx 只在请求已通过内置 Basic Auth 或可信外层认证后，才转为 DSH 的内部回环访问。`DSH_TRUSTED_HOSTS` 只校验浏览器 authority，不等同于登录认证，也不会自动打开插件的远程设置写权限。
 - **插件与工具链**：插件安装、会话管理与 MCP 部署所需的 `/data` 写权限已纳入沙箱。apt 安装的软件写入标准 Debian 路径并持久化在容器可写层；Python/Node 工具链分别位于 `/data/home/.local` 与 `/data/home/.npm-global`。镜像故意不设全容器的 `HOME`：否则宿主机上默认以 root 身份进来的 `docker exec` 会继承 `dsh` 的家目录，root 跑过一次 npm/npx 就会在缓存里留下 root 属主的文件，之后 Agent 自己装工具链只会拿到 EACCES。`HOME` 由 Supervisor 显式传给 DSH 子进程；entrypoint 每次启动扫一遍属主并自愈，特权代理另外开了一个免密动作 `fix-perms`（固定路径、只把属主改回运行账户、`chown -Rh` 不跟随符号链接），让 Agent 无需 root 密码即可自救。容器启动时根据实际系统、架构与权限变量渲染 `container-environment` skill。

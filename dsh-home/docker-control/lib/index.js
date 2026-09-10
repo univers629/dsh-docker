@@ -82,6 +82,27 @@ function updateRunning() {
   return updateLaunchPending || updateLockHeld()
 }
 
+// 内置插件自己也可能有三个来源（镜像种子、持久数据目录、显式指定的源），而
+// install-docker-control.mjs 每次启动都会把"这次装进去的是哪一份"写进报告。以前这份
+// 信息根本不存在，"运行中的插件到底是哪一版"只能靠猜；覆盖问题排查全靠它。
+function controlInstallReport() {
+  const report = readJsonFileSync(
+    process.env.DSH_DOCKER_CONTROL_REPORT ?? '/run/dsh-state/docker-control-source.json',
+    {},
+  )
+  const text = (value) => (typeof value === 'string' && value !== '' ? value : 'unknown')
+  return {
+    source: text(report.source),
+    sourceKind: text(report.sourceKind),
+    hash: text(report.sourceHash),
+    bakedHash: text(report.bakedHash),
+    seeded: report.seeded === true,
+    sourceChanged: report.sourceChanged === true,
+    profileTampered: report.profileTampered === true,
+    copiedAt: text(report.generatedAt),
+  }
+}
+
 async function commandVersion(command, args) {
   try {
     const result = await execFileAsync(command, args, { timeout: 5000, windowsHide: true })
@@ -108,6 +129,7 @@ async function dshInfo() {
       pythonVersion: await commandVersion('python3', ['--version']),
     },
     update: updateStatus(),
+    plugin: controlInstallReport(),
     websocketKeepalive: wsKeepalive,
   }
 }

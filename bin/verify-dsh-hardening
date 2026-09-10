@@ -311,6 +311,45 @@ def check_profile_patches():
     record("profile-patches", True, f"{len(patches)} 项插件补丁状态正常：{summary}")
 
 
+def check_docker_control_source():
+    """内置插件真正在跑的是哪一份。
+
+    这个插件曾经只有一个来源（镜像里的 /opt），于是"运行中的插件"永远等于构建镜像
+    那一刻的代码：仓库里后来的修改、或手工放进 profile 的修改，都会在下次启动被静默
+    覆盖。现在权威是持久数据目录，镜像只做种子，覆盖前比对哈希并留下报告。这里把
+    "跑的到底是哪一份、有没有覆盖掉别的东西"报出来，只报 warn：功能照旧，只是改动没生效。
+    """
+    report_path = (
+        os.environ.get("DSH_DOCKER_CONTROL_REPORT") or "/run/dsh-state/docker-control-source.json"
+    )
+    raw = read_text(report_path)
+    if not raw:
+        record_skip("docker-control-source", f"{report_path} 还没生成")
+        return
+    try:
+        report = json.loads(raw)
+    except ValueError:
+        record_warn("docker-control-source", f"{report_path} 不是合法 JSON，无法判断来源")
+        return
+
+    def short(value):
+        return str(value)[:12] if value else "absent"
+
+    summary = (
+        f"源 {report.get('source')}（{report.get('sourceKind')}，{short(report.get('sourceHash'))}）"
+        f"，镜像种子 {short(report.get('bakedHash'))}"
+    )
+    problems = []
+    if report.get("seedReplacedHash"):
+        problems.append(f"镜像换种子时覆盖了数据目录里的 {short(report.get('seedReplacedHash'))}")
+    if report.get("profileTampered"):
+        problems.append("profile 里那份曾被改动，已按源覆盖回来")
+    if problems:
+        record_warn("docker-control-source", f"{summary}；" + "；".join(problems))
+        return
+    record("docker-control-source", True, summary)
+
+
 def check_pid1():
     fields = proc_status(1)
     uid = int(fields["Uid"].split()[0])
@@ -824,6 +863,7 @@ def main():
     check_mounts()
     check_user_tool_dirs()
     check_profile_patches()
+    check_docker_control_source()
     # 旁路服务与 namespace：默认部署（broker off + egress open）下这几项报 skip 或
     # warn，退出码不变，安装器的成败判定仍然只看真正的加固失败。
     check_broker_mount()

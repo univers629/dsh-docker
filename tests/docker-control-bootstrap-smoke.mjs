@@ -8,11 +8,17 @@ const root = mkdtempSync(join(tmpdir(), 'dsh-docker-control-bootstrap-'))
 const profile = join(root, 'profiles', 'web')
 const source = resolve('dsh-home/docker-control')
 const installer = resolve('bin/install-docker-control.mjs')
+// 安装器默认会把来源报告写到 /run/dsh-state；测试必须把这份真实状态挡在临时目录外。
+const isolated = {
+  DSH_DOCKER_CONTROL_REPORT: join(root, 'state', 'docker-control-source.json'),
+  DSH_DOCKER_CONTROL_DATA: join(root, 'data', 'dsh-docker-control'),
+  DSH_DOCKER_CONTROL_SEED_STAMP: join(root, 'data', '.dsh-docker-control-seed.json'),
+}
 
 try {
   const result = spawnSync(process.execPath, [installer], {
     cwd: resolve('.'),
-    env: { ...process.env, DSH_DOCKER_CONTROL_SOURCE: source, DSH_PROFILE_ROOT: profile },
+    env: { ...process.env, ...isolated, DSH_DOCKER_CONTROL_SOURCE: source, DSH_PROFILE_ROOT: profile },
     encoding: 'utf8',
   })
   assert.equal(result.status, 0, result.stderr || result.stdout)
@@ -31,7 +37,7 @@ try {
   const beforeSecondRun = readFileSync(join(profile, 'package.json'), 'utf8')
   const second = spawnSync(process.execPath, [installer], {
     cwd: resolve('.'),
-    env: { ...process.env, DSH_DOCKER_CONTROL_SOURCE: source, DSH_PROFILE_ROOT: profile },
+    env: { ...process.env, ...isolated, DSH_DOCKER_CONTROL_SOURCE: source, DSH_PROFILE_ROOT: profile },
     encoding: 'utf8',
   })
   assert.equal(second.status, 0, second.stderr || second.stdout)
