@@ -527,10 +527,14 @@ export function apply(ctx) {
         sendJson(response, 503, { ok: false, error: '容器内没有 DSH 更新程序 / DSH updater is not installed in this container' })
         return
       }
-      if (typeof process.getuid === 'function' && process.getuid() !== 0) {
-        sendJson(response, 503, { ok: false, error: 'DSH 更新需要容器内 root / DSH updates require container root' })
-        return
-      }
+      // 这里故意**不**要求 root。更新程序 /usr/local/bin/update-dsh 是 bin/dsh-update-shim：
+      // 以 root 调用时直接执行真正的更新脚本，以非 root 调用时转交 /usr/local/bin/dsh-root
+      // —— 特权代理，而 update-dsh 正在它的 allow list 里。与此同时 Supervisor 用
+      // setpriv 把 DSH 降到 dsh 账户启动，所以 DSH 进程恒为 UID 1000：任何
+      // getuid() !== 0 的判断都会恒定命中，让 WebUI 的「更新」按钮永远返回 503，
+      // 更新流程一步都走不到。shim 的注释本身就写着这条链路是为谁准备的
+      // （「WebUI 里的『更新』按钮由非 root 的 DSH 进程触发」），两处本来是一体的。
+      // 真正的边界由上面的 trustedLoopbackRequest 与回环监听负责，与 UID 无关。
       if (updateRunning()) {
         sendJson(response, 409, { ok: false, error: '已有一个 DSH 更新任务正在执行 / a DSH update is already running' })
         return

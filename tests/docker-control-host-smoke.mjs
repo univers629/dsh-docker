@@ -142,7 +142,13 @@ try {
     socket: { remoteAddress: '127.0.0.1' },
     headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
   }, busyUpdate)
-  assert.equal(busyUpdate.status, 409)
+  assert.equal(
+    busyUpdate.status,
+    409,
+    '更新接口必须能从非 root 的 DSH 进程里调用：Supervisor 用 setpriv 把 DSH 降到 dsh 启动，'
+    + '而 /usr/local/bin/update-dsh 这个 shim 本来就设计成非 root 时转交特权代理。'
+    + '这里若变成 503（尤其是“需要容器内 root”那条），说明 root 门槛被加回来了。',
+  )
   await rm(join(testHome, 'update', '.lock'), { recursive: true, force: true })
 
   const configRoute = routes.find(route => route.path.endsWith('/config'))
