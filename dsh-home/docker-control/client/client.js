@@ -950,9 +950,17 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
         }
         tick()
         const timer = window.setInterval(tick, METRICS_POLL_MILLISECONDS)
+        // A hidden tab skips its samples, so re-read the moment it is watched
+        // again: otherwise a sample that failed while the tab was in the
+        // background keeps the card on its failure text.
+        const onVisibilityChange = () => {
+          if (document.visibilityState === 'visible') tick()
+        }
+        document.addEventListener('visibilitychange', onVisibilityChange)
         return () => {
           stopped = true
           window.clearInterval(timer)
+          document.removeEventListener('visibilitychange', onVisibilityChange)
         }
       }, [enabled])
       return state
