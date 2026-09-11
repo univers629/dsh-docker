@@ -27,6 +27,15 @@ window.__ModuleLoader__.load({
 
     const UI_MODE_STORAGE_KEY = 'dsh-docker-control.ui-mode'
     const UI_MODE_STYLE_ID = 'dsh-docker-control-ui-mode'
+    // The container metrics card: a live cpu / memory / network / disk readout
+    // pinned to the empty strip at the bottom of the sidebar, above Settings.
+    const METRICS_PATH = '/dsh-docker-control/metrics'
+    const METRICS_STORAGE_KEY = 'dsh-docker-control.container-metrics'
+    const METRICS_POLL_MILLISECONDS = 2000
+    // 30 samples at the default interval is a one minute window.
+    const METRICS_HISTORY = 30
+    // Below this the rail is the collapsed icon strip and a card cannot fit.
+    const METRICS_MIN_SIDEBAR_WIDTH = 140
     const UI_MODE_CSS = `/* Phone layout: the shipped shell is desktop-first (a fixed 800px settings
    panel with a 188px nav rail, and a sidebar that squeezes the center column).
    These overrides use structural selectors only, because the app's own class
@@ -168,6 +177,19 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay]) > [data-side] {
 html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-collapsed] [data-dsh-mobile-sidebar-toggle] {
   display: inline-flex;
 }
+
+/* --- The container metrics card. It sits in the sidebar's empty bottom strip,
+   directly above the settings entry, and paints only while the rail is
+   expanded: a collapsed rail is a ~56px icon strip with no room for it. As
+   with the drawer opener, the display property is owned here rather than
+   inline, so the measurement in JS and these rules cannot disagree. --- */
+[data-dsh-container-metrics] {
+  display: none;
+}
+
+div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-container-metrics] {
+  display: flex;
+}
 `
 
     function hasDom() {
@@ -253,6 +275,19 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       layoutMobile: '手机 UI',
       layoutHint: '首次访问按浏览器 UA 自动选择；这里的选择只对当前浏览器生效。',
       openSidebar: '展开侧边栏',
+      metricsTitle: '容器监控',
+      metricsToggle: '在侧边栏显示实时监控',
+      metricsHint: '只读取本容器的 cgroup 统计（CPU、内存、网络上下行、磁盘读写），每 2 秒采样一次，画在侧边栏底部、设置按钮上方。关掉后不再显示也不再轮询，开关按浏览器保存。',
+      metricsCpu: 'CPU',
+      metricsMemory: '内存',
+      metricsNet: '网络',
+      metricsDisk: '磁盘',
+      metricsDown: '下行',
+      metricsUp: '上行',
+      metricsRead: '读',
+      metricsWrite: '写',
+      metricsWarming: '正在采样…',
+      metricsUnavailable: '读不到',
       systemTitle: '容器环境',
       updateDsh: '立即更新',
       confirmUpdate: '确认更新 DSH？安装完成后 DSH 进程会重启。',
@@ -303,6 +338,19 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
       layoutMobile: 'Phone UI',
       layoutHint: 'The first visit picks a layout from the browser user agent; this choice applies to this browser only.',
       openSidebar: 'Open the sidebar',
+      metricsTitle: 'Container metrics',
+      metricsToggle: 'Show live metrics in the sidebar',
+      metricsHint: 'Reads only this container\'s cgroup accounting (CPU, memory, network up/down, disk read/write), sampled every 2 seconds into the sidebar strip above the settings entry. Turning it off hides the strip and stops the polling. Stored per browser.',
+      metricsCpu: 'CPU',
+      metricsMemory: 'Memory',
+      metricsNet: 'Network',
+      metricsDisk: 'Disk',
+      metricsDown: 'down',
+      metricsUp: 'up',
+      metricsRead: 'read',
+      metricsWrite: 'write',
+      metricsWarming: 'Sampling…',
+      metricsUnavailable: 'unavailable',
       systemTitle: 'Container environment',
       updateDsh: 'Update now',
       confirmUpdate: 'Update DSH? The DSH process restarts once the install completes.',
@@ -784,11 +832,396 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
             h('dd', { key: 'pv', style: fieldValueStyle }, info?.system?.pythonVersion || '-'),
           ),
         ),
+        h('section', { style: cardStyle },
+          h('h3', { style: cardTitleStyle }, translate(t, 'metricsTitle')),
+          h(MetricsSwitch, { t }),
+          h('p', { style: hintStyle }, translate(t, 'metricsHint')),
+        ),
       )
     }
 
     function SafeDshEnvironmentSection(props) {
       return h(RestartActionBoundary, null, h(DshEnvironmentSection, props))
+    }
+
+    // --- Container metrics ---------------------------------------------------
+    // The switch lives on the DSH environment page, but the card is painted by
+    // the shell overlay seat, so the preference is shared through this tiny
+    // store instead of through component props.
+    const metricsListeners = new Set()
+
+    function metricsEnabled() {
+      try {
+        return window.localStorage.getItem(METRICS_STORAGE_KEY) !== 'off'
+      } catch {
+        return true
+      }
+    }
+
+    function storeMetricsEnabled(enabled) {
+      try {
+        window.localStorage.setItem(METRICS_STORAGE_KEY, enabled ? 'on' : 'off')
+      } catch {}
+      for (const listener of metricsListeners) {
+        try {
+          listener(enabled)
+        } catch {}
+      }
+      return enabled
+    }
+
+    function useMetricsEnabled() {
+      const [enabled, setEnabled] = React.useState(metricsEnabled)
+      React.useEffect(() => {
+        metricsListeners.add(setEnabled)
+        // Another tab may have flipped it while this one sat idle.
+        setEnabled(metricsEnabled())
+        return () => { metricsListeners.delete(setEnabled) }
+      }, [])
+      return [enabled, storeMetricsEnabled]
+    }
+
+    function formatAmount(bytes) {
+      if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return '—'
+      const units = ['B', 'K', 'M', 'G', 'T']
+      let value = Math.abs(bytes)
+      let unit = 0
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024
+        unit += 1
+      }
+      return `${value.toFixed(unit === 0 || value >= 100 ? 0 : 1)}${units[unit]}`
+    }
+
+    function formatPerSecond(bytesPerSecond) {
+      if (typeof bytesPerSecond !== 'number' || !Number.isFinite(bytesPerSecond)) return '—'
+      return `${formatAmount(bytesPerSecond)}/s`
+    }
+    function formatPercent(percent) {
+      if (typeof percent !== 'number' || !Number.isFinite(percent)) return '—'
+      return `${percent >= 10 ? Math.round(percent) : percent.toFixed(1)}%`
+    }
+
+    // One sample per poll, oldest first, so the sparkline scrolls away.
+    function pushSample(values, value) {
+      const next = values.slice(-(METRICS_HISTORY - 1))
+      const usable = typeof value === 'number' && Number.isFinite(value)
+      next.push(usable ? value : values.length > 0 ? values[values.length - 1] : 0)
+      return next
+    }
+
+    function useContainerMetrics(enabled) {
+      const [state, setState] = React.useState({
+        data: null,
+        failed: false,
+        history: { cpu: [], memory: [], rx: [], tx: [], read: [], write: [] },
+      })
+      React.useEffect(() => {
+        if (!enabled) return undefined
+        let stopped = false
+        const tick = async () => {
+          // A hidden tab is not being watched: skip the sample rather than
+          // filling the window with a flat line.
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+          try {
+            const response = await fetch(METRICS_PATH, { cache: 'no-store', credentials: 'same-origin' })
+            const body = await readJson(response)
+            if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
+            if (stopped) return
+            setState(before => ({
+              data: body,
+              failed: false,
+              history: {
+                cpu: pushSample(before.history.cpu, body.cpu && body.cpu.percent),
+                memory: pushSample(before.history.memory, body.memory && body.memory.usedBytes),
+                // One series per direction: the network and disk quadrants
+                // draw both lines, not a single summed one.
+                rx: pushSample(before.history.rx, body.network && body.network.rxBytesPerSec),
+                tx: pushSample(before.history.tx, body.network && body.network.txBytesPerSec),
+                read: pushSample(before.history.read, body.disk && body.disk.readBytesPerSec),
+                write: pushSample(before.history.write, body.disk && body.disk.writeBytesPerSec),
+              },
+            }))
+          } catch (error) {
+            if (stopped) return
+            console.warn('[dsh-docker-control] metrics sample failed:', describeError(error))
+            setState(before => ({ ...before, failed: true }))
+          }
+        }
+        tick()
+        const timer = window.setInterval(tick, METRICS_POLL_MILLISECONDS)
+        return () => {
+          stopped = true
+          window.clearInterval(timer)
+        }
+      }, [enabled])
+      return state
+    }
+
+    /**
+     * Where the card belongs: the sidebar column's empty bottom strip, just
+     * above the settings entry. The frame, the rail and that entry are found
+     * structurally, because the app's own class names are CSS-module hashes —
+     * the same reason the stylesheet only uses structural selectors.
+     */
+    function metricsGeometry() {
+      if (!hasDom()) return null
+      // The settings panel is a modal dialog (the same structural marker the
+      // stylesheet uses). On a phone it opens from the drawer while the drawer
+      // itself stays mounted, so the card steps aside instead of floating over
+      // the panel it is configured on.
+      if (document.querySelector('div[role="dialog"][aria-modal="true"]') !== null) return null
+      const frame = document.querySelector('div:has(> [data-shell-overlay])')
+      if (frame === null || frame.hasAttribute('data-sidebar-collapsed')) return null
+      const sidebar = frame.firstElementChild
+      if (sidebar === null || sidebar === undefined) return null
+      const rect = sidebar.getBoundingClientRect()
+      if (rect.width < METRICS_MIN_SIDEBAR_WIDTH || !(rect.height > 0)) return null
+      const rail = sidebar.firstElementChild === null ? null : sidebar.firstElementChild.firstElementChild
+      const settingsRow = rail === null ? null : rail.lastElementChild
+      const settingsRect = settingsRow === null ? null : settingsRow.getBoundingClientRect()
+      // A wider side inset than the vertical one: the card is as wide as the
+      // rail allows, and hugging the rail's borders looked cramped.
+      const insetX = 16
+      const insetY = 8
+      return {
+        left: Math.round(rect.left + insetX),
+        width: Math.round(rect.width - insetX * 2),
+        // Fall back to the rail's own bottom edge when the settings entry
+        // cannot be measured: a fixed strip above the bottom is still correct.
+        bottom: settingsRect !== null && settingsRect.height > 0
+          ? Math.round(window.innerHeight - settingsRect.top + insetY)
+          : Math.round(window.innerHeight - rect.bottom + 64),
+      }
+    }
+
+    function useMetricsGeometry() {
+      const [geometry, setGeometry] = React.useState(metricsGeometry)
+      React.useEffect(() => {
+        let handle = 0
+        let stopped = false
+        const measure = () => {
+          handle = 0
+          if (stopped) return
+          const next = metricsGeometry()
+          setGeometry(before => {
+            const same = before === null || next === null
+              ? before === next
+              : before.left === next.left && before.width === next.width && before.bottom === next.bottom
+            return same ? before : next
+          })
+        }
+        const schedule = () => { if (handle === 0) handle = window.requestAnimationFrame(measure) }
+        schedule()
+        window.addEventListener('resize', schedule)
+        // The drawer opens and closes without a resize event, so the geometry
+        // is re-read on a slow timer too. It is one rect read per second.
+        const timer = window.setInterval(schedule, 1000)
+        return () => {
+          stopped = true
+          window.removeEventListener('resize', schedule)
+          window.clearInterval(timer)
+          if (handle !== 0) window.cancelAnimationFrame(handle)
+        }
+      }, [])
+      return geometry
+    }
+
+    // A quadrant may carry one line (cpu, memory) or two (network: down and
+    // up; disk: read and write). Both lines share one scale so they stay
+    // comparable, and the SVG stretches to the cell so it can never run under
+    // the numbers next to it.
+    function MetricsSparkline({ series, height = 18 }) {
+      const width = 56
+      const max = series.reduce((top, line) => line.values.reduce((inner, value) => (value > inner ? value : inner), top), 0)
+      const scale = max > 0 ? max : 1
+      const step = line => (line.values.length > 1 ? width / (line.values.length - 1) : width)
+      const points = line => line.values.map((value, index) => {
+        const y = height - 1.5 - (value / scale) * (height - 3)
+        return `${(index * step(line)).toFixed(1)},${Math.min(height - 1, Math.max(1, y)).toFixed(1)}`
+      }).join(' ')
+      return h('svg', {
+        width: '100%',
+        height,
+        viewBox: `0 0 ${width} ${height}`,
+        preserveAspectRatio: 'none',
+        'aria-hidden': 'true',
+        style: { display: 'block', width: '100%', height: `${height}px`, flex: 'none', overflow: 'hidden' },
+      }, series.map((line, index) => (line.values.length > 1
+        ? h('polyline', {
+          key: index,
+          points: points(line),
+          fill: 'none',
+          stroke: line.color,
+          strokeWidth: 1.4,
+          strokeLinejoin: 'round',
+          strokeLinecap: 'round',
+        })
+        : null)))
+    }
+
+    // One cell of the 2x2 grid: label and current value on the first line, the
+    // second direction's value (when there is one) on the second, chart below.
+    function MetricsQuadrant({ label, primary, secondary, series }) {
+      const labelStyle = { fontSize: '10px', lineHeight: '14px', color: 'var(--dsw-alias-label-secondary, #6b7280)', flex: 'none' }
+      const valueStyle = {
+        fontSize: '11.5px',
+        lineHeight: '14px',
+        whiteSpace: 'nowrap',
+        fontVariantNumeric: 'tabular-nums',
+        color: 'var(--dsw-alias-label-primary, #111827)',
+      }
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 } },
+        h('div', { style: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '6px', minWidth: 0 } },
+          h('span', { style: labelStyle }, label),
+          h('span', { style: valueStyle }, primary)),
+        // Reserved even when empty, so the charts of all four cells line up.
+        h('div', { style: { display: 'flex', justifyContent: 'flex-end', minHeight: '14px', minWidth: 0 } },
+          secondary === null || secondary === undefined ? null : h('span', { style: valueStyle }, secondary)),
+        h(MetricsSparkline, { series }),
+      )
+    }
+
+    function ContainerMetrics({ t }) {
+      const [enabled] = useMetricsEnabled()
+      const geometry = useMetricsGeometry()
+      const metrics = useContainerMetrics(enabled)
+      if (!enabled || geometry === null) return null
+      const data = metrics.data
+      const cpu = data === null ? {} : data.cpu
+      const memory = data === null ? {} : data.memory
+      const network = data === null ? {} : data.network
+      const disk = data === null ? {} : data.disk
+      const memoryValue = typeof memory.percent === 'number' && Number.isFinite(memory.percent)
+        ? formatPercent(memory.percent)
+        : formatAmount(memory.usedBytes)
+      const status = metrics.failed
+        ? translate(t, 'metricsUnavailable')
+        : data === null ? translate(t, 'metricsWarming') : null
+      return h('div', {
+        'data-dsh-container-metrics': '',
+        'aria-hidden': 'true',
+        style: {
+          position: 'fixed',
+          left: `${geometry.left}px`,
+          bottom: `${geometry.bottom}px`,
+          width: `${geometry.width}px`,
+          zIndex: 13,
+          // Purely a readout: never swallow a click meant for the workspace
+          // list that scrolls behind it.
+          pointerEvents: 'none',
+          flexDirection: 'column',
+          gap: '6px',
+          padding: '8px 10px',
+          boxSizing: 'border-box',
+          borderRadius: '12px',
+          border: '1px solid var(--dsw-alias-border-l2, #d9dde3)',
+          background: 'var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, .94))',
+          boxShadow: 'var(--dsw-shadow-lv2, 0 4px 16px rgba(0, 0, 0, .12))',
+          backdropFilter: 'blur(6px)',
+        },
+      },
+        h('div', {
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '8px',
+            fontSize: '11px',
+            lineHeight: '14px',
+            color: 'var(--dsw-alias-label-secondary, #6b7280)',
+          },
+        },
+          h('span', null, translate(t, 'metricsTitle')),
+          status === null ? null : h('span', null, status)),
+        h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: '12px', rowGap: '10px' } },
+          h(MetricsQuadrant, {
+            label: translate(t, 'metricsCpu'),
+            primary: data === null ? '—' : formatPercent(cpu.percent),
+            series: [{ values: metrics.history.cpu, color: '#2f6feb' }],
+          }),
+          h(MetricsQuadrant, {
+            label: translate(t, 'metricsMemory'),
+            primary: data === null ? '—' : memoryValue,
+            series: [{ values: metrics.history.memory, color: '#8b5cf6' }],
+          }),
+          h(MetricsQuadrant, {
+            label: translate(t, 'metricsNet'),
+            primary: data === null ? '—' : `↓${formatPerSecond(network.rxBytesPerSec)}`,
+            secondary: data === null ? null : `↑${formatPerSecond(network.txBytesPerSec)}`,
+            series: [
+              { values: metrics.history.rx, color: '#10b981' },
+              { values: metrics.history.tx, color: '#0d9488' },
+            ],
+          }),
+          h(MetricsQuadrant, {
+            label: translate(t, 'metricsDisk'),
+            primary: data === null ? '—' : `${translate(t, 'metricsRead')} ${formatPerSecond(disk.readBytesPerSec)}`,
+            secondary: data === null ? null : `${translate(t, 'metricsWrite')} ${formatPerSecond(disk.writeBytesPerSec)}`,
+            series: [
+              { values: metrics.history.read, color: '#f59e0b' },
+              { values: metrics.history.write, color: '#ea580c' },
+            ],
+          }),
+        ),
+      )
+    }
+
+    function SafeContainerMetrics(props) {
+      return h(RestartActionBoundary, null, h(ContainerMetrics, props))
+    }
+
+    function MetricsSwitch({ t }) {
+      const [enabled, setEnabled] = useMetricsEnabled()
+      const label = translate(t, 'metricsToggle')
+      return h('button', {
+        type: 'button',
+        role: 'switch',
+        'aria-checked': enabled ? 'true' : 'false',
+        title: label,
+        onClick: () => { setEnabled(!enabled) },
+        style: {
+          display: 'inline-flex',
+          alignItems: 'center',
+          alignSelf: 'flex-start',
+          gap: '10px',
+          margin: 0,
+          padding: '6px 14px 6px 6px',
+          borderRadius: '999px',
+          border: '1px solid var(--dsw-alias-border-l2, #d9dde3)',
+          background: enabled ? 'var(--dsw-alias-bg-layer-1, #f5f6f8)' : 'transparent',
+          color: 'var(--dsw-alias-label-primary, #111827)',
+          font: 'inherit',
+          fontSize: '13px',
+          lineHeight: '20px',
+          cursor: 'pointer',
+        },
+      },
+        h('span', {
+          style: {
+            flex: 'none',
+            position: 'relative',
+            width: '34px',
+            height: '20px',
+            borderRadius: '999px',
+            background: enabled ? '#2f6feb' : 'var(--dsw-alias-border-inverted, #c9ced6)',
+            transition: 'background .15s ease',
+          },
+        }, h('span', {
+          style: {
+            position: 'absolute',
+            top: '2px',
+            left: enabled ? '16px' : '2px',
+            width: '16px',
+            height: '16px',
+            borderRadius: '50%',
+            background: '#fff',
+            boxShadow: '0 1px 2px rgba(0, 0, 0, .3)',
+            transition: 'left .15s ease',
+          },
+        })),
+        h('span', null, label),
+      )
     }
 
     // Phone layout only (the stylesheet owns that gate): the drawer replaced
@@ -1072,6 +1505,16 @@ html[data-dsh-ui-mode="mobile"] div:has(> [data-shell-overlay])[data-sidebar-col
           order: 0,
           locale: NS,
         }, SafeMobileSidebarToggle))
+
+        // The metrics card rides that same overlay seat: it is positioned
+        // against the sidebar column and paints only while the rail is
+        // expanded, which is the one place the shell leaves empty.
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: 'dsh-docker-control-container-metrics',
+          order: 1,
+          locale: NS,
+        }, SafeContainerMetrics))
       } catch (error) {
         fail('load', error)
       }

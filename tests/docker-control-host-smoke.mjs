@@ -40,6 +40,7 @@ try {
 
   assert.deepEqual(routes.map(route => route.path), [
     '/dsh-docker-control/info',
+    '/dsh-docker-control/metrics',
     '/dsh-docker-control/update/status',
     '/dsh-docker-control/update/latest',
     '/dsh-docker-control/update',

@@ -5,6 +5,7 @@ import { createRequire } from 'node:module'
 import { join, basename } from 'node:path'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
+import { containerMetrics } from './metrics.js'
 
 export const name = 'dsh-docker-control'
 export const inject = ['webServer']
@@ -413,6 +414,12 @@ function queueConfigWrite(task) {
   return result
 }
 
+// Reads are gated on the loopback peer plus a matching origin/host pair. A
+// browser omits Origin on a same-origin GET or HEAD, so for those two methods
+// an absent Origin is accepted — otherwise every read endpoint in the UI
+// answers 403 to the very page it belongs to. Nothing is loosened for writes:
+// a browser always sends Origin on a cross-site POST, so state-changing
+// requests still have to prove where they came from.
 function trustedLoopbackRequest(request) {
   const address = request.socket.remoteAddress
   if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false
@@ -421,7 +428,8 @@ function trustedLoopbackRequest(request) {
     || request.headers['x-real-ip'] !== undefined) return false
   const origin = request.headers.origin
   const host = request.headers.host
-  if (origin === undefined || host === undefined) return false
+  if (host === undefined) return false
+  if (origin === undefined) return request.method === 'GET' || request.method === 'HEAD'
   try {
     const parsed = new URL(origin)
     return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.host === host
@@ -488,6 +496,26 @@ export function apply(ctx) {
       }
       try {
         sendJson(response, 200, await dshInfo())
+      } catch (error) {
+        sendJson(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  })
+  webServer.register({
+    kind: 'exact',
+    path: '/dsh-docker-control/metrics',
+    handler: (request, response) => {
+      if (request.method !== 'GET') {
+        response.writeHead(405, { allow: 'GET' })
+        response.end()
+        return
+      }
+      if (!trustedLoopbackRequest(request)) {
+        sendJson(response, 403, { ok: false, error: '容器监控仅允许已认证的回环请求 / container metrics require an authenticated loopback request' })
+        return
+      }
+      try {
+        sendJson(response, 200, containerMetrics())
       } catch (error) {
         sendJson(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
       }
