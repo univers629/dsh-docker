@@ -5,7 +5,7 @@
 // and /proc/net/dev cannot be rewritten in place. The clock is injected, so
 // the rate assertions are exact and the test never sleeps.
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -196,6 +196,47 @@ try {
   delete bareWrite.headers.origin
   await restartHandler(bareWrite, noOriginWrite)
   assert.equal(noOriginWrite.captured.status, 403, '不带 Origin 的写请求仍然要拒')
+
+  // 8. nginx 只把固定白名单里的插件路径改写成回环请求，而老镜像的白名单里没有
+  // /metrics。侧边栏卡片因此借已放行的 /info?metrics=1 取同一份快照。
+  const infoHandler = routes.get('/dsh-docker-control/info')
+  assert.equal(typeof infoHandler, 'function', '插件必须注册 /dsh-docker-control/info')
+  const infoUrl = (query = '') => ({ ...makeRequest('GET'), url: `/dsh-docker-control/info${query}` })
+
+  const snapshotResponse = makeResponse()
+  await infoHandler(infoUrl('?metrics=1'), snapshotResponse)
+  assert.equal(snapshotResponse.captured.status, 200)
+  const snapshot = JSON.parse(snapshotResponse.captured.body)
+  assert.equal(snapshot.ok, true)
+  assert.equal(typeof snapshot.cpu, 'object', '带 metrics 查询的 /info 必须返回容器快照')
+  assert.equal(typeof snapshot.network, 'object')
+  assert.equal(snapshot.dsh, undefined, '快照请求不再读版本元数据')
+
+  const versionResponse = makeResponse()
+  await infoHandler(infoUrl(), versionResponse)
+  assert.equal(versionResponse.captured.status, 200)
+  const versionInfo = JSON.parse(versionResponse.captured.body)
+  assert.equal(typeof versionInfo.dsh, 'object', '不带查询参数的 /info 仍然是版本信息')
+  assert.equal(versionInfo.cpu, undefined)
+
+  const unrelatedQuery = makeResponse()
+  await infoHandler(infoUrl('?foo=1'), unrelatedQuery)
+  assert.equal(unrelatedQuery.captured.status, 200)
+  assert.equal(JSON.parse(unrelatedQuery.captured.body).cpu, undefined, '只认 metrics 这一个键')
+
+  const refusedSnapshot = makeResponse()
+  await infoHandler({ ...infoUrl('?metrics=1'), headers: { origin: 'http://evil.example', host: '127.0.0.1:3081' } }, refusedSnapshot)
+  assert.equal(refusedSnapshot.captured.status, 403, '快照走的是同一道回环鉴权')
+
+  // 9. 白名单必须覆盖浏览器要用的每一条插件路径，否则它会被 location / 带着
+  // X-Forwarded-For 转发，插件按设计拒掉。
+  const nginxConfig = readFileSync(new URL('../nginx/dsh-nginx.conf', import.meta.url), 'utf8')
+  const whitelist = nginxConfig.match(/location ~ \^\/dsh-docker-control\/\(([^)]+)\)\$/)
+  assert.notEqual(whitelist, null, 'nginx 配置里要能解析出插件路径白名单')
+  const listed = whitelist[1].split('|')
+  for (const path of ['info', 'metrics', 'update', 'update/status', 'update/latest']) {
+    assert.ok(listed.includes(path), `nginx 白名单必须包含 ${path}`)
+  }
 
   for (const off of offs) off()
   process.stdout.write('container metrics smoke: ok\n')

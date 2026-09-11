@@ -30,6 +30,11 @@ window.__ModuleLoader__.load({
     // The container metrics card: a live cpu / memory / network / disk readout
     // pinned to the empty strip at the bottom of the sidebar, above Settings.
     const METRICS_PATH = '/dsh-docker-control/metrics'
+    // nginx 只把固定白名单里的插件路径改写成回环请求，老镜像的白名单里没有
+    // /metrics，但 /info 在。第一次采样若被拒就改用这条已放行的路径，并记住
+    // 结果，之后不再重试第一条，免得每 2 秒多打一次 403。
+    const METRICS_FALLBACK_PATH = '/dsh-docker-control/info?metrics=1'
+    let metricsPath = METRICS_PATH
     const METRICS_STORAGE_KEY = 'dsh-docker-control.container-metrics'
     const METRICS_POLL_MILLISECONDS = 2000
     // 30 samples at the default interval is a one minute window.
@@ -910,6 +915,25 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
       return next
     }
 
+    // 一次采样。第一条路径被 Web 层拒掉时改用白名单里的那条，并把选择记在
+    // 会话里：能直接答 /metrics 的部署不会为此多付一次探测请求。
+    async function sampleMetrics() {
+      const read = async path => {
+        const response = await fetch(path, { cache: 'no-store', credentials: 'same-origin' })
+        const body = await readJson(response)
+        if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
+        return body
+      }
+      if (metricsPath === METRICS_FALLBACK_PATH) return read(metricsPath)
+      try {
+        return await read(METRICS_PATH)
+      } catch (error) {
+        metricsPath = METRICS_FALLBACK_PATH
+        console.info('[dsh-docker-control] metrics route refused, using the whitelisted path instead:', describeError(error))
+        return read(METRICS_FALLBACK_PATH)
+      }
+    }
+
     function useContainerMetrics(enabled) {
       const [state, setState] = React.useState({
         data: null,
@@ -924,9 +948,7 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
           // filling the window with a flat line.
           if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
           try {
-            const response = await fetch(METRICS_PATH, { cache: 'no-store', credentials: 'same-origin' })
-            const body = await readJson(response)
-            if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
+            const body = await sampleMetrics()
             if (stopped) return
             setState(before => ({
               data: body,

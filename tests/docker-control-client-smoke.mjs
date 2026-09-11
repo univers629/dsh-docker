@@ -169,8 +169,17 @@ assert.equal(appended[0].textContent.includes('[data-shell-overlay]'), true)
 assert.equal(appended[0].textContent.includes('[data-sidebar-collapsed] > :first-child {\n  border-right: none;'), true)
 assert.equal(appended[0].textContent.includes('[data-dsh-mobile-sidebar-toggle] {\n  display: none;'), true)
 
-assert.deepEqual(injected, ['settings.action', 'settings.action', 'settings.section', 'shell.overlay'])
-assert.equal(slots.length, 4)
+assert.deepEqual(injected, ['settings.action', 'settings.action', 'settings.section', 'shell.overlay', 'shell.overlay'])
+assert.equal(slots.length, 5)
+// The container metrics card rides the overlay seat as well: there is no
+// left-sidebar slot, so it positions itself with the same geometry helpers.
+const metricsSlot = slots.find(({ options }) => options.id === 'dsh-docker-control-container-metrics')
+assert.deepEqual(JSON.parse(JSON.stringify(metricsSlot.options)), {
+  name: 'shell.overlay',
+  id: 'dsh-docker-control-container-metrics',
+  order: 1,
+  locale: 'dsh-docker-control',
+})
 const configSlot = slots.find(({ options }) => options.id === 'open-document')
 const restartSlot = slots.find(({ options }) => options.id === 'dsh-docker-control-restart')
 const sectionSlot = slots.find(({ options }) => options.id === 'dsh-environment')

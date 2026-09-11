@@ -420,6 +420,19 @@ function queueConfigWrite(task) {
 // answers 403 to the very page it belongs to. Nothing is loosened for writes:
 // a browser always sends Origin on a cross-site POST, so state-changing
 // requests still have to prove where they came from.
+const METRICS_QUERY_VALUES = new Set(['', '1', 'true', 'yes', 'on'])
+
+// /info?metrics=1 返回容器快照而不是版本元数据，供走 nginx 白名单的浏览器调用。
+// 只认 metrics 这一个键，避免 /info?foo=1 之类被误当成快照请求。
+function asksForMetrics(request) {
+  if (typeof request.url !== 'string') return false
+  const query = request.url.indexOf('?')
+  if (query < 0) return false
+  const value = new URLSearchParams(request.url.slice(query + 1)).get('metrics')
+  if (value === null) return false
+  return METRICS_QUERY_VALUES.has(value.toLowerCase())
+}
+
 function trustedLoopbackRequest(request) {
   const address = request.socket.remoteAddress
   if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false
@@ -495,6 +508,13 @@ export function apply(ctx) {
         return
       }
       try {
+        // nginx 只把固定白名单里的插件路径改写成回环请求，老镜像的白名单里
+        // 没有 /metrics，而 /info 在白名单里。侧边栏监控卡就借这条已放行的
+        // 路径取同一份快照；命令行与回环调用仍然直接用 /metrics。
+        if (asksForMetrics(request)) {
+          sendJson(response, 200, containerMetrics())
+          return
+        }
         sendJson(response, 200, await dshInfo())
       } catch (error) {
         sendJson(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
