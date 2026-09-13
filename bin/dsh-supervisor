@@ -306,6 +306,16 @@ while [ "$stopping" != true ]; do
       echo "[dsh-supervisor] 127.0.0.1:${DSH_WEB_PORT} is held by pid=$occupant (uid=${owner:-?}, not a DSH of this container); the next DSH cannot bind until it exits — docker restart dsh clears it" >&2
     fi
   fi
+  # DSH 死得太快、而它自己的端口又没人占，说明它多半是去抢别的端口了。Nginx 的对外
+  # 端口（3080）是最常见的目标：`--port 3080` 的优先级高于 DSH_WEB_PORT，DSH 一绑就
+  # EADDRINUSE 起不来，Nginx 没有上游，页面持续 502，而上面那段只检查 DSH 自己的端口，
+  # 永远看不到这个冲突。这里单独看一眼 3080，把真凶说清楚，省掉一轮盲猜。
+  if [ "$runtime" -lt 5 ]; then
+    nginx_port_hex=$(printf '%04X' "${DSH_NGINX_PORT:-3080}")
+    if awk -v want=":${nginx_port_hex}" '$4 == "0A" && index($2, want) > 0 { found=1 } END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+      echo "[dsh-supervisor] 提示：Nginx 的对外端口 ${DSH_NGINX_PORT:-3080} 正在被监听。若 DSH 的报错是该端口的 EADDRINUSE，说明它的启动参数里带了 --port；/usr/local/bin/dsh 会摘掉这个选项并强制用 DSH_WEB_PORT=${DSH_WEB_PORT}" >&2
+    fi
+  fi
   sleep "$backoff"
   if [ "$backoff" -lt 30 ]; then
     backoff=$((backoff * 2))

@@ -2,4 +2,47 @@
 set -eu
 DSH_APP_DIR=${DSH_APP_DIR:-/app/dsh}
 DSH_NPM_PACKAGE=${DSH_NPM_PACKAGE:-@deepseek-ai/dsh}
-exec node "$DSH_APP_DIR/lib/node_modules/$DSH_NPM_PACKAGE/lib/bin.js" "$@"
+DSH_WEB_PORT=${DSH_WEB_PORT:-3081}
+
+# 监听端口必须由容器配置说了算，不能被命令行改掉。
+#
+# `--port` 的优先级高于 DSH_WEB_PORT（见 dsh-web-app 的 startup 与
+# dsh-home/cordis.patch.yml），而 3080 是 Nginx 的对外端口。DSH 一旦被指到 3080
+# 就会 EADDRINUSE 起不来，Nginx 没有上游，页面持续 502。这个覆盖是持久的，重启容器
+# 也治不好，而三套存活检测都只盯 3081，发现不了真凶，所以必须在入口这里拦住。
+#
+# 处理方式是「记录 + 覆盖」而不是静默丢弃：端口改不动，但把原始参数写进日志，谁试过
+# 改端口就有据可查。
+#
+# 实现上逐个参数决定去留，边遍历边 shift，把保留下来的重新追加到参数表尾部；全程只用
+# "$@"，不拼接字符串，含空格的参数（如 --trusted-host "a b"）才不会被切碎。
+stripped=
+expect_value=0
+for argument in "$@"; do
+  case "$argument" in
+    --port|--host)
+      # 拆开写法：选项本身和它后面那个值都要吃掉。
+      stripped="${stripped}${stripped:+ }${argument}"
+      expect_value=1
+      ;;
+    --port=*|--host=*)
+      # 合并写法：一个参数就带上了值。
+      stripped="${stripped}${stripped:+ }${argument}"
+      ;;
+    *)
+      if [ "$expect_value" = 1 ]; then
+        expect_value=0
+        stripped="${stripped}${stripped:+ }${argument}"
+      else
+        set -- "$@" "$argument"
+      fi
+      ;;
+  esac
+  shift
+done
+
+if [ -n "$stripped" ]; then
+  echo "[dsh] 已忽略启动参数里的监听选项（$stripped）：端口固定为 DSH_WEB_PORT=$DSH_WEB_PORT，3080 属于 Nginx" >&2
+fi
+
+exec node "$DSH_APP_DIR/lib/node_modules/$DSH_NPM_PACKAGE/lib/bin.js" "$@" --port "$DSH_WEB_PORT"
