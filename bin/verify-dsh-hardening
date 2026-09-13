@@ -767,12 +767,17 @@ def check_dsh_process_env():
 
 
 def check_egress():
-    if EGRESS_MODE != "allowlist":
+    # 隔离形态以 DSH_EGRESS_PROXY_URL 为准，不能只看 DSH_EGRESS_MODE：blocklist 与
+    # allowlist 是同一套隔离形态，entrypoint 也只按 PROXY_URL 决定写不写 apt.conf。
+    # 旧实现只在 allowlist 时才认为隔离，于是 blocklist 部署会跳过两条真探测，而且
+    # 当 MODE=open 与 PROXY_URL 同时存在（两者自相矛盾）时会误判 apt.conf 是残留。
+    isolated = EGRESS_MODE in ("allowlist", "blocklist") or bool(EGRESS_PROXY_URL)
+    if not isolated:
         record_skip(
             "egress-direct-blocked",
-            f"DSH_EGRESS_MODE={EGRESS_MODE or 'open'}：未启用出站白名单，容器可以直接出网，本项不适用",
+            f"DSH_EGRESS_MODE={EGRESS_MODE or 'open'}：未启用出站隔离，容器可以直接出网，本项不适用",
         )
-        record_skip("egress-proxy-allowed", "未启用出站白名单：没有 dsh-egress 可探")
+        record_skip("egress-proxy-allowed", "未启用出站隔离：没有 dsh-egress 可探")
         # open 模式下这份文件必须已经被 entrypoint 回收掉，否则 apt 会一直去连一个
         # 不存在的代理——这是真故障，所以它是 open 模式下唯一可能报失败的出站项。
         if "dsh-egress" in read_text(APT_PROXY_CONF):
@@ -784,7 +789,7 @@ def check_egress():
         else:
             record_skip(
                 "egress-apt-proxy",
-                f"未启用出站白名单：{APT_PROXY_CONF} 没有指向 dsh-egress，符合预期",
+                f"未启用出站隔离：{APT_PROXY_CONF} 没有指向 dsh-egress，符合预期",
             )
         return
 

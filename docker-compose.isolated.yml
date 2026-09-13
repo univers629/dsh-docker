@@ -48,6 +48,11 @@ services:
       # entrypoint 用它渲染 apt.conf / pip.conf / npmrc / git 的代理配置：这些工具
       # 的环境变量支持都不完整，apt 更是在特权代理里被清过环境。
       DSH_EGRESS_PROXY_URL: "http://dsh-egress:3128"
+      # 本叠加文件只在隔离部署里出现，所以模式不能沿用基础文件的 `:-open` 默认值：
+      # 那会造出「PROXY_URL 有值、MODE=open」的自相矛盾组合，entrypoint 据此写 apt
+      # 代理配置，而自检又按 open 判定这份文件是残留，隔离部署必然误报失败。
+      # 以 data/egress/policy.json 为准；它缺失时退回 allowlist（本文件的原始语义）。
+      DSH_EGRESS_MODE: "${DSH_EGRESS_MODE:-allowlist}"
 
   # 出站白名单正向代理：容器里唯一的出网通道。
   dsh-egress:

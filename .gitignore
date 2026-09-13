@@ -26,6 +26,9 @@ build/
 # only covers the project directory, so they cannot live in the system temp dir.
 /.tmp/
 
+# Runtime caches written by DSH plugins into the project directory.
+.dsh-vision-router/
+
 # Python leftovers. The image ships python3 and uv, and host-side experiments
 # with them drop these next to the sources.
 __pycache__/
