@@ -14,35 +14,71 @@ DSH_WEB_PORT=${DSH_WEB_PORT:-3081}
 # 处理方式是「记录 + 覆盖」而不是静默丢弃：端口改不动，但把原始参数写进日志，谁试过
 # 改端口就有据可查。
 #
+# 关键：只有真正启动 web 服务时才认识 --port。它是 web app 自己的选项（见
+# dsh-web-app 的 startup），而 `dsh plugin ...`、`dsh --dump-config`、`dsh --version`
+# 都不认它；更麻烦的是 `dsh plugin add` 会把多余的参数一路透传给 pnpm，最后炸成
+# Unknown option: 'port'，插件根本装不上。所以覆盖必须限定在「启动 web 服务」这一种
+# 用法上，其余原样透传。
+#
 # 实现上逐个参数决定去留，边遍历边 shift，把保留下来的重新追加到参数表尾部；全程只用
 # "$@"，不拼接字符串，含空格的参数（如 --trusted-host "a b"）才不会被切碎。
 stripped=
 expect_value=0
+
+# 判断这一行是不是「真的要把 web 服务跑起来」。
+#
+# 光看有没有 web 不够：`dsh --profile web --dump-config` 和 `dsh plugin --profile web add`
+# 都带 web，但它们不是服务启动，`--port` 对它们毫无意义 —— 后者还会把参数透传给 pnpm，
+# 炸成 Unknown option: 'port'。所以先要求一个子命令位置上的 web，再把只读/维护类的参数
+# 排除掉，只有真正启动服务时才覆盖端口。
+#
+# `dsh web`（Dockerfile 的 CMD）和 `dsh --profile web` 两种写法都要认，否则哪天 CMD 换成
+# 后者，端口覆盖会静默失效，3080 那个故障就回来了。
+serves_web=false
+case "${1:-}" in
+  web) serves_web=true ;;
+  --profile) [ "${2:-}" = web ] && serves_web=true ;;
+esac
 for argument in "$@"; do
   case "$argument" in
-    --port|--host)
-      # 拆开写法：选项本身和它后面那个值都要吃掉。
-      stripped="${stripped}${stripped:+ }${argument}"
-      expect_value=1
-      ;;
-    --port=*|--host=*)
-      # 合并写法：一个参数就带上了值。
-      stripped="${stripped}${stripped:+ }${argument}"
-      ;;
-    *)
-      if [ "$expect_value" = 1 ]; then
-        expect_value=0
-        stripped="${stripped}${stripped:+ }${argument}"
-      else
-        set -- "$@" "$argument"
-      fi
+    # 这些都是「看一眼就退出」的用法，不会去绑端口。
+    --dump-config|--dump-default-config|plugin|--version|-V|--help|-h)
+      serves_web=false
+      break
       ;;
   esac
-  shift
 done
 
-if [ -n "$stripped" ]; then
-  echo "[dsh] 已忽略启动参数里的监听选项（$stripped）：端口固定为 DSH_WEB_PORT=$DSH_WEB_PORT，3080 属于 Nginx" >&2
+if [ "$serves_web" = true ]; then
+  for argument in "$@"; do
+    case "$argument" in
+      --port|--host)
+        # 拆开写法：选项本身和它后面那个值都要吃掉。
+        stripped="${stripped}${stripped:+ }${argument}"
+        expect_value=1
+        ;;
+      --port=*|--host=*)
+        # 合并写法：一个参数就带上了值。
+        stripped="${stripped}${stripped:+ }${argument}"
+        ;;
+      *)
+        if [ "$expect_value" = 1 ]; then
+          expect_value=0
+          stripped="${stripped}${stripped:+ }${argument}"
+        else
+          set -- "$@" "$argument"
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$stripped" ]; then
+    echo "[dsh] 已忽略启动参数里的监听选项（$stripped）：端口固定为 DSH_WEB_PORT=$DSH_WEB_PORT，3080 属于 Nginx" >&2
+  fi
+
+  exec node "$DSH_APP_DIR/lib/node_modules/$DSH_NPM_PACKAGE/lib/bin.js" "$@" --port "$DSH_WEB_PORT"
 fi
 
-exec node "$DSH_APP_DIR/lib/node_modules/$DSH_NPM_PACKAGE/lib/bin.js" "$@" --port "$DSH_WEB_PORT"
+# 非 web 子命令（plugin、--dump-config、--version 等）不认 --port，原样透传。
+exec node "$DSH_APP_DIR/lib/node_modules/$DSH_NPM_PACKAGE/lib/bin.js" "$@"
