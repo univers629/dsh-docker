@@ -112,7 +112,15 @@ fi
 exit 0
 `
 
-for (const [name, body] of [['git', gitMock], ['docker', dockerMock]]) {
+// chown 也必须伪造：userns 预检要对整个目录做递归 chown，而测试通常不是以 root 跑的，
+// 真跑 chown 只会失败，安装器按设计返回 1，这条断言就永远过不去 —— 那测的是「测试进程
+// 有没有 root 权限」，不是安装器的行为。伪造之后，预检里「已对齐」和「没对齐」两条分支
+// 都能被确定性地驱动。
+const chownMock = `#!/bin/sh
+exit 0
+`
+
+for (const [name, body] of [['git', gitMock], ['docker', dockerMock], ['chown', chownMock]]) {
   const path = join(mockBin, name)
   await writeFile(path, body)
   await chmod(path, 0o755)
