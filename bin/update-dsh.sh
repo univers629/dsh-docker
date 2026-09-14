@@ -84,6 +84,31 @@ fi
 NEW_VERSION="$(node -e 'const {readFileSync}=require("node:fs");try{process.stdout.write(JSON.parse(readFileSync(process.argv[1],"utf8")).version??"unknown")}catch{process.stdout.write("unknown")}' "$APP_DIR/DSH-BUILD-METADATA.json" 2>/dev/null || printf 'unknown')"
 write_status success "DSH 已更新到 $NEW_VERSION，正在重启 DSH 进程"
 
+# 新版本起来了就没什么可回滚的，旧版本目录可以放掉。
+# 回滚必须在本进程内完成：$OLD_DIR 在 $WORK_DIR 里，而 trap EXIT 会删掉整个
+# $WORK_DIR，脚本一退出备份就没了。
+rollback_to_previous() {
+  echo "[dsh-update] 新版本未能就绪，回滚到更新前的版本" >&2
+  rm -rf "$APP_DIR"
+  if ! mv "$OLD_DIR" "$APP_DIR"; then
+    write_status failed "DSH 已更新但无法启动，且回滚失败；请手动重建容器。原版本备份在 $OLD_DIR"
+    return 1
+  fi
+  # 换回旧目录后目录内容变了，Supervisor 会重新拉起它。这里只负责把备份放回去并
+  # 触发一次重启，就绪与否交给下面统一判断。
+  "$RESTART_EXECUTABLE" check >/dev/null 2>&1 || {
+    write_status failed 'DSH 已回滚到上一版本，但容器内 Supervisor 当前不可用，请手动执行 restart-dsh request'
+    return 1
+  }
+  "$RESTART_EXECUTABLE" request 1 </dev/null >/dev/null 2>&1 || true
+  if "$RESTART_EXECUTABLE" wait-ready "${DSH_UPDATE_ROLLBACK_TIMEOUT:-120}"; then
+    write_status failed "DSH $NEW_VERSION 未能在超时时间内就绪，已自动回滚到更新前的版本，服务保持可用"
+    return 0
+  fi
+  write_status failed "DSH $NEW_VERSION 未能就绪，回滚后服务仍未恢复，请检查容器日志"
+  return 1
+}
+
 if [ "${DSH_UPDATE_NO_RESTART:-false}" != true ]; then
   if ! "$RESTART_EXECUTABLE" check; then
     write_status failed 'DSH 已更新，但容器内 Supervisor 当前不可用，请手动执行 restart-dsh request'
@@ -91,8 +116,19 @@ if [ "${DSH_UPDATE_NO_RESTART:-false}" != true ]; then
   fi
   # 同步等待旧子进程退出并由 Supervisor 拉起新进程，避免更新完成信号
   # 早于端口释放/插件树启动，导致网页看到半启动状态或 EADDRINUSE。
+  #
+  # 超时不能只报错就退出：这时 /app/dsh 已经是起不来的新版本，supervisor 会拿同一套
+  # 坏目录无限重试，容器重启也清不掉，页面持续 502 且只能人工去修。所以这里把备份换
+  # 回去，让服务继续可用——更新失败不该等于站点挂掉。
   if ! "$RESTART_EXECUTABLE" request 1 </dev/null >/dev/null 2>&1 || ! "$RESTART_EXECUTABLE" wait-ready "${DSH_UPDATE_READY_TIMEOUT:-120}"; then
-    write_status failed 'DSH 已更新，但新进程未在超时时间内就绪，请检查容器日志'
+    if [ "${DSH_UPDATE_NO_ROLLBACK:-false}" = true ]; then
+      write_status failed 'DSH 已更新，但新进程未在超时时间内就绪，请检查容器日志'
+      exit 1
+    fi
+    rollback_to_previous || exit 1
+    # 回滚成功时状态已经是 failed 且说明了原因，退出码保持非零：
+    # 调用方要能看出这次更新没有成功。
     exit 1
   fi
 fi
+
