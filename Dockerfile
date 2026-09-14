@@ -62,6 +62,10 @@ COPY bin/manage-dsh-plugin /usr/local/bin/manage-dsh-plugin
 COPY bin/cleanup-dsh-plugin-transactions /usr/local/bin/cleanup-dsh-plugin-transactions
 COPY bin/validate-dsh-profile.mjs /usr/local/lib/dsh/validate-dsh-profile.mjs
 COPY bin/prepare-profile-modules.mjs /usr/local/bin/prepare-profile-modules.mjs
+# 插件故障隔离：启动成功时记录可用组合，连续失败时把日志里点名的插件禁掉再重试，
+# 免得一个不兼容的插件装进来就让网页一直 502 且只能人工去修。
+COPY bin/dsh-plugin-snapshot.mjs /usr/local/bin/dsh-plugin-snapshot.mjs
+COPY bin/dsh-plugin-quarantine.mjs /usr/local/bin/dsh-plugin-quarantine.mjs
 COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
 # 降权后唯一的提权入口：以 root 运行的特权代理 + 客户端 + apt/sudo 兼容包装。
 COPY bin/dsh-privileged-policy.mjs /usr/local/lib/dsh/dsh-privileged-policy.mjs
@@ -93,6 +97,7 @@ RUN chmod +x /usr/local/bin/dsh /usr/local/bin/dsh-supervisor /usr/local/bin/res
       /usr/local/bin/entrypoint.sh /usr/local/bin/configure-nginx-auth \
       /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/watch-profile-plugins.mjs \
       /usr/local/bin/install-docker-control.mjs \
+      /usr/local/bin/dsh-plugin-snapshot.mjs /usr/local/bin/dsh-plugin-quarantine.mjs \
       /usr/local/bin/install-dsh-runtime /usr/local/bin/update-dsh \
       /usr/local/lib/dsh/update-dsh.sh /usr/local/bin/dsh-root /usr/local/bin/apt \
       /usr/local/bin/sudo /usr/local/bin/hash-dsh-password \

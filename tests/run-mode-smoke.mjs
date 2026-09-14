@@ -227,7 +227,10 @@ assert.doesNotMatch(files.entrypoint, /gosu|node:node|id -u node|DSH_RUN_AS_ROOT
 assert.doesNotMatch(files.entrypoint, /\/data\/home\/tmp/)
 
 // --- Supervisor：DSH 与准备脚本降权，特权代理以 root 常驻 ---
-assert.match(files.supervisor, /setpriv --reuid "\$DSH_RUN_UID" --regid "\$DSH_RUN_GID" --init-groups -- "\$DSH_EXECUTABLE" "\$@" &/)
+// 尾部允许有 stderr 重定向（插件故障隔离要留一份启动日志），但必须仍然是直接后台
+// 启动：包一层子 shell 会让 $! 记录到错误的 PID，降权身份核验和 restart-dsh 都会失效。
+assert.match(files.supervisor, /setpriv --reuid "\$DSH_RUN_UID" --regid "\$DSH_RUN_GID" --init-groups -- "\$DSH_EXECUTABLE" "\$@"(?: [0-9]?>>"\$DSH_PLUGIN_LOG")? &/)
+assert.doesNotMatch(files.supervisor, /\( *setpriv --reuid/)
 assert.match(files.supervisor, /run_unprivileged node \/usr\/local\/bin\/prepare-profile-modules\.mjs/)
 assert.match(files.supervisor, /run_unprivileged node \/usr\/local\/bin\/install-docker-control\.mjs/)
 assert.match(files.supervisor, /run_unprivileged node \/usr\/local\/bin\/patch-profile-plugins\.mjs/)

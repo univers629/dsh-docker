@@ -96,7 +96,61 @@ prepare_dsh() {
   [ ! -f /usr/local/bin/prepare-profile-modules.mjs ] || run_unprivileged node /usr/local/bin/prepare-profile-modules.mjs
   [ ! -f /usr/local/bin/install-docker-control.mjs ] || run_unprivileged node /usr/local/bin/install-docker-control.mjs
   [ ! -f /usr/local/bin/patch-profile-plugins.mjs ] || run_unprivileged node /usr/local/bin/patch-profile-plugins.mjs
+  # 被隔离插件的禁用叠加必须在 DSH 启动前刷新，否则进度日志里记下的凶手不会真的被挡掉。
+  [ ! -f /usr/local/bin/dsh-plugin-quarantine.mjs ] || run_unprivileged node /usr/local/bin/dsh-plugin-quarantine.mjs apply
 }
+
+# 插件故障隔离。
+#
+# dsh-market 的 hot-mount 安装不重启进程，坏插件装完当时看不出来，等某次重启才崩；而
+# profile 在 /data/dsh（挂载目录），容器重启也清不掉。没有这段逻辑时 supervisor 只会拿
+# 同一套坏组合无限重试，使用者看到持续 502 并且只能手动救。
+#
+# 这里的策略是：连续启动失败达到阈值后，把日志里点名的插件记进隔离清单，生成 disabled
+# 叠加文件，然后带 --patch 重试。原 profile 一个字节都不改，插件的安装记录也留着，所以
+# 「他们装了什么」这件事有据可查，而不是被静默清掉。
+DSH_PLUGIN_FAILURE_LIMIT=${DSH_PLUGIN_FAILURE_LIMIT:-3}
+DSH_PLUGIN_LOG=${DSH_PLUGIN_LOG:-/run/dsh-state/last-start.log}
+DSH_PLUGIN_QUARANTINE=${DSH_PLUGIN_QUARANTINE:-/usr/local/bin/dsh-plugin-quarantine.mjs}
+DSH_PLUGIN_OVERLAY=${DSH_PLUGIN_OVERLAY:-/data/dsh/plugin-quarantine.yml}
+DSH_PLUGIN_SNAPSHOT=${DSH_PLUGIN_SNAPSHOT:-/usr/local/bin/dsh-plugin-snapshot.mjs}
+dsh_failures=0
+
+# 把本次启动的输出留一份，隔离时要从里面认凶手。
+capture_plugin_log() {
+  [ -f "$DSH_PLUGIN_QUARANTINE" ] || return 0
+  mkdir -p "$(dirname "$DSH_PLUGIN_LOG")" 2>/dev/null || true
+  chmod 770 "$(dirname "$DSH_PLUGIN_LOG")" 2>/dev/null || true
+}
+
+# 启动失败达到阈值：从最近一次启动的输出里认出出事的插件并隔离，下一轮带上叠加文件。
+quarantine_plugins() {
+  [ -f "$DSH_PLUGIN_QUARANTINE" ] || return 1
+  [ -s "$DSH_PLUGIN_LOG" ] || return 1
+  before=$(run_unprivileged node "$DSH_PLUGIN_QUARANTINE" list 2>/dev/null | grep -c . || true)
+  run_unprivileged node "$DSH_PLUGIN_QUARANTINE" record "$DSH_PLUGIN_LOG" >&2 || return 1
+  run_unprivileged node "$DSH_PLUGIN_QUARANTINE" apply >&2 || return 1
+  after=$(run_unprivileged node "$DSH_PLUGIN_QUARANTINE" list 2>/dev/null | grep -c . || true)
+  [ "$after" -gt "$before" ]
+}
+
+# 启动成功了就把当前插件组合记成「可用」，下次崩了才知道是谁改坏的。
+snapshot_plugins() {
+  [ -f "$DSH_PLUGIN_SNAPSHOT" ] || return 0
+  run_unprivileged node "$DSH_PLUGIN_SNAPSHOT" diff >/dev/null 2>&1 || true
+  DSH_PLUGIN_SNAPSHOT_NOTE="启动成功" run_unprivileged node "$DSH_PLUGIN_SNAPSHOT" capture >&2 || true
+}
+
+# 带隔离叠加启动 DSH。叠加文件不存在时不加参数，行为和以前完全一致。
+dsh_start_args() {
+  plugin_args=
+  if [ -f "$DSH_PLUGIN_OVERLAY" ]; then
+    plugin_args="--patch $DSH_PLUGIN_OVERLAY"
+    echo "[dsh-supervisor] 本轮带插件隔离叠加启动：$DSH_PLUGIN_OVERLAY" >&2
+  fi
+  printf '%s\n' "$plugin_args"
+}
+
 
 # 特权代理必须以 root 运行：它是降权后的 DSH 唯一的提权入口，按白名单执行 apt
 # 与 DSH 更新，其它命令要求容器 root 密码。
@@ -209,8 +263,32 @@ write_pid_record "$DSH_SUPERVISOR_PID_FILE" "$$" || {
   exit 1
 }
 
+# 原始启动参数留一份：循环里每轮都会往 "$@" 上追加隔离叠加参数，不重置的话会把
+# --patch 越积越多，最终变成一长串重复选项。
+#
+# 注意恢复必须内联写在循环里，不能抽成函数：POSIX sh 的函数有自己的位置参数作用域，
+# 函数里的 `set --` 改不到调用方，抽成函数会让恢复静默失效。参数按行保存，含空格的
+# 参数（例如 --trusted-host "a b"）才不会被切碎。
+original_args_count=$#
+original_args_file=
+if [ "$original_args_count" -gt 0 ]; then
+  original_args_file=/run/dsh-state/launch-args.$$
+  : > "$original_args_file" 2>/dev/null || original_args_file=
+  if [ -n "$original_args_file" ]; then
+    for original_argument in "$@"; do
+      printf '%s\n' "$original_argument" >> "$original_args_file"
+    done
+  fi
+fi
+
 backoff=$DSH_RESTART_DELAY
 while [ "$stopping" != true ]; do
+  if [ -n "$original_args_file" ] && [ -f "$original_args_file" ]; then
+    set --
+    while IFS= read -r saved_argument; do
+      set -- "$@" "$saved_argument"
+    done < "$original_args_file"
+  fi
   if ! start_privileged_helper; then
     echo "[dsh-supervisor] privileged helper exited; retrying in ${backoff}s" >&2
     sleep "$backoff"
@@ -249,12 +327,23 @@ while [ "$stopping" != true ]; do
   if [ -z "$dsh_pid" ]; then
     started_at=$(date +%s)
     echo "[dsh-supervisor] starting DSH as a managed child process running as $DSH_RUN_USER" >&2
+    # 有隔离清单时带上禁用叠加。参数在启动命令行里展开成多个词，不能加引号包成单个
+    # 参数，否则 DSH 会把整个 "--patch /path" 当成一个未知选项。
+    # shellcheck disable=SC2086
+    set -- "$@" $(dsh_start_args)
+    capture_plugin_log
+    # 本轮的 stderr 落一份到文件，隔离时从这里面认凶手。POSIX sh 没有进程替换，所以
+    # 不能写 `2> >(tee ...)`；改成重定向到文件，再由一个后台 tail 把它转发回 stderr，
+    # 这样 `docker logs dsh` 看到的内容和以前一样，$! 也仍然是 DSH 本身。
+    : > "$DSH_PLUGIN_LOG" 2>/dev/null || true
+    tail -n +1 -f "$DSH_PLUGIN_LOG" >&2 2>/dev/null &
+    plugin_log_tail=$!
     # 这里必须直接后台启动外部命令，不能包一层函数或子 shell：$! 记录的 PID 要正好
     # 是降权后的 DSH 进程本身，restart-dsh 和安装器的身份核验都依赖这一点。
     if [ -n "$DSH_RUN_UID" ] && [ -n "$DSH_RUN_GID" ]; then
-      HOME="$DSH_USER_HOME" setpriv --reuid "$DSH_RUN_UID" --regid "$DSH_RUN_GID" --init-groups -- "$DSH_EXECUTABLE" "$@" &
+      HOME="$DSH_USER_HOME" setpriv --reuid "$DSH_RUN_UID" --regid "$DSH_RUN_GID" --init-groups -- "$DSH_EXECUTABLE" "$@" 2>>"$DSH_PLUGIN_LOG" &
     else
-      HOME="$DSH_USER_HOME" "$DSH_EXECUTABLE" "$@" &
+      HOME="$DSH_USER_HOME" "$DSH_EXECUTABLE" "$@" 2>>"$DSH_PLUGIN_LOG" &
     fi
     dsh_pid=$!
     if ! write_pid_record "$DSH_PID_FILE" "$dsh_pid"; then
@@ -284,6 +373,11 @@ while [ "$stopping" != true ]; do
   elif wait "$dsh_pid"; then status=0; else status=$?; fi
   dsh_pid=
   rm -f "$DSH_PID_FILE"
+  # 转发日志的 tail 已经没必要了，留着会越积越多。
+  if [ -n "${plugin_log_tail:-}" ]; then
+    kill "$plugin_log_tail" 2>/dev/null || true
+    plugin_log_tail=
+  fi
   [ "$stopping" != true ] || break
 
   if [ -f "$DSH_RESTART_REQUEST_FILE" ]; then
@@ -295,7 +389,30 @@ while [ "$stopping" != true ]; do
 
   runtime=$(( $(date +%s) - started_at ))
   if [ "$runtime" -ge 60 ]; then backoff=$DSH_RESTART_DELAY; fi
+
+  # 活过 60 秒说明这一轮是能用的，之前的失败不该继续累计，顺手把可用组合记下来。
+  if [ "$runtime" -ge 60 ]; then
+    dsh_failures=0
+    snapshot_plugins
+  else
+    dsh_failures=$((dsh_failures + 1))
+  fi
+
   echo "[dsh-supervisor] DSH exited with status $status; container remains running, retrying in ${backoff}s" >&2
+
+  # 秒退且失败到阈值：多半是插件把启动搞崩了。隔离日志里点名的插件再试一次，而不是拿
+  # 同一套坏组合无限重试 —— 这正是「装了不兼容插件后网页一直 502、只能人工去修」的成因。
+  if [ "$dsh_failures" -ge "$DSH_PLUGIN_FAILURE_LIMIT" ]; then
+    echo "[dsh-supervisor] 连续 ${dsh_failures} 次启动失败，尝试隔离导致失败的插件" >&2
+    if quarantine_plugins; then
+      dsh_failures=0
+      backoff=$DSH_RESTART_DELAY
+      echo "[dsh-supervisor] 已隔离新插件，立即重试；原 profile 未被修改，解除隔离请删掉 $DSH_PLUGIN_OVERLAY" >&2
+    else
+      echo "[dsh-supervisor] 日志里没有可隔离的插件条目，按原组合继续重试" >&2
+      dsh_failures=0
+    fi
+  fi
   # 端口还被占着就把话说清楚：否则这里只会每 ${backoff} 秒撞一次 EADDRINUSE，而唯一的
   # 线索是 DSH 自己的 stderr —— 2026-09-10 那次死锁就是这样白白耗掉的。
   if occupant=$(listening_pid); then
