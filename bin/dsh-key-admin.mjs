@@ -222,8 +222,12 @@ function readConfigText() {
 function writeDocument(document) {
   const text = serializeDocument(document)
   const temporary = CONFIG_PATH + '.tmp.' + process.pid
-  fs.writeFileSync(temporary, text, { mode: 0o600 })
+  // 创建临时文件必须包在 try 里。这一步是最容易失败的（目录不可写就是 EACCES），
+  // 而把目录 chown 给 UID 1000 之前它是全新 root 安装的默认状态。原来它落在 try
+  // 外，异常直接冒到顶层，页面只看到"面板内部错误，详见容器日志"，真正的原因
+  // （permission denied）被埋在容器日志里，排查要绕一大圈。
   try {
+    fs.writeFileSync(temporary, text, { mode: 0o600 })
     fs.chmodSync(temporary, 0o600)
     fs.renameSync(temporary, CONFIG_PATH)
   } catch (error) {
