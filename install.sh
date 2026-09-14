@@ -914,6 +914,28 @@ get_compose_env() {
 # 完全不出现在 DSH 容器的挂载表里。
 # data/egress 存出站策略（模式 + 白名单 + 黑名单）：管理面板可写，dsh-egress 只读挂载。
 mkdir -p data/auth data/secret data/broker data/egress
+# data/broker 与 data/egress 的属主必须对齐到 1000，而且目录本身也要对齐 —— 不只是
+# 里面的文件。
+#
+# 这两个目录不挂进 dsh 容器，所以 entrypoint 的 align_data_ownership 管不到它们；
+# 以 root 全新安装时目录属主就是 root，而 dsh-key-admin / dsh-egress 都以 UID 1000
+# 运行。面板保存密钥要在目录里新建临时文件（keys.json.tmp.<pid>），目录不可写就
+# 直接 EACCES：文件本身的属主改对了也没用，因为改的是目录的写权限。userns-preflight
+# 那条路径本来就对整个目录做了 chown，这里补上才和它一致。
+#
+# 失败只警告：rootless、userns-remap 或非 Linux 宿主上 chown 本来就会失败，那不是
+# 安装失败，下面会打印出宿主上该执行的命令。
+broker_dir_chown() {
+  if chown 1000:1000 data/broker data/egress 2>/dev/null; then
+    return 0
+  fi
+  echo "[警告] 无法把 data/broker 与 data/egress 的属主改成 1000:1000。" >&2
+  echo "       dsh-key-admin 以 UID 1000 运行，要在 data/broker 里新建临时文件来保存密钥。" >&2
+  echo "       如果面板保存时报 EACCES，请在宿主上执行：" >&2
+  echo "       sudo chown 1000:1000 data/broker data/egress" >&2
+}
+
+broker_dir_chown
 COMPOSE_ARGS=(-f docker-compose.yml)
 
 # 叠加顺序是契约的一部分，不能按别的顺序拼：keys.yml 先把 dsh-key-broker 放进
