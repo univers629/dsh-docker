@@ -216,18 +216,33 @@ async function runSeed(payload) {
     for (const [key, value] of Object.entries(entry.whenMissing)) {
       if (settings.getIn([...base, key]) === undefined) settings.setIn([...base, key], value)
     }
-    // 推理强度档位要能补到"上一次已经写过 models"的路由上：models 是 whenMissing 字段，
-    // 已经存在就整块跳过，那样在面板里新声明的档位永远不会生效。所以逐条模型补 —— 只给
-    // 这次声明过的 id、且那条模型还没有 reasoningEfforts 的（用户自己写过 false 或别的
-    // 档位就不动，缺这个字段在 pi-ai 那边表示"沿用目录能力"，不是用户的选择）。
-    if (entry.reasoningEfforts !== null) {
+    // 面板保存的清单是"以这次为准"：那张表就是用户在编辑的东西，只补缺的话，改档位、
+    // 去掉一个模型、换一批模型全都不会生效。安装器不问清单（sync 为假），保持只补缺。
+    // 判据用 modelEntries 而不是 entry.models：目录路由在清单为空时会回落到"目录里的
+    // 那一整份"，拿它来判就会把目录清单当成用户的选择写进配置。
+    // 清单为空时删掉这个字段，让路由退回目录/默认的那份——面板里"全不勾"的意思就是它。
+    if (entry.syncModels === true) {
+      if (entry.modelEntries.length > 0) settings.setIn([...base, 'models'], entry.modelEntries)
+      else if (settings.getIn([...base, 'models']) !== undefined) settings.deleteIn([...base, 'models'])
+    }
+    // 逐模型的调用能力与推理档位要能补到"上一次已经写过 models"的路由上：models 是
+    // whenMissing 字段，已经存在就整块跳过，那样在面板里新勾的能力或档位永远不会生效。
+    // 所以逐条模型补 —— 只给这次声明过的 id、且那条模型还没有这个字段的（用户自己写过
+    // 别的值就不动：缺 reasoningEfforts 在 pi-ai 那边表示"沿用目录能力"，那是用户的默认，
+    // 不是我们的空缺）。
+    const declared = new Map((entry.modelEntries ?? []).map((model) => [model.id, model]))
+    if (declared.size > 0) {
       const seq = settings.getIn([...base, 'models'], true)
       if (seq && yaml.isSeq(seq)) {
         seq.items.forEach((item, index) => {
           if (!yaml.isMap(item)) return
-          if (!entry.models.includes(String(item.get('id') ?? ''))) return
-          if (item.get('reasoningEfforts') !== undefined) return
-          settings.setIn([...base, 'models', index, 'reasoningEfforts'], entry.reasoningEfforts)
+          const model = declared.get(String(item.get('id') ?? ''))
+          if (model === undefined) return
+          for (const field of ['input', 'reasoningEfforts']) {
+            if (model[field] === undefined) continue
+            if (item.get(field) !== undefined) continue
+            settings.setIn([...base, 'models', index, field], model[field])
+          }
         })
       }
     }

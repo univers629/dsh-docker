@@ -120,6 +120,23 @@ try {
   const app = await call('/app.js', { auth: null })
   assert.equal(app.status, 200)
   assert.match(app.headers.get('content-type') ?? '', /javascript/)
+  const style = await call('/app.css', { auth: null })
+  assert.equal(style.status, 200)
+  // 页面里的脚本是 app.js 里那一份，锚点却写在 index.html 上：两边漂了，页面上就是
+  // "点了没反应"（byId 拿到 null，事件挂在空气上），而服务端这边什么都不会报错。
+  // 所以逐个 id 对一遍。
+  const htmlIds = new Set([...index.text.matchAll(/id="([^"]+)"/g)].map((match) => match[1]))
+  const usedIds = [...new Set([...app.text.matchAll(/byId\('([^']+)'\)/g)].map((match) => match[1]))]
+  assert.ok(usedIds.length > 10, 'app.js 里的 byId 锚点少得可疑：' + usedIds.length)
+  for (const id of usedIds) assert.ok(htmlIds.has(id), 'app.js 用到的 #' + id + ' 在 index.html 里不存在')
+  // 模型清单那一节：勾选框 + 逐模型的能力与档位，三件事必须都在页面和样式里。
+  for (const marker of ['model-rows', 'model-search', 'model-count', 'model-toggle-all', 'bulk-levels']) {
+    assert.ok(htmlIds.has(marker), 'index.html 少了模型清单的 #' + marker)
+  }
+  assert.match(index.text, /调用能力/)
+  assert.match(index.text, /推理强度档位/)
+  assert.match(style.text, /\.mtable/)
+  assert.match(style.text, /\.mchip/)
 
   // --- 令牌 ---
   const anonymous = await call('/api/state', { auth: null })
@@ -133,10 +150,9 @@ try {
   assert.deepEqual(state.payload.apiShapes.map((shape) => shape.id), ['any', 'chat', 'responses', 'messages', 'gemini'])
   assert.equal(state.payload.defaultBaseUrls.deepseek, 'https://api.deepseek.com')
   assert.equal(state.payload.defaultShapes.anthropic, 'messages')
-  // 面板的推理强度是勾选框，档位全集和默认勾选都由服务端给：前端只有兜底常量，
-  // 少了这两个字段页面就会退回兜底、和后端的合法档位悄悄分叉。
+  // 面板的档位是每行一排勾选框，档位全集由服务端给：前端只有兜底常量，少了这个字段
+  // 页面就会退回兜底、和后端的合法档位悄悄分叉。
   assert.deepEqual(state.payload.thinkingLevels, ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
-  assert.deepEqual(state.payload.defaultThinkingLevels, ['off', 'low', 'medium', 'high', 'max'])
 
   // --- 保存一个上游 ---
   const saved = await call('/api/upstreams', {
@@ -146,7 +162,10 @@ try {
       shape: '',
       baseUrl: '',
       key: realKey,
-      models: 'deepseek-v4-flash, deepseek-v4-pro',
+      models: [
+        { id: 'deepseek-v4-flash', reasoningEfforts: ['off', 'low', 'high'] },
+        { id: 'deepseek-v4-pro', input: ['text', 'image'] },
+      ],
       extraHeaders: [{ name: 'originator', value: 'cedex_cli_rs' }, { name: 'User-Agent', value: 'codex_cli_rs/0.101.0' }],
       requestsPerMinute: '20',
       dailyRequestBudget: '',
@@ -165,7 +184,14 @@ try {
   assert.equal(document.upstreams[0].baseUrl, 'https://api.deepseek.com', '内置默认 base_url 要自动补上')
   assert.deepEqual(document.upstreams[0].extraHeaders, { originator: 'cedex_cli_rs', 'user-agent': 'codex_cli_rs/0.101.0' })
   assert.equal(document.upstreams[0].requestsPerMinute, 20)
-  assert.deepEqual(document.upstreams[0].dsh, { api: 'any', models: ['deepseek-v4-flash', 'deepseek-v4-pro'] })
+  // 逐模型的能力与档位落成 keys.json 里的记录：没声明的字段不写，空数组是噪音。
+  assert.deepEqual(document.upstreams[0].dsh, {
+    api: 'any',
+    models: [
+      { id: 'deepseek-v4-flash', reasoningEfforts: ['off', 'low', 'high'] },
+      { id: 'deepseek-v4-pro', input: ['text', 'image'] },
+    ],
+  })
   if (process.platform !== 'win32') {
     assert.equal(statSync(configPath).mode & 0o777, 0o600, 'keys.json 必须是 0600')
   }
@@ -175,9 +201,12 @@ try {
   assert.deepEqual(seedPayload.upstreams, [{
     name: 'deepseek',
     shape: 'any',
-    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
-    // 面板没填推理强度，所以是空数组：seed 那边把它理解成"不声明"，模型页也就没有强度菜单。
-    reasoningEfforts: [],
+    models: [
+      { id: 'deepseek-v4-flash', input: [], reasoningEfforts: ['off', 'low', 'high'] },
+      { id: 'deepseek-v4-pro', input: ['text', 'image'], reasoningEfforts: [] },
+    ],
+    // 面板是这份清单的编辑处：seed 那边整体覆盖，而不是"只在缺失时写"。
+    sync: true,
   }])
   assert.equal(seedPayload.placeholder, 'dsh-broker-placeholder')
   assert.equal(seedPayload.brokerBase, 'http://dsh-key-broker:8080')
@@ -191,6 +220,11 @@ try {
     { name: 'originator', value: 'cedex_cli_rs' },
     { name: 'user-agent', value: 'codex_cli_rs/0.101.0' },
   ])
+  // 页面拿到的是逐模型的记录：它就是那张表的全部输入。
+  assert.deepEqual(listed.payload.upstreams[0].models, [
+    { id: 'deepseek-v4-flash', input: [], reasoningEfforts: ['off', 'low', 'high'] },
+    { id: 'deepseek-v4-pro', input: ['text', 'image'], reasoningEfforts: [] },
+  ])
 
   // 只改配额、不重填密钥。
   const updated = await call('/api/upstreams', {
@@ -201,7 +235,7 @@ try {
   const afterUpdate = JSON.parse(readFileSync(configPath, 'utf8'))
   assert.equal(afterUpdate.upstreams[0].key, realKey, '密钥留空必须沿用已存的那把')
   assert.equal(afterUpdate.upstreams[0].dailyRequestBudget, 500)
-  assert.deepEqual(afterUpdate.upstreams[0].dsh.models, [])
+  assert.deepEqual(afterUpdate.upstreams[0].dsh.models, [], '页面没送模型清单时，清单就该是空的')
 
   // --- 拒绝非法输入 ---
   const insecure = await call('/api/upstreams', {

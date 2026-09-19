@@ -1341,14 +1341,38 @@ process.stdin.on("end", () => {
       for (const entry of document.upstreams) if (entry && entry.name) previous.set(entry.name, entry)
     }
   }
-  // 向导不问推理强度档位（那是面板里的事），但同名上游被重新配置时不能把它丢掉：
-  // 档位是 dsh.reasoningEfforts，没有它 DSH 的模型页就不显示推理强度菜单。
+  // 向导不问模型的调用能力、推理档位和模型清单里的花名（那些是密钥管理面板里的事），
+  // 但同名上游被重新配置时不能把它们丢掉：档位没了 DSH 的模型页就不显示推理强度菜单，
+  // 图像能力没了视觉模型会变成纯文本。所以按 id 把上一次那份声明搬过来——只搬这次
+  // 清单里还在的 id，面板里删掉的模型不该被一次重跑带回来。
   for (const entry of incoming) {
-    if (!entry || !entry.dsh || entry.dsh.reasoningEfforts !== undefined) continue
-    const levels = previous.get(entry.name) && previous.get(entry.name).dsh
-      ? previous.get(entry.name).dsh.reasoningEfforts
-      : undefined
-    if (Array.isArray(levels) && levels.length > 0) entry.dsh.reasoningEfforts = levels
+    if (!entry || !entry.dsh) continue
+    const before = previous.get(entry.name)
+    const beforeDsh = before && before.dsh ? before.dsh : {}
+    const declared = new Map()
+    if (Array.isArray(beforeDsh.models)) {
+      for (const model of beforeDsh.models) {
+        if (model && typeof model === "object" && model.id) declared.set(String(model.id), model)
+      }
+    }
+    if (Array.isArray(entry.dsh.models)) {
+      entry.dsh.models = entry.dsh.models.map((model) => {
+        const id = model && typeof model === "object" ? String(model.id || "") : String(model || "")
+        const kept = declared.get(id)
+        if (!kept) return model
+        const merged = { id: id }
+        if (Array.isArray(kept.input) && kept.input.length > 0) merged.input = kept.input
+        if (Array.isArray(kept.reasoningEfforts) && kept.reasoningEfforts.length > 0) {
+          merged.reasoningEfforts = kept.reasoningEfforts
+        }
+        return merged
+      })
+    }
+    // 老形状：档位挂在整个上游上（dsh.reasoningEfforts）。留着它，面板下一次打开还能照原样回显。
+    if (entry.dsh.reasoningEfforts === undefined
+      && Array.isArray(beforeDsh.reasoningEfforts) && beforeDsh.reasoningEfforts.length > 0) {
+      entry.dsh.reasoningEfforts = beforeDsh.reasoningEfforts
+    }
   }
   process.stdout.write(JSON.stringify({ version: 1, upstreams: kept.concat(incoming) }, null, 2))
 })

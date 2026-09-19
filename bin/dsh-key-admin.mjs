@@ -45,12 +45,12 @@ import {
   AdminInputError,
   API_SHAPES,
   DEFAULT_BASE_URLS,
-  DEFAULT_PANEL_THINKING_LEVELS,
   THINKING_LEVELS,
   baseUrlLooksUnversioned,
   defaultShapeOf,
   findUpstream,
   looksLikeCatalogRoute,
+  mergeDiscoveredModels,
   mergeUpstream,
   normalizeName,
   normalizeUpstreamInput,
@@ -498,7 +498,6 @@ function stateResponse() {
     defaultBaseUrls: { ...DEFAULT_BASE_URLS },
     defaultShapes,
     thinkingLevels: [...THINKING_LEVELS],
-    defaultThinkingLevels: [...DEFAULT_PANEL_THINKING_LEVELS],
     upstreams: document.upstreams.map((entry) => toUpstreamView(entry)),
     egress: egressState(),
   }
@@ -519,7 +518,7 @@ const RELOAD_NOTE = 'dsh-key-broker 每 5 秒按修改时间热加载 keys.json�
  *
  * 拉不到就照原样保存，让提示去说明为什么 DSH 那边还没这条供应商。
  */
-async function withDiscoveredModels(record) {
+async function withDiscoveredModels(record, existingEntry) {
   const needsModels = record.models.length === 0
   // 模型清单齐了、base_url 也带着版本段，就没有任何要问上游的事。
   if (looksLikeCatalogRoute(record.name) || (!needsModels && !baseUrlLooksUnversioned(record.shape, record.baseUrl))) {
@@ -536,10 +535,16 @@ async function withDiscoveredModels(record) {
         + '不改的话面板里能拉到清单，网页里一发请求就是 403 或"API key is invalid"。')
     }
     if (needsModels) {
-      const models = found.models.slice(0, 200)
+      // 拉回来的只有 id，是一条"什么都没声明"的模型：能力和档位由用户在面板上勾。
+      // 但上一次那份声明要按 id 搬过来——"一个都不勾"的意图可能是"这次先清空重来"，
+      // 也可能是"我还没挑"，不该顺手把已经勾好的能力与档位抹掉（模型清单是自动拉回来的，
+      // 用户并没有逐条重新选过）。
+      const models = mergeDiscoveredModels(found.models.slice(0, 200), existingEntry)
       fixed = { ...fixed, models }
+      const carried = models.filter((model) => model.input.length > 0 || model.reasoningEfforts.length > 0).length
       notes.push('已从 ' + found.endpoint + ' 拉到 ' + models.length + ' 个模型 id（目录外的上游必须有模型清单，'
-        + '所以保存时自动拉了一次）。不想要这么多就在模型清单里删掉再保存。')
+        + '所以保存时自动拉了一次）。不想要这么多就在模型清单里取消勾选再保存。'
+        + (carried > 0 ? '其中 ' + carried + ' 个沿用了上次勾好的能力与档位。' : ''))
     }
     return { record: fixed, discovery: notes.join('\n') }
   } catch (error) {
@@ -563,7 +568,7 @@ async function saveUpstream(body) {
   const rename = typeof body?.rename === 'string' && body.rename.trim() !== '' ? normalizeName(body.rename) : ''
   // 改名时密钥要从旧那条上继承，否则"只改个名字"会被当成"新上游没填密钥"。
   const existing = findUpstream(before, name) ?? (rename !== '' ? findUpstream(before, rename) : undefined)
-  const discovered = await withDiscoveredModels(normalizeUpstreamInput(body, existing))
+  const discovered = await withDiscoveredModels(normalizeUpstreamInput(body, existing), existing)
   const record = discovered.record
   let next = mergeUpstream(before, toBrokerEntry(record))
   const renamed = rename !== '' && rename !== record.name && findUpstream(next, rename) !== undefined
@@ -574,8 +579,8 @@ async function saveUpstream(body) {
   const notes = [RELOAD_NOTE]
   if (discovered.discovery !== '') notes.push(discovered.discovery)
   if (renamed) notes.push('上游 ' + rename + ' 已被改名成 ' + record.name + '；DSH 侧那条旧供应商要自己在 WebUI 里删。')
-  // baseUrl / models 回给页面：保存时可能被自动改过，表单里必须跟着变，否则用户下一次
-  // 保存又会把旧值写回去。
+  // baseUrl / models 回给页面：保存时可能被自动改过（补版本段、自动拉清单），表单里必须
+  // 跟着变，否则用户下一次保存又会把旧值写回去。models 是逐模型的记录（能力 + 档位）。
   return { ok: true, name: record.name, baseUrl: record.baseUrl, models: record.models, brokerReload: notes.join('\n'), seed }
 }
 

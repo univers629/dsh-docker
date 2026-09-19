@@ -26,6 +26,13 @@ build/
 # only covers the project directory, so they cannot live in the system temp dir.
 /.tmp/
 
+# Local panel verification with a real browser: the harness copies bin/ into a
+# scratch directory, drops PNG screenshots, and needs a throwaway self-signed
+# certificate for the stub upstream. None of it belongs in Git.
+/panel-e2e/
+/panel-e2e-*.pem
+/screenshots/
+
 # Runtime caches written by DSH plugins into the project directory.
 .dsh-vision-router/
 

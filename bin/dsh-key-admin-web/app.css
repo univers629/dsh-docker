@@ -26,12 +26,40 @@ button.danger { color: var(--bad); }
 .entries input[type="checkbox"] { width: auto; flex: 0 0 auto; }
 .entries .entry-host { font-family: ui-monospace, Consolas, monospace; }
 [hidden] { display: none; }
-.models { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 2px 12px; margin-top: 10px; max-height: 280px; overflow: auto; }
-.models label { display: flex; gap: 6px; align-items: center; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
-.models input { width: auto; }
-.levels { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 4px; }
-.levels label { display: flex; gap: 6px; align-items: center; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
-.levels input { width: auto; }
+
+/* 模型清单：一张表把"哪些模型要、每个模型什么能力、什么推理档位"三件事放在同一行里。
+   左边那一列是勾选框，只有勾上的模型会保存——表里显示但没勾的行只是"暂时留着"。 */
+.modelbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0 8px; }
+.modelbar .grow { flex: 1 1 200px; min-width: 160px; width: auto; }
+.chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 6px; font-size: 12px; color: var(--muted); background: #101216; border: 1px solid var(--line); white-space: nowrap; }
+.bulkbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.bulkbar .bulk-label { color: var(--muted); font-size: 12px; }
+.mtable-wrap { border: 1px solid var(--line); border-radius: 8px; overflow: auto; max-height: 480px; }
+.mtable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.mtable th { position: sticky; top: 0; z-index: 1; text-align: left; padding: 7px 10px; font-weight: 600; color: var(--muted); background: #22262e; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.mtable td { padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.mtable tr:last-child td { border-bottom: none; }
+.mtable tbody tr:hover { background: #191c22; }
+.mtable tbody tr.off { opacity: .45; }
+.mtable tbody tr.off:hover, .mtable tbody tr.off:focus-within { opacity: 1; }
+.mtable .ck { width: 30px; text-align: center; }
+.mtable .ck input { width: auto; }
+.mtable .mid { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; }
+.mtable .sub { color: var(--muted); font-size: 11px; }
+/* "不声明"只是一行的小状态，不要抢戏：整列的规则写在表头的 .th-note 上。 */
+.mtable .undeclared { font-size: 10.5px; opacity: .6; }
+.mtable th .th-note { font-weight: 400; font-size: 10.5px; opacity: .7; }
+.mtable .missing { color: #d9a441; font-size: 11px; }
+.mtable .empty { color: var(--muted); padding: 12px 10px; }
+.chips { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+/* 能力与档位都用这种小药丸：勾上 = 声明，不勾 = 不声明（DSH 那边就没有对应菜单）。
+   行内的是 label + 藏起来的 checkbox（点击落在 label 上）；批量那一排是真的 button，
+   所以这里要把 button 的底色和字号压回来，两边看起来才是同一种东西。 */
+.mchip { position: relative; display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 5px; font-size: 11px; line-height: 1.8; white-space: nowrap; cursor: pointer; user-select: none; color: var(--muted); background: transparent; border: 1px solid var(--line); }
+.mchip:hover { border-color: var(--accent); color: inherit; }
+.mchip.on { color: #cfe0ff; background: #1d2a44; border-color: transparent; }
+.mchip.locked { cursor: default; opacity: .75; }
+.mchip input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; pointer-events: none; }
 pre { background: #101216; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; max-height: 320px; white-space: pre-wrap; margin: 0; font-size: 12px; }
 .status { min-height: 22px; margin: 10px 0 0; }
 .status.bad { color: var(--bad); }

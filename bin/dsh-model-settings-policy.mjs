@@ -113,17 +113,50 @@ export function normalizeThinkingLevels(raw) {
 }
 
 /**
- * 一条 models 条目。
+ * 一条 models 条目：id + 这个模型自己的调用能力与推理强度档位。
  *
  * 为什么要显式声明 reasoningEfforts：pi-ai 对"手写声明的模型"（我们写进 settings.yaml 的
  * 全都是）一律报告"不提供任何档位"，WebUI 的推理强度下拉就不会出现。声明了档位才有菜单。
  * 反过来也不能默认给所有模型加：不吃 reasoning_effort 的模型会被上游直接 400，所以这是
- * 按上游显式选择的。档位的 wire 值就用档位名（OpenAI/Anthropic 系都认 low/medium/high），
- * off 必须是 null —— pi-ai 用 null 表示"不思考时什么参数都不发"。
+ * 按模型显式选择的（老配置挂在整条上游上，作为这一层的默认值继续认）。档位的 wire 值就用
+ * 档位名（OpenAI/Anthropic 系都认 low/medium/high），off 必须是 null —— pi-ai 用 null
+ * 表示"不思考时什么参数都不发"。
+ *
+ * input 同理，但方向相反：空 = 不声明（沿用目录条目或路由的 defaultInput），所以只有
+ * 真的要声明图像输入的模型才写它——pi-ai 的 `input: []` 和不写是一个意思。
+ *
+ * @param model 模型 id，或 { id, input, reasoningEfforts } 记录
+ * @param levels 上游级的默认档位（老配置用；模型自己声明了就以自己那份为准）
  */
-export function modelEntry(id, levels) {
-  const efforts = thinkingLevelMap(levels)
-  return efforts === null ? { id } : { id, reasoningEfforts: efforts }
+export function modelEntry(model, levels) {
+  const record = (model !== null && typeof model === 'object') ? model : { id: model }
+  const declared = normalizeThinkingLevels(
+    Array.isArray(record.reasoningEfforts) && record.reasoningEfforts.length > 0
+      ? record.reasoningEfforts
+      : levels,
+  )
+  const efforts = thinkingLevelMap(declared)
+  const input = normalizeModelModalities(record.input)
+  return {
+    id: String(record.id ?? '').trim(),
+    ...(input.length > 0 ? { input } : {}),
+    ...(efforts === null ? {} : { reasoningEfforts: efforts }),
+  }
+}
+
+/** 调用能力（pi-ai 的 `input`）的规范顺序，同时也是白名单。 */
+export const MODEL_MODALITIES = Object.freeze(['text', 'image'])
+
+/** 调用能力 -> pi-ai 认的模态数组：空 = 不声明，认不出来的一律丢掉。 */
+export function normalizeModelModalities(raw) {
+  const list = Array.isArray(raw) ? raw : []
+  const out = []
+  for (const piece of list) {
+    const modality = String(piece ?? '').trim().toLowerCase()
+    if (MODEL_MODALITIES.includes(modality) && !out.includes(modality)) out.push(modality)
+  }
+  // 与面板侧同序：同一份配置在两处归一出来的写法要一样。
+  return MODEL_MODALITIES.filter((modality) => out.includes(modality))
 }
 
 /** 档位数组 -> settings.yaml 里那个 reasoningEfforts 字典；没声明就返回 null。 */
@@ -135,17 +168,32 @@ export function thinkingLevelMap(levels) {
   return map
 }
 
-/** 归一化模型 id 列表：去空、去重、保持填写顺序。 */
-export function normalizeModelIds(models) {
+/**
+ * 归一化模型清单：去空、去重、保持填写顺序，字符串 id 与记录都接受。
+ *
+ * 面板里每个模型都带着自己的调用能力与档位（它们本来就是逐模型的），安装器那边给的
+ * 仍然是一串 id；两种输入在这里统一成记录，后面就只需要处理一种形状。
+ */
+export function normalizeModelRecords(models) {
   const seen = new Set()
   const result = []
   for (const raw of models ?? []) {
-    const id = String(raw ?? '').trim()
+    const record = (raw !== null && typeof raw === 'object') ? raw : { id: raw }
+    const id = String(record.id ?? '').trim()
     if (id.length === 0 || seen.has(id)) continue
     seen.add(id)
-    result.push(id)
+    result.push({
+      id,
+      input: normalizeModelModalities(record.input),
+      reasoningEfforts: normalizeThinkingLevels(record.reasoningEfforts),
+    })
   }
   return result
+}
+
+/** 归一化模型 id 列表：去空、去重、保持填写顺序。 */
+export function normalizeModelIds(models) {
+  return normalizeModelRecords(models).map((record) => record.id)
 }
 
 /**
@@ -160,17 +208,26 @@ export function normalizeModelIds(models) {
  *
  * @param request.name 上游名（同时是 settings 里的路由键）
  * @param request.shape 安装器的 API 形态（any/chat/responses/messages/gemini）
- * @param request.models 用户填的模型 id
- * @param request.reasoningEfforts 这个上游要声明的推理强度档位（空 = 不声明，页面上就没有强度菜单）
+ * @param request.models 用户填的模型清单：id 字符串，或 { id, input, reasoningEfforts } 记录
+ * @param request.reasoningEfforts 整条上游的默认档位（老配置的形状；模型自己声明了就以自己那份为准）
  * @param request.brokerBase 密钥代理的 base（http://dsh-key-broker:8080）
  * @param request.catalog 目录快照：{ [id]: { api, models: [id] } }
- * @returns 可写入时返回 ok:true 与字段计划，否则 ok:false 与拒绝原因
+ * @param request.sync 模型清单是不是"以这次给的为准"（面板保存时是；安装器不问模型清单，
+ *   所以它保持"只在缺失时写"的老口径，免得把用户在 WebUI 里改过的清单冲掉）
+ * @returns 可写入时返回 ok:true 与字段计划（models 是 id 列表，modelEntries 是每条模型
+ *   解析好的 settings.yaml 条目，syncModels 表示这份清单要整体覆盖），否则 ok:false 与拒绝原因
  */
 export function planProvider(request) {
   const name = String(request.name ?? '')
   const catalogEntry = (request.catalog ?? {})[name]
-  const models = normalizeModelIds(request.models)
+  const modelRecords = normalizeModelRecords(request.models)
+  const models = modelRecords.map((record) => record.id)
   const levels = normalizeThinkingLevels(request.reasoningEfforts)
+  const entriesOf = () => modelRecords.map((record) => modelEntry(record, levels))
+  // 面板保存的清单是"以这次为准"（sync）：它上面那张表就是用户在编辑的东西，
+  // 只补缺的话，改档位、去掉一个模型、换一批模型全都不会生效。安装器不问清单，
+  // 保持只补缺，免得把用户在 WebUI 里改过的模型列表冲掉。
+  const syncModels = request.sync === true
   const baseURL = brokerRouteBaseUrl(request.brokerBase, name)
   const apiKeyEnv = deriveCredentialRef(name)
 
@@ -179,7 +236,7 @@ export function planProvider(request) {
   if (native) {
     const nativeWhenMissing = {}
     // 用户明确列了模型 id 才写 models：不写就沿用第一方内置的那份清单。
-    if (models.length > 0) nativeWhenMissing.models = models.map((id) => modelEntry(id, levels))
+    if (models.length > 0) nativeWhenMissing.models = entriesOf()
     return {
       ok: true,
       name,
@@ -191,6 +248,8 @@ export function planProvider(request) {
       whenMissing: nativeWhenMissing,
       api: '',
       models: models.length > 0 ? models : [...native.models],
+      modelEntries: entriesOf(),
+      syncModels,
       reasoningEfforts: thinkingLevelMap(levels),
       // 旧版安装器写过的同名 pi-ai 路由要一起收掉，否则重复那行留在页面上。
       supersedes: piAiRoutePath(name),
@@ -205,7 +264,7 @@ export function planProvider(request) {
   if (catalogEntry) {
     // 目录路由不写 api：写了就等于宣布"这条路由的每个模型都说这一种协议"，
     // 而目录里的模型各自带着自己的协议（google 的就不在自定义路由的三种里）。
-    if (models.length > 0) whenMissing.models = models.map((id) => modelEntry(id, levels))
+    if (models.length > 0) whenMissing.models = entriesOf()
     return {
       ok: true,
       name,
@@ -217,6 +276,8 @@ export function planProvider(request) {
       whenMissing,
       api: catalogEntry.api ?? '',
       models: models.length > 0 ? models : normalizeModelIds(catalogEntry.models),
+      modelEntries: entriesOf(),
+      syncModels,
       reasoningEfforts: thinkingLevelMap(levels),
     }
   }
@@ -241,7 +302,7 @@ export function planProvider(request) {
     }
   }
   whenMissing.api = protocol
-  whenMissing.models = models.map((id) => modelEntry(id, levels))
+  whenMissing.models = entriesOf()
   return {
     ok: true,
     name,
@@ -253,6 +314,8 @@ export function planProvider(request) {
     whenMissing,
     api: protocol,
     models,
+    modelEntries: entriesOf(),
+    syncModels,
     reasoningEfforts: thinkingLevelMap(levels),
   }
 }
@@ -265,7 +328,8 @@ function brokerRouteCandidates(providers, natives) {
 /**
  * 规划整份种子配置。
  *
- * @param request.upstreams [{ name, shape, models, reasoningEfforts }]
+ * @param request.upstreams [{ name, shape, models, reasoningEfforts, sync }]（models 是 id 数组或
+ *   记录，reasoningEfforts 是整条上游的默认档位（逐模型的声明优先），sync 见 planProvider）
  * @param request.brokerBase 密钥代理 base
  * @param request.placeholder 占位密钥字面值
  * @param request.catalog 目录快照
@@ -288,6 +352,7 @@ export function planSeed(request) {
       shape: upstream.shape,
       models: upstream.models,
       reasoningEfforts: upstream.reasoningEfforts,
+      sync: upstream.sync === true,
       brokerBase: request.brokerBase,
       catalog: request.catalog,
     })

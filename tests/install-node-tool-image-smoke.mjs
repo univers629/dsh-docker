@@ -32,6 +32,47 @@ assert.match(mergeRegion, /image="\$\(node_tool_image\)"/)
 // model-key 动作的 seed 也必须走同一个回退，否则"补填密钥"写不出模型配置。
 assert.ok(installer.includes('seed_dsh_model_settings "$(node_tool_image)"'), 'model-key 的 seed 没走 node_tool_image')
 
+// 合并脚本的正文也真跑一次（上面那次只证明了 docker 命令行对）：向导不问模型的调用能力、
+// 推理档位和清单里的花名——那些是密钥管理面板里的事——所以重新配置同名上游时必须按 id 把
+// 上一次那份声明继承过来，而面板里已经删掉的 id 不能被一次重跑复活。
+const open = "BROKER_MERGE_SCRIPT='"
+const mergeStart = installer.indexOf(open) + open.length
+const mergeEnd = installer.indexOf("\n'\n", mergeStart)
+assert.ok(mergeStart > open.length && mergeEnd > mergeStart, 'cannot locate BROKER_MERGE_SCRIPT body')
+const previous = {
+  version: 1,
+  upstreams: [
+    {
+      name: 'gw',
+      baseUrl: 'https://gw.example.com/v1',
+      key: 'sk-live',
+      dsh: {
+        api: 'chat',
+        models: [
+          { id: 'gpt-5.6-sol', input: ['text', 'image'], reasoningEfforts: ['off', 'low', 'high'] },
+          { id: 'deleted-model' },
+        ],
+        reasoningEfforts: ['low'],
+      },
+    },
+  ],
+}
+const mergeRun = spawnSync(process.execPath, ['-e', installer.slice(mergeStart, mergeEnd)], {
+  input: JSON.stringify({
+    existing: JSON.stringify(previous),
+    incoming: [{ name: 'gw', baseUrl: 'https://gw.example.com/v1', key: 'sk-live', dsh: { api: 'chat', models: ['gpt-5.6-sol', 'brand-new'] } }],
+  }),
+  encoding: 'utf8',
+})
+assert.equal(mergeRun.status, 0, mergeRun.stderr)
+const mergedEntry = JSON.parse(mergeRun.stdout).upstreams[0]
+assert.deepEqual(mergedEntry.dsh.models, [
+  { id: 'gpt-5.6-sol', input: ['text', 'image'], reasoningEfforts: ['off', 'low', 'high'] },
+  'brand-new',
+  ], '还没声明过的 id 原样保留，声明过的那条把能力和档位带过来')
+assert.deepEqual(mergedEntry.dsh.reasoningEfforts, ['low'], '老形状的上游级档位也要留着（面板靠它回显）')
+assert.ok(!mergeRun.stdout.includes('deleted-model'), '面板里删掉的模型不能被重新配置带回来')
+
 const sandbox = await mkdtemp(join(tmpdir(), 'dsh-node-image-smoke-'))
 const harness = join(sandbox, 'harness.sh')
 const dockerLog = join(sandbox, 'docker.log')

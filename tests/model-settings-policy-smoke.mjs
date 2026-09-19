@@ -8,6 +8,7 @@ import {
   isBrokerRouteBaseUrl,
   modelEntry,
   normalizeModelIds,
+  normalizeModelModalities,
   normalizeThinkingLevels,
   piAiRoutePath,
   planProvider,
@@ -252,6 +253,39 @@ const seeded = planSeed({
   catalog,
 })
 assert.deepEqual(seeded.entries[0].whenMissing.models, [{ id: 'claude-opus-5-thinking', reasoningEfforts: { low: 'low' } }])
+
+// ---------------------------------------------------------------------------
+// 逐模型的能力与档位（面板那张表）：模型自己的声明优先于上游级的默认值，
+// input 只有真的要声明图像时才写（空 = 不声明 = 沿用目录/默认的 text）。
+// ---------------------------------------------------------------------------
+assert.deepEqual(modelEntry({ id: 'm', input: ['text', 'image'], reasoningEfforts: ['high'] }, []), {
+  id: 'm',
+  input: ['text', 'image'],
+  reasoningEfforts: { high: 'high' },
+})
+// 模型自己声明了档位就不再吃上游那份默认值；没声明的才吃。
+assert.deepEqual(
+  modelEntry({ id: 'm1' }, ['low']),
+  { id: 'm1', reasoningEfforts: { low: 'low' } },
+)
+assert.deepEqual(modelEntry({ id: 'm2', reasoningEfforts: ['high'] }, ['low']), {
+  id: 'm2',
+  reasoningEfforts: { high: 'high' },
+})
+// 白名单 + 规范顺序：认不出来的丢掉，写出来的顺序固定（text 在前）。
+assert.deepEqual(normalizeModelModalities(['IMAGE', 'text', 'audio']), ['text', 'image'])
+assert.deepEqual(normalizeModelModalities(['image']), ['image'])
+// 面板保存时 sync 为真：清单整体覆盖；安装器那条路不传，保持"只补缺"。
+assert.equal(planProvider({ name: 'relay', shape: 'responses', models: ['x'], brokerBase: 'http://b:8080', catalog }).syncModels, false)
+assert.equal(planProvider({ name: 'relay', shape: 'responses', models: ['x'], sync: true, brokerBase: 'http://b:8080', catalog }).syncModels, true)
+const syncPlan = planSeed({
+  upstreams: [{ name: 'relay', shape: 'responses', models: [{ id: 'x', input: ['text', 'image'] }], sync: true }],
+  brokerBase: 'http://b:8080',
+  placeholder: 'p',
+  catalog,
+})
+assert.equal(syncPlan.entries[0].syncModels, true)
+assert.deepEqual(syncPlan.entries[0].modelEntries, [{ id: 'x', input: ['text', 'image'] }])
 
 // ---------------------------------------------------------------------------
 // 孤儿凭据引用：上游已经从 keys.json 里删掉了，但 settings.yaml 里那条代理路由和

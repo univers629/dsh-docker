@@ -267,6 +267,79 @@ try {
   assert.match(userChoice.settingsText, /reasoningEfforts: false/)
 
   // -------------------------------------------------------------------------
+  // 逐模型的调用能力与档位，以及面板保存时的 sync 语义
+  //
+  // 面板上那张表是清单的编辑处：勾上的模型、每个模型自己的能力与档位，都要原样落到
+  // settings.yaml。只补缺（安装器那边的口径）在面板这条路上是不够的——改档位、
+  // 去掉一个模型都会静默不生效。
+  // -------------------------------------------------------------------------
+  const panelUpstreams = [{
+    name: 'relay',
+    shape: 'responses',
+    sync: true,
+    models: [
+      { id: 'claude-opus-5-thinking', input: ['text', 'image'], reasoningEfforts: ['off', 'low', 'high'] },
+      { id: 'quiet-model' },
+    ],
+  }]
+  const panel = transform({ brokerBase, placeholder, upstreams: panelUpstreams, settingsText: '', credentialsText: '' })
+  assert.equal(panel.validationFailure, '', panel.validationFailure)
+  assert.match(panel.settingsText, /id: claude-opus-5-thinking/)
+  assert.match(panel.settingsText, /^ {12}- image$/m, '图像能力要写进 input')
+  assert.match(panel.settingsText, /^ {12}high: high$/m)
+  // 什么都没声明的模型就是一个光秃秃的 id：空数组/空字典在 pi-ai 那边是另一种意思。
+  assert.match(panel.settingsText, /^ {8}- id: quiet-model$/m)
+
+  // 面板改一次档位、换成另一批模型：这次给的清单说了算。
+  const narrowed = transform({
+    brokerBase,
+    placeholder,
+    settingsText: panel.settingsText,
+    credentialsText: panel.credentialsText,
+    upstreams: [{
+      name: 'relay',
+      shape: 'responses',
+      sync: true,
+      models: [{ id: 'quiet-model', reasoningEfforts: ['medium'] }],
+    }],
+  })
+  assert.equal(narrowed.validationFailure, '', narrowed.validationFailure)
+  assert.doesNotMatch(narrowed.settingsText, /- id: claude-opus-5-thinking/, '取消勾选的模型要从清单里消失')
+  assert.match(narrowed.settingsText, /^ {12}medium: medium$/m)
+
+  // 面板把清单清空 = 回到目录/默认的那份（目录外的上游会在面板那边先自动拉一次，
+  // 不然 DSH 会拒绝整条路由），而不是留着一份谁都改不动的旧清单。
+  const catalogNarrowed = transform({
+    brokerBase,
+    placeholder,
+    settingsText: '',
+    credentialsText: '',
+    upstreams: [{ name: 'deepseek', shape: 'any', sync: true, models: [{ id: 'deepseek-v4-flash' }] }],
+  })
+  assert.match(catalogNarrowed.settingsText, /- id: deepseek-v4-flash/)
+  const cleared = transform({
+    brokerBase,
+    placeholder,
+    settingsText: catalogNarrowed.settingsText,
+    credentialsText: catalogNarrowed.credentialsText,
+    upstreams: [{ name: 'deepseek', shape: 'any', sync: true, models: [] }],
+  })
+  assert.equal(cleared.validationFailure, '', cleared.validationFailure)
+  assert.doesNotMatch(cleared.settingsText, /models:/)
+
+  // 安装器那条路（没有 sync）保持只补缺：用户在 WebUI 里改过的清单不能被一次重跑冲掉。
+  const installerKeeps = transform({
+    brokerBase,
+    placeholder,
+    settingsText: panel.settingsText,
+    credentialsText: panel.credentialsText,
+    upstreams: [{ name: 'relay', shape: 'responses', models: ['another-model'] }],
+  })
+  assert.equal(installerKeeps.validationFailure, '', installerKeeps.validationFailure)
+  assert.doesNotMatch(installerKeeps.settingsText, /another-model/, '安装器不覆盖已有的模型清单')
+  assert.match(installerKeeps.settingsText, /claude-opus-5-thinking/)
+
+  // -------------------------------------------------------------------------
   // --home 模式：落盘 + 中文摘要；顶层不是映射时一个字都不写
   // -------------------------------------------------------------------------
   const home = join(sandbox, 'dsh-home')

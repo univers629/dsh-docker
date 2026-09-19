@@ -57,25 +57,46 @@
     <div class="actions"><button id="add-header" type="button">加一行</button></div>
 
     <h2>模型清单</h2>
-    <p class="hint">写进 DSH 的模型 id，逗号或换行分隔（花名 id 照抄即可，例如 <code>[蝶恋花]deepseek-v4-flash①</code>）。DSH 内置目录里的上游（deepseek、openai、anthropic、google、nvidia 等）留空就沿用目录里的整份清单；
-    目录外的自建网关留空时，保存会自动向上游拉一次清单，拉不到才需要手写。</p>
-    <textarea id="models" spellcheck="false" placeholder="deepseek-v4-flash, deepseek-v4-pro"></textarea>
-    <div class="actions">
-      <button id="fetch-models" type="button">向上游拉取模型列表</button>
-      <button id="check-all" type="button">全选</button>
-      <button id="check-none" type="button">全不选</button>
-      <button id="apply-models" type="button">把勾选的写进上面</button>
-    </div>
-    <div id="model-list" class="models"></div>
+    <p class="hint">左边勾上的模型才会保存进去，也才会写进 DSH 的 <code>settings.yaml</code>；取消勾选 = 从这份配置里去掉。
+    每个模型带着自己的调用能力和推理强度档位——这两件事本来就是逐模型的：同一个网关里
+    <code>gpt-5</code> 吃 <code>reasoning_effort</code>，图像模型不吃，所以没有"整条上游共用"的档位。
+    DSH 内置目录里的上游（deepseek、openai、anthropic、google 等）一个都不勾就沿用目录里的整份清单；
+    目录外的自建网关至少要留一个模型，一个都不留时保存会先向上游拉一次清单，拉不到 DSH 那边就不会多出这条供应商。</p>
 
-    <h2>推理强度档位</h2>
-    <p class="hint">勾上的档位会写进这个上游的所有模型。DSH 只对声明过档位的模型显示「推理强度」菜单，
-    所以全不勾时那个下拉不会出现；给不吃 <code>reasoning_effort</code> 的上游声明档位则会被它返回 400，
-    按上游实际支持的勾。<code>off</code> 是“不思考”，只勾它无效，至少再勾一个别的。</p>
-    <div id="reasoning-levels" class="levels"></div>
-    <div class="actions">
-      <button id="reasoning-default" type="button">恢复默认勾选</button>
-      <button id="reasoning-none" type="button">全不选（不声明）</button>
+    <div class="modelbar">
+      <input id="model-search" class="grow" autocomplete="off" spellcheck="false" placeholder="搜索模型 id">
+      <span id="model-count" class="chip"></span>
+      <button id="model-select-none" type="button">全不选</button>
+      <button id="model-invert" type="button">反选</button>
+      <button id="fetch-models" class="primary" type="button">向上游拉取模型列表</button>
+    </div>
+
+    <div class="bulkbar">
+      <span class="bulk-label">勾选的模型：</span>
+      <span class="chips" id="bulk-levels"></span>
+      <button id="bulk-levels-none" type="button">清空档位</button>
+      <button id="bulk-vision-on" type="button">加图像</button>
+      <button id="bulk-vision-off" type="button">去图像</button>
+    </div>
+
+    <div class="mtable-wrap">
+      <table class="mtable">
+        <thead>
+          <tr>
+            <th class="ck"><input id="model-toggle-all" type="checkbox" title="全选 / 全不选（只作用于当前显示的模型）"></th>
+            <th>模型</th>
+            <th>调用能力</th>
+            <th>推理强度档位 <span class="th-note">一行都不勾 = 不声明</span></th>
+          </tr>
+        </thead>
+        <tbody id="model-rows"></tbody>
+      </table>
+    </div>
+
+    <div class="row">
+      <label class="field"><span>手写一个模型 id（上游没实现 /models，或者要填目录里没有的花名）</span>
+        <input id="model-manual" autocomplete="off" spellcheck="false" placeholder="deepseek-v4-flash"></label>
+      <button id="model-add" type="button">添加</button>
     </div>
 
     <h2>请求限额</h2>

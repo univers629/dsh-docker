@@ -13,7 +13,10 @@ import {
   mergeUpstream,
   modelsRequestCandidates,
   normalizeExtraHeaders,
+  mergeDiscoveredModels,
   normalizeModelIds,
+  normalizeModelInput,
+  normalizeModelRecords,
   normalizeName,
   normalizeThinkingLevels,
   normalizeUpstreamInput,
@@ -150,7 +153,8 @@ assert.deepEqual(entry.allowedPathPrefixes, ['/v1/responses', '/responses', '/v1
 assert.deepEqual(entry.extraHeaders, { originator: 'cedex_cli_rs' })
 assert.equal(entry.requestsPerMinute, 30)
 assert.equal(entry.dailyRequestBudget, undefined)
-assert.deepEqual(entry.dsh, { api: 'responses', models: ['claude-opus-5-thinking'] })
+// 每条模型只写它真的声明过的东西：能力与档位都空的时候就是一个光秃秃的 id。
+assert.deepEqual(entry.dsh, { api: 'responses', models: [{ id: 'claude-opus-5-thinking' }] })
 
 const view = toUpstreamView(entry)
 assert.equal(view.hasKey, true)
@@ -190,7 +194,7 @@ assert.deepEqual(empty, { version: 1, upstreams: [] })
 const one = mergeUpstream(empty, entry)
 const twice = mergeUpstream(one, toBrokerEntry({ ...record, models: ['x'] }))
 assert.equal(twice.upstreams.length, 1, '同名上游整条替换')
-assert.deepEqual(twice.upstreams[0].dsh.models, ['x'])
+assert.deepEqual(twice.upstreams[0].dsh.models, [{ id: 'x' }])
 assert.deepEqual(removeUpstream(twice, 'b-ai').upstreams, [])
 assert.throws(() => removeUpstream(twice, 'nope'), AdminInputError)
 assert.match(serializeDocument(twice), /^\{\n  "version": 1/)
@@ -198,7 +202,13 @@ assert.throws(() => readDocument('not json'), AdminInputError)
 
 // 交给 seed 脚本的载荷里不能有密钥：那个脚本写的是 dsh 容器能读到的文件。
 const payload = seedPayload(twice, 'http://dsh-key-broker:8080', 'dsh-broker-placeholder')
-assert.deepEqual(payload.upstreams, [{ name: 'b-ai', shape: 'responses', models: ['x'], reasoningEfforts: [] }])
+// sync: true —— 面板就是这份清单的编辑处，所以每次保存都整体覆盖 DSH 那一侧。
+assert.deepEqual(payload.upstreams, [{
+  name: 'b-ai',
+  shape: 'responses',
+  models: [{ id: 'x', input: [], reasoningEfforts: [] }],
+  sync: true,
+}])
 assert.equal(JSON.stringify(payload).includes('sk-secret-value'), false)
 
 // --- 模型列表 ---
@@ -291,25 +301,102 @@ assert.throws(() => normalizeThinkingLevels('turbo'), AdminInputError, '不认�
 assert.throws(() => normalizeThinkingLevels('off'), AdminInputError, '只写 off 会被 pi-ai 判成配置错误')
 assert.deepEqual([...THINKING_LEVELS], ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
-const reasoning = normalizeUpstreamInput({
+// --- 逐模型的调用能力与推理档位 ---
+//
+// 能力与档位是逐模型的：同一个网关里 gpt-5 吃 reasoning_effort，图像模型不吃。
+// 没声明 = 不写这个字段（pi-ai 那边落到目录条目或默认值上），"声明了空"不是一回事。
+const perModel = normalizeUpstreamInput({
   name: 'b-ai',
   shape: 'responses',
   baseUrl: 'https://relay.example.com/v1',
   key: 'k',
-  models: 'claude-opus-5-thinking',
-  reasoningEfforts: 'off, low, high',
+  models: [
+    { id: 'claude-opus-5-thinking', reasoningEfforts: ['high', 'off', 'low'], input: ['image', 'text'] },
+    { id: 'plain-model' },
+  ],
 })
-const reasoningEntry = toBrokerEntry(reasoning)
-assert.deepEqual(reasoningEntry.dsh.reasoningEfforts, ['off', 'low', 'high'])
-assert.deepEqual(toUpstreamView(reasoningEntry).reasoningEfforts, ['off', 'low', 'high'])
-// 空数组不写：“没声明”和“声明了空”在 pi-ai 那边不是一回事。
-assert.equal(Object.prototype.hasOwnProperty.call(toBrokerEntry(record).dsh, 'reasoningEfforts'), false)
-// 缺字段沿用已存的档位：面板改别的字段时不该把它清掉。
-assert.deepEqual(
-  normalizeUpstreamInput({ name: 'b-ai', shape: 'responses', baseUrl: 'https://relay.example.com/v1', models: 'x' }, reasoningEntry).reasoningEfforts,
-  ['off', 'low', 'high'],
+const perModelEntry = toBrokerEntry(perModel)
+assert.deepEqual(perModelEntry.dsh.models, [
+  // 能力数组按白名单顺序归一（text 在前），写出来的配置才稳定。
+  { id: 'claude-opus-5-thinking', input: ['text', 'image'], reasoningEfforts: ['off', 'low', 'high'] },
+  // 什么都没声明的模型就是一个 id：空数组在 keys.json 里是噪音，读回来还是"不声明"。
+  { id: 'plain-model' },
+])
+assert.deepEqual(toUpstreamView(perModelEntry).models, [
+  { id: 'claude-opus-5-thinking', input: ['text', 'image'], reasoningEfforts: ['off', 'low', 'high'] },
+  { id: 'plain-model', input: [], reasoningEfforts: [] },
+])
+assert.deepEqual(normalizeModelInput(['TEXT', 'image', 'image']), ['text', 'image'])
+assert.deepEqual(normalizeModelInput(['image', 'text']), ['text', 'image'], '顺序按白名单归一')
+assert.deepEqual(normalizeModelInput(undefined), [], '没声明能力 = 空数组，不是"没有能力"')
+assert.throws(() => normalizeModelInput(['audio']), AdminInputError, '不认识的模态要拒绝')
+// 只勾 off 依然是配置错误（pi-ai 要求至少一个 off 之外的档位），逐模型也一样。
+assert.throws(
+  () => normalizeModelRecords([{ id: 'm', reasoningEfforts: ['off'] }], 'any'),
+  AdminInputError,
 )
+// 同一条 id 出现两次只留一条：保存时两份记录会互相覆盖，页面上却只是"点了没反应"。
+assert.deepEqual(normalizeModelRecords([{ id: 'm', input: ['image'] }, 'm'], 'any'), [
+  { id: 'm', input: ['image'], reasoningEfforts: [] },
+])
+
+// 老配置：档位挂在上游上（dsh.reasoningEfforts）。读的时候补到每个模型身上，
+// 保存时落到每条模型上，上游级那份自然消失。
+const legacyEntry = {
+  name: 'old',
+  baseUrl: 'https://old.example.com/v1',
+  key: 'k',
+  dsh: { api: 'any', models: ['a', 'b'], reasoningEfforts: ['off', 'medium'] },
+}
+assert.deepEqual(toUpstreamView(legacyEntry).models, [
+  { id: 'a', input: [], reasoningEfforts: ['off', 'medium'] },
+  { id: 'b', input: [], reasoningEfforts: ['off', 'medium'] },
+])
+// 已经自己声明过的模型不吃上游级那一份，逐个模型说了算。
+const mixed = toUpstreamView({
+  ...legacyEntry,
+  dsh: { api: 'any', models: [{ id: 'a', reasoningEfforts: ['high'] }, 'b'], reasoningEfforts: ['low'] },
+})
+assert.deepEqual(mixed.models, [
+  { id: 'a', input: [], reasoningEfforts: ['high'] },
+  { id: 'b', input: [], reasoningEfforts: ['low'] },
+])
+// 保存一次就把老形状迁成新形状：上游级那份不再写回。
+const migrated = toBrokerEntry(normalizeUpstreamInput({
+  name: 'old', shape: 'any', baseUrl: 'https://old.example.com/v1', models: mixed.models,
+}, legacyEntry))
+assert.deepEqual(migrated.dsh, {
+  api: 'any',
+  models: [
+    { id: 'a', reasoningEfforts: ['high'] },
+    { id: 'b', reasoningEfforts: ['low'] },
+  ],
+})
+// 自动拉回来的清单：能力与档位按 id 沿用旧配置（"这次先清空重来"不该抹掉已勾好的设置）。
+assert.deepEqual(
+  mergeDiscoveredModels(['a', 'b', 'fresh'], legacyEntry),
+  [
+    { id: 'a', input: [], reasoningEfforts: ['off', 'medium'] },
+    { id: 'b', input: [], reasoningEfforts: ['off', 'medium'] },
+    { id: 'fresh', input: [], reasoningEfforts: [] },
+  ],
+  '老配置挂在上游级的档位，在自动补清单时要按模型带过来',
+)
+assert.deepEqual(
+  mergeDiscoveredModels(['claude-opus-5-thinking'], perModelEntry),
+  [{ id: 'claude-opus-5-thinking', input: ['text', 'image'], reasoningEfforts: ['off', 'low', 'high'] }],
+)
+// 上游还是上次那个 id、这次没声明过：搬过来的是空，不是上次那份。
+assert.deepEqual(mergeDiscoveredModels(['plain-model'], perModelEntry), [{ id: 'plain-model', input: [], reasoningEfforts: [] }])
+// 没有旧条目 / 旧条目被手改坏：照样给出一份能用的清单，不能把保存卡住。
+assert.deepEqual(mergeDiscoveredModels(['x'], undefined), [{ id: 'x', input: [], reasoningEfforts: [] }])
+assert.deepEqual(
+  mergeDiscoveredModels(['x'], { name: 'x', dsh: { api: 'chat', models: ['x'], reasoningEfforts: ['turbo'] } }),
+  [{ id: 'x', input: [], reasoningEfforts: [] }],
+)
+
 // keys.json 被手改坏也不能让面板打不开。
-assert.deepEqual(toUpstreamView({ name: 'x', dsh: { api: 'chat', reasoningEfforts: ['turbo'] } }).reasoningEfforts, [])
+assert.deepEqual(toUpstreamView({ name: 'x', dsh: { api: 'chat', models: ['a'], reasoningEfforts: ['turbo'] } }).models,
+  [{ id: 'a', input: [], reasoningEfforts: [] }])
 
 console.log('key-admin policy smoke: ok')

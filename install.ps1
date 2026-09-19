@@ -476,13 +476,44 @@ function Write-BrokerConfig {
         $names = @($BrokerUpstreams | ForEach-Object { $_.name })
         $existing = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
         if ($existing.upstreams) { $kept = @($existing.upstreams | Where-Object { $_.name -notin $names }) }
-        # 向导不问推理强度档位（那是密钥管理面板里的事），但重新配置同名上游时不能把它丢掉：
-        # 没有 dsh.reasoningEfforts，DSH 的模型页就不显示推理强度菜单。
+        # 向导不问模型的调用能力、推理档位和清单里的花名（那些是密钥管理面板里的事），
+        # 但重新配置同名上游时不能把它们丢掉：档位没了 DSH 的模型页就不显示推理强度菜单，
+        # 图像能力没了视觉模型会变成纯文本。所以按 id 把上一次那份声明搬过来——只搬这次
+        # 清单里还在的 id，面板里删掉的模型不该被一次重跑带回来。
         foreach ($entry in @($BrokerUpstreams)) {
-            if (-not $entry['dsh'] -or $entry['dsh'].Contains('reasoningEfforts')) { continue }
+            if (-not $entry['dsh']) { continue }
             $before = @($existing.upstreams | Where-Object { $_.name -eq $entry.name }) | Select-Object -First 1
+            $beforeDsh = $null
+            if ($before -and $before.dsh) { $beforeDsh = $before.dsh }
+            $declared = @{}
+            if ($beforeDsh -and ($beforeDsh.PSObject.Properties.Name -contains 'models')) {
+                foreach ($model in @($beforeDsh.models)) {
+                    if ($model -is [string]) { continue }
+                    $id = [string]$model.id
+                    if ($id) { $declared[$id] = $model }
+                }
+            }
+            if ($entry['dsh'].PSObject.Properties.Name -contains 'models') {
+                $merged = @()
+                foreach ($model in @($entry['dsh'].models)) {
+                    $id = if ($model -is [string]) { [string]$model } else { [string]$model.id }
+                    $kept = $declared[$id]
+                    if (-not $kept) { $merged += $model; continue }
+                    $record = [ordered]@{ id = $id }
+                    if ($kept.input -and @($kept.input).Count -gt 0) { $record['input'] = @($kept.input) }
+                    if ($kept.reasoningEfforts -and @($kept.reasoningEfforts).Count -gt 0) {
+                        $record['reasoningEfforts'] = @($kept.reasoningEfforts)
+                    }
+                    $merged += $record
+                }
+                $entry['dsh'].models = @($merged)
+            }
+            # 老形状：档位挂在整个上游上（dsh.reasoningEfforts）。留着它，面板下一次打开还能照原样回显。
+            if ($entry['dsh'].PSObject.Properties.Name -contains 'reasoningEfforts') { continue }
             $levels = @()
-            if ($before -and $before.dsh -and $before.dsh.reasoningEfforts) { $levels = @($before.dsh.reasoningEfforts) }
+            if ($beforeDsh -and ($beforeDsh.PSObject.Properties.Name -contains 'reasoningEfforts')) {
+                $levels = @($beforeDsh.reasoningEfforts)
+            }
             if ($levels.Count -gt 0) { $entry['dsh']['reasoningEfforts'] = $levels }
         }
     }

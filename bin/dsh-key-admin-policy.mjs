@@ -185,23 +185,68 @@ export function normalizeBaseUrl(raw, name) {
   return url.origin + url.pathname.replace(/\/+$/, '')
 }
 
-export function normalizeModelIds(raw, shape) {
-  // 逗号和空白都算分隔符：页面上的模型清单是个多行文本框，人会顺手按回车。
+/** 一个模型能声明的调用能力，与 pi-ai 的 `input` 一一对应。 */
+export const MODEL_INPUT_MODALITIES = Object.freeze(['text', 'image'])
+
+/**
+ * 一个模型的调用能力（pi-ai 的 `input`）。
+ *
+ * 空数组 = 不声明，不是"没有能力"：pi-ai 那边 `input: []` 和不写这个字段是一回事，
+ * 都会落到目录条目或路由的 defaultInput 上（默认 text）。所以面板只在真的要声明图像
+ * 输入时才写这个字段——给一个目录里的视觉模型写上 `input: [text]` 就把它钉死成纯文本了。
+ */
+export function normalizeModelInput(raw) {
+  const text = Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,]+/)
+  const out = []
+  for (const piece of text) {
+    const modality = String(piece ?? '').trim().toLowerCase()
+    if (modality === '') continue
+    if (!MODEL_INPUT_MODALITIES.includes(modality)) {
+      throw new AdminInputError('模型的调用能力只能是 ' + MODEL_INPUT_MODALITIES.join('、') + '，收到：' + modality)
+    }
+    if (!out.includes(modality)) out.push(modality)
+  }
+  // 按 MODEL_INPUT_MODALITIES 的顺序归一：这个数组会原样写进 settings.yaml，顺序稳定了
+  // 配置的 diff 才看得懂（pi-ai 只看有没有，不看顺序）。
+  return MODEL_INPUT_MODALITIES.filter((modality) => out.includes(modality))
+}
+
+/**
+ * 模型清单 -> 内部记录。每个模型一条，带着它自己的调用能力和推理强度档位。
+ *
+ * 从前这里只是一串字符串 id，档位挂在整个上游上；但档位本来就是"每个模型各说各话"的
+ * 事实（同一个网关里 gpt-5 吃 reasoning_effort，而 image 模型不吃），挂在上游上等于
+ * 逼用户在一个上游里只放同一种口味的模型。所以清单里的每一条都带自己的能力与档位，
+ * 字符串 id 继续接受（安装器写的就是这个形状），当成"什么都没声明"。
+ */
+export function normalizeModelRecords(raw, shape) {
+  // 逗号和空白都算分隔符：清单也可能直接给一串文本（旧面板的文本框、安装器的参数）。
   const list = Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,]+/)
   const pattern = shape === 'gemini' ? MODEL_ID_URL_SAFE : MODEL_ID
   const out = []
   for (const entry of list) {
-    const id = String(entry ?? '').trim()
+    const record = (entry !== null && typeof entry === 'object') ? entry : { id: entry }
+    const id = String(record.id ?? '').trim()
     if (id === '') continue
     if (!pattern.test(id)) {
       throw new AdminInputError(shape === 'gemini'
         ? '模型 id 含有不允许的字符（Gemini 原生协议把它拼进 URL 路径，只能用字母、数字和 . _ : @ / + -）：' + id
         : '模型 id 含有不允许的字符（空白、逗号、引号、反斜杠和控制字符不行，其它都可以）：' + id)
     }
-    if (!out.includes(id)) out.push(id)
+    if (out.some((item) => item.id === id)) continue
+    out.push({
+      id,
+      input: normalizeModelInput(record.input),
+      reasoningEfforts: normalizeThinkingLevels(record.reasoningEfforts),
+    })
   }
   if (out.length > 200) throw new AdminInputError('一个上游最多 200 个模型 id')
   return out
+}
+
+/** 只要 id 的调用方（安装器比对、摘要）：从记录里取出来。 */
+export function normalizeModelIds(raw, shape) {
+  return normalizeModelRecords(raw, shape).map((record) => record.id)
 }
 
 /**
@@ -243,15 +288,9 @@ export function normalizeExtraHeaders(raw, shape) {
  */
 export const THINKING_LEVELS = Object.freeze(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
-/**
- * 面板上新建上游时默认勾上的档位。
- *
- * 只是表单的初值，不是后端默认：keys.json 里没有 reasoningEfforts 的上游依旧是"不声明"，
- * 面板把这几档预勾上，是因为绝大多数上游都吃这几个值，而"一个都不勾"的结果是模型页
- * 干脆没有推理强度菜单——那正是最容易让人以为坏了的状态。minimal / xhigh 认得的上游少，
- * 默认不勾；上游不吃某一档就把它取消勾选，全不勾就回到"不声明"。
- */
-export const DEFAULT_PANEL_THINKING_LEVELS = Object.freeze(['off', 'low', 'medium', 'high', 'max'])
+// 这里以前还有一份"面板默认勾上的档位"（DEFAULT_PANEL_THINKING_LEVELS）。现在档位是逐模型
+// 勾的，没有"新上游默认吃哪几档"这回事：同一个网关里不同模型吃的不一样，替用户预勾等于
+// 替他保存一份没验证过的配置，而不勾的后果（模型页没有那个下拉）在表头已经写清楚了。
 
 /**
  * 逗号或换行分隔的档位 -> 规范顺序的数组。空 = 不声明（沿用目录能力，手写模型则没有菜单）。
@@ -299,12 +338,8 @@ export function normalizeUpstreamInput(raw, existingEntry) {
   const name = normalizeName(raw?.name)
   const shape = normalizeShape(raw?.shape, name)
   const baseUrl = normalizeBaseUrl(raw?.baseUrl, name)
-  const models = normalizeModelIds(raw?.models, shape)
+  const models = normalizeModelRecords(raw?.models, shape)
   const extraHeaders = normalizeExtraHeaders(raw?.extraHeaders, shape)
-  // 缺字段沿用已存的值，和限额同一个理由：页面上不一定每次都把它填一遍。
-  const reasoningEfforts = raw?.reasoningEfforts === undefined
-    ? normalizeThinkingLevels(existingEntry?.dsh?.reasoningEfforts)
-    : normalizeThinkingLevels(raw.reasoningEfforts)
   // 限额数的是请求次数（每分钟上限 + UTC 每日配额），不是 token 也不是金额。面板上有这
   // 两个输入框，但留空或缺字段一律沿用 keys.json 里那条的现值，只有显式写 0 才是"取消限制"。
   const requestsPerMinute = normalizeQuota(
@@ -317,7 +352,7 @@ export function normalizeUpstreamInput(raw, existingEntry) {
   const key = typed !== '' ? typed : String(existingEntry?.key ?? '')
   if (key === '') throw new AdminInputError('上游 ' + name + ' 还没有密钥，请填一次（之后修改其它字段可以留空）')
   if (key.length > 4096) throw new AdminInputError('密钥超过 4096 个字符')
-  return { name, shape, baseUrl, key, models, extraHeaders, reasoningEfforts, requestsPerMinute, dailyRequestBudget }
+  return { name, shape, baseUrl, key, models, extraHeaders, requestsPerMinute, dailyRequestBudget }
 }
 
 /**
@@ -342,9 +377,17 @@ export function toBrokerEntry(record) {
   if (Object.keys(extras).length > 0) entry.extraHeaders = extras
   if (record.requestsPerMinute > 0) entry.requestsPerMinute = record.requestsPerMinute
   if (record.dailyRequestBudget > 0) entry.dailyRequestBudget = record.dailyRequestBudget
-  entry.dsh = { api: record.shape, models: [...record.models] }
-  // 空数组不写："没声明"和"声明了空"在 pi-ai 那边不是一回事，后者会被判成配置错误。
-  if (record.reasoningEfforts.length > 0) entry.dsh.reasoningEfforts = [...record.reasoningEfforts]
+  // 每一条只写它真的声明过的东西：能力与档位都为空时就是一个光秃秃的 id，与老配置一字不差。
+  // 这里再归一化一次，是因为调用方给的既可能是记录，也可能是安装器写的字符串 id。
+  // 上游级的 reasoningEfforts 不再写：档位已经跟着模型走了，再留一份就成了两个真相。
+  entry.dsh = {
+    api: record.shape,
+    models: normalizeModelRecords(record.models, record.shape).map((model) => ({
+      id: model.id,
+      ...(model.input.length > 0 ? { input: [...model.input] } : {}),
+      ...(model.reasoningEfforts.length > 0 ? { reasoningEfforts: [...model.reasoningEfforts] } : {}),
+    })),
+  }
   return entry
 }
 
@@ -375,22 +418,28 @@ export function toUpstreamView(entry) {
   }
   let models = []
   try {
-    models = normalizeModelIds(entry?.dsh?.models, shape)
+    models = normalizeModelRecords(entry?.dsh?.models, shape)
   } catch {
     models = []
   }
-  let reasoningEfforts = []
+  // 老配置的档位挂在上游上（面板以前那一节叫"推理强度档位"，写的是 dsh.reasoningEfforts）。
+  // 读的时候把它当成"这一层模型的默认值"补到还没有自己声明的模型上，页面就能照原样回显；
+  // 下一次保存会把它们落到每个模型身上，上游级那一份自然消失（toBrokerEntry 不再写它）。
+  let legacyLevels = []
   try {
-    reasoningEfforts = normalizeThinkingLevels(entry?.dsh?.reasoningEfforts)
+    legacyLevels = normalizeThinkingLevels(entry?.dsh?.reasoningEfforts)
   } catch {
-    reasoningEfforts = []
+    legacyLevels = []
   }
   return {
     name: String(entry?.name ?? ''),
     baseUrl: String(entry?.baseUrl ?? ''),
     shape,
-    models,
-    reasoningEfforts,
+    models: models.map((model) => ({
+      id: model.id,
+      input: [...model.input],
+      reasoningEfforts: model.reasoningEfforts.length > 0 ? [...model.reasoningEfforts] : [...legacyLevels],
+    })),
     // 页面上要能直接看出这条上游为什么在 DSH 里 403：面板自己拉清单时会容错地试
     // /v1/models，所以缺版本段在面板这边完全看不出来。
     needsVersionSegment: baseUrlLooksUnversioned(shape, entry?.baseUrl),
@@ -542,8 +591,36 @@ export function extractModelIds(payload, shape) {
 }
 
 /**
+ * 上游返回的 id 列表 -> 模型记录：能力与档位沿用已有配置里同一个 id 那份声明。
+ *
+ * 面板保存时"一个都没勾"的目录外上游会走这里自动补一份清单（DSH 要求至少一个模型）。
+ * 这时候用户并没有逐条重新选过，所以上一次勾好的能力与档位必须按 id 搬过来——否则
+ * "这次先清空重来"的一次点击就会静默抹掉他之前所有的档位设置。
+ *
+ * @param ids 上游 /models 返回的 id
+ * @param existingEntry keys.json 里这条上游的旧条目（没有就当作全新）
+ */
+export function mergeDiscoveredModels(ids, existingEntry) {
+  let declared = []
+  try {
+    declared = existingEntry ? toUpstreamView(existingEntry).models : []
+  } catch {
+    declared = []
+  }
+  const before = new Map(declared.map((model) => [model.id, model]))
+  return ids.map((id) => {
+    const kept = before.get(id)
+    return {
+      id,
+      input: kept ? [...kept.input] : [],
+      reasoningEfforts: kept ? [...kept.reasoningEfforts] : [],
+    }
+  })
+}
+
+/**
  * 交给 bin/seed-dsh-model-settings.mjs 的载荷：把 keys.json 里的非秘密事实
- * （上游名、形态、模型 id）翻译成"DSH 侧该怎么填"。密钥不在其中。
+ * （上游名、形态、模型 id 及其能力与档位）翻译成"DSH 侧该怎么填"。密钥不在其中。
  */
 export function seedPayload(document, brokerBase, placeholder) {
   return {
@@ -555,7 +632,8 @@ export function seedPayload(document, brokerBase, placeholder) {
         name: view.name,
         shape: view.shape,
         models: view.models,
-        reasoningEfforts: view.reasoningEfforts,
+        // 面板是这份清单的编辑处，所以每次保存都整体覆盖（见 planProvider 的 sync）。
+        sync: true,
       }
     }),
   }

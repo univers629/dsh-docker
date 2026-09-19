@@ -7,16 +7,29 @@
 //   3. 任何时候都不显示密钥：后端只回一个指纹，用来回答"这次填的是不是同一把"。
 
 const TOKEN_KEY = 'dsh-key-admin-token'
-const S = { token: '', state: null, editing: '', fetched: [] }
+// rows 是模型清单表的全部状态：一条一个模型，带着它自己的勾选、能力与推理档位。
+// 表里显示的行不等于要保存的行——只有 checked 的那些会写进 keys.json，这就是"左边
+// 勾选框决定最后保存哪些模型"。
+const S = { token: '', state: null, editing: '', rows: [], fetched: false }
 
 const byId = (id) => document.getElementById(id)
 
-// 服务端会在 /api/state 里给出这两份清单（档位全集 + 默认勾选），这里的常量只是它到达
-// 之前的兜底，保持和 dsh-key-admin-policy.mjs 一致。
+// 服务端会在 /api/state 里给出档位全集（thinkingLevels），这里的常量只是它到达之前的
+// 兜底，保持和 dsh-key-admin-policy.mjs（THINKING_LEVELS）一致。
 const FALLBACK_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
-const FALLBACK_DEFAULT_THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'max']
 
-const defaultThinkingLevels = () => (S.state ? S.state.defaultThinkingLevels : FALLBACK_DEFAULT_THINKING_LEVELS)
+// 档位的中文注解，只用在提示里：真正的值（写进配置的那个字符串）永远是英文档位名。
+const LEVEL_NOTES = {
+  off: '不思考（不发任何推理参数；只勾它没有意义，至少再勾一个别的档位）',
+  minimal: '最少的推理',
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '极高',
+  max: '最高',
+}
+
+const thinkingLevels = () => (S.state ? S.state.thinkingLevels : FALLBACK_THINKING_LEVELS)
 
 function log(text) {
   byId('log').textContent = text
@@ -113,7 +126,12 @@ function renderList() {
     if (view.requestsPerMinute > 0) bits.push(view.requestsPerMinute + ' 次/分钟')
     if (view.dailyRequestBudget > 0) bits.push(view.dailyRequestBudget + ' 次/天')
     if (view.extraHeaders.length > 0) bits.push(view.extraHeaders.length + ' 个固定头')
-    if (view.reasoningEfforts.length > 0) bits.push('推理强度 ' + view.reasoningEfforts.join('/'))
+    // 能力与档位是逐模型的，所以这里数的是"有几个模型声明过"，不再是一串共用的档位名：
+    // 写出名字反而会让人以为整条上游都吃那几个档位。
+    const withLevels = view.models.filter((model) => model.reasoningEfforts.length > 0).length
+    if (withLevels > 0) bits.push(withLevels + ' 个模型声明了推理档位')
+    const withImage = view.models.filter((model) => model.input.indexOf('image') !== -1).length
+    if (withImage > 0) bits.push(withImage + ' 个模型吃图像')
     bits.push('密钥指纹 ' + (view.keyFingerprint || '无'))
     // 这条是“面板能拉到模型、DSH 网页里 403”的唯一可见线索：拉清单时面板会容错地
     // 试 /v1/models，缺版本段在这一侧完全看不出来。
@@ -159,17 +177,16 @@ function deleteUpstream(name, statusNode) {
 
 function fillForm(view) {
   S.editing = view ? view.name : ''
-  S.fetched = []
-  byId('model-list').textContent = ''
+  S.fetched = false
   byId('form-title').textContent = view ? '编辑上游：' + view.name : '新增上游'
   byId('name').value = view ? view.name : ''
   byId('shape').value = view ? view.shape : 'any'
   byId('base-url').value = view ? view.baseUrl : ''
   byId('key').value = ''
-  byId('models').value = view ? view.models.join(', ') : ''
-  renderThinkingLevels(view && view.reasoningEfforts.length > 0
-    ? view.reasoningEfforts
-    : defaultThinkingLevels())
+  byId('model-search').value = ''
+  byId('model-manual').value = ''
+  // 打开一条已存的上游：它的模型全在表里、全勾上。新建时表是空的——模型只能靠拉取或手写。
+  setModelRows(view ? view.models : [], 'saved')
   byId('rpm').value = view ? String(view.requestsPerMinute) : '0'
   byId('daily').value = view ? String(view.dailyRequestBudget) : '0'
   byId('key-hint').textContent = view && view.hasKey
@@ -195,11 +212,11 @@ function readForm() {
   return {
     name: byId('name').value.trim(),
     shape: byId('shape').value,
-    reasoningEfforts: checkedThinkingLevels().join(', '),
     baseUrl: byId('base-url').value.trim(),
     key: byId('key').value,
     rename: S.editing,
-    models: byId('models').value,
+    // 只有勾上的模型进这份清单：它同时是 keys.json 的模型清单和 DSH 那边的模型清单。
+    models: checkedRows().map(recordFromRow),
     extraHeaders,
     // 两个限额框留空时发空串，后端把它当成"沿用 keys.json 里的现值"；要取消限制得填 0。
     requestsPerMinute: byId('rpm').value.trim(),
@@ -207,66 +224,284 @@ function readForm() {
   }
 }
 
+// --- 模型清单与每个模型的能力、推理档位 ---
+//
+// 一次改动就够说明这里的形状：从前"模型清单"是一个文本框，"推理强度档位"挂在整条上游上，
+// 两者分在两节。可档位本来就是逐模型的事实（同一个网关里 gpt-5 吃 reasoning_effort，
+// 图像模型不吃），挂在上游上等于逼用户把不同口味的模型拆成两个上游。现在合成一张表：
+// 一行一个模型，左边勾选框决定它要不要保存，右边是它自己的调用能力与档位。
+
+function newRow(id, origin, checked) {
+  return { id, name: '', vision: false, levels: {}, checked, origin }
+}
+
+/** keys.json / 接口里的模型记录 -> 表里的一行。 */
+function rowFromRecord(record, origin, checked) {
+  const row = newRow(record.id, origin, checked)
+  row.name = record.name || ''
+  row.vision = Array.isArray(record.input) && record.input.indexOf('image') !== -1
+  for (const level of record.reasoningEfforts || []) row.levels[level] = true
+  return row
+}
+
+/** 表里的行 -> 接口要的记录。没声明的字段一律不写：空数组在 pi-ai 那边就是"不声明"。 */
+function recordFromRow(row) {
+  const record = { id: row.id }
+  if (row.vision) record.input = ['text', 'image']
+  const levels = thinkingLevels().filter((level) => row.levels[level])
+  if (levels.length > 0) record.reasoningEfforts = levels
+  return record
+}
+
+/** 整张表替换成一份记录（打开某条上游、保存成功之后回填）。 */
+function setModelRows(records, origin) {
+  S.rows = (records || []).map((record) => rowFromRecord(record, origin, true))
+  if (origin === 'fetched') S.fetched = true
+  renderModelTable()
+}
+
 /**
- * 推理强度档位 = 一排勾选框。
+ * 拉回来的清单 -> 表里的行。
  *
- * 用勾选而不是输入框，是因为合法档位就那几个，手写只会拼错然后被后端拒。已存的上游按
- * keys.json 里的实际值回显；从没声明过的（新建，或旧数据里没有这个字段）按面板默认
- * 勾上——后端的"空 = 不声明"没变，全不勾保存回去就是取消声明。
+ * 两件事让"拉一次"不会毁掉已经填好的东西：
+ *   1. 已经存在的 id 沿用原来的能力与档位（上游返回的信息里本来也没有这些）；
+ *   2. 保存过、但这次上游没返回的 id 留在表里并标注出来——静默丢掉一个模型，
+ *      用户只会在 DSH 里发现某个模型不见了，那时候早就想不起来是哪一步弄丢的；
+ *   3. 取消过勾选的 id 保持不勾。"拉取"回答的是"上游有哪些模型"，不是"我要哪些"，
+ *      所以它不能把用户刚做的取舍冲掉（冲掉了再点一次保存，模型就被悄悄加回去了）。
+ * 前两种都只是"留在表里"，要不要留仍然由勾选框决定。
  */
-function renderThinkingLevels(selected) {
-  const box = byId('reasoning-levels')
+function applyFetched(ids) {
+  const previous = new Map(S.rows.map((row) => [row.id, row]))
+  const rows = ids.map((id) => {
+    const old = previous.get(id)
+    if (old) {
+      previous.delete(id)
+      return { ...old, origin: 'fetched' }
+    }
+    return newRow(id, 'fetched', true)
+  })
+  const kept = S.rows.filter((row) => previous.has(row.id))
+    .map((row) => ({ ...row, origin: 'missing' }))
+  S.rows = rows.concat(kept)
+  S.fetched = true
+  renderModelTable()
+  return { added: rows.length - kept.length, kept: kept.length, off: rows.filter((row) => !row.checked).length }
+}
+
+function visibleRows() {
+  const query = byId('model-search').value.trim().toLowerCase()
+  if (query === '') return S.rows
+  return S.rows.filter((row) => row.id.toLowerCase().indexOf(query) !== -1)
+}
+
+const checkedRows = () => S.rows.filter((row) => row.checked)
+
+function modelChip(text, on, locked, title, onToggle) {
+  const label = document.createElement('label')
+  label.className = 'mchip' + (on ? ' on' : '') + (locked ? ' locked' : '')
+  label.title = title
+  const input = document.createElement('input')
+  input.type = 'checkbox'
+  input.checked = on
+  input.disabled = locked
+  if (!locked) input.addEventListener('change', () => onToggle(input.checked))
+  label.appendChild(input)
+  const caption = document.createElement('span')
+  caption.textContent = text
+  label.appendChild(caption)
+  return label
+}
+
+function renderModelTable() {
+  const tbody = byId('model-rows')
+  tbody.textContent = ''
+  const rows = visibleRows()
+
+  if (S.rows.length === 0 || rows.length === 0) {
+    const tr = document.createElement('tr')
+    const td = document.createElement('td')
+    td.className = 'empty'
+    td.colSpan = 4
+    td.textContent = S.rows.length === 0
+      ? (S.fetched
+        ? '上游没有返回任何模型 id。手写一个加进来，或者在下面直接保存——目录里的上游留空就是沿用内置清单。'
+        : '还没有模型。点上面的「向上游拉取模型列表」，或者在下面手写一个 id 加进来。')
+      : '没有匹配「' + byId('model-search').value.trim() + '」的模型。'
+    tr.appendChild(td)
+    tbody.appendChild(tr)
+    renderModelCount()
+    return
+  }
+
+  for (const row of rows) {
+    const tr = document.createElement('tr')
+    // 没勾上的行整体压暗：这张表里"会不会被保存"是最要紧的一件事，只靠最左边那个
+    // 小方框要一行一行数。压暗只影响观感，勾选框本身照旧能点。
+    if (!row.checked) tr.className = 'off'
+
+    const ckCell = document.createElement('td')
+    ckCell.className = 'ck'
+    const ck = document.createElement('input')
+    ck.type = 'checkbox'
+    ck.checked = row.checked
+    ck.title = '勾上才会保存进 keys.json 并写进 DSH'
+    ck.addEventListener('change', () => {
+      row.checked = ck.checked
+      // 就地改类名而不是重画整张表：重画会把滚动位置和"刚点的那一行"一起弄丢。
+      tr.classList.toggle('off', !row.checked)
+      renderModelCount()
+    })
+    ckCell.appendChild(ck)
+    tr.appendChild(ckCell)
+
+    const nameCell = document.createElement('td')
+    const idLine = document.createElement('div')
+    idLine.className = 'mid'
+    idLine.textContent = row.id
+    nameCell.appendChild(idLine)
+    if (row.name && row.name !== row.id) {
+      const nameLine = document.createElement('div')
+      nameLine.className = 'sub'
+      nameLine.textContent = row.name
+      nameCell.appendChild(nameLine)
+    }
+    if (row.origin === 'missing') {
+      const missing = document.createElement('div')
+      missing.className = 'missing'
+      missing.textContent = '这次上游没返回它（保存会留着，不想要就取消勾选）'
+      nameCell.appendChild(missing)
+    }
+    tr.appendChild(nameCell)
+
+    const abilityCell = document.createElement('td')
+    const ability = document.createElement('div')
+    ability.className = 'chips'
+    // 文本永远是通的：pi-ai 不声明 input 时的默认就是 text，所以这一颗只是把事实写出来，
+    // 不给点。要声明的是"这个模型还吃图"——那才是需要写进配置的额外能力。
+    ability.appendChild(modelChip('文本', true, true, '文本输入是默认能力，不用声明', () => {}))
+    ability.appendChild(modelChip('图像', row.vision, false,
+      '勾上 = 声明这个模型吃图像输入（写进 DSH 的 input: [text, image]）',
+      (on) => { row.vision = on; renderModelTable() }))
+    abilityCell.appendChild(ability)
+    tr.appendChild(abilityCell)
+
+    const levelCell = document.createElement('td')
+    const chips = document.createElement('div')
+    chips.className = 'chips'
+    for (const level of thinkingLevels()) {
+      chips.appendChild(modelChip(level, !!row.levels[level], false, LEVEL_NOTES[level] || level, (on) => {
+        if (on) row.levels[level] = true
+        else delete row.levels[level]
+        renderModelTable()
+      }))
+    }
+    if (thinkingLevels().every((level) => !row.levels[level])) {
+      // 一行都不勾 = 不声明。这句话是整列的规则，不是这一行的状态：逐行写一遍会变成
+      // 满屏重复，所以只在标题栏上说一次（见 index.html 的表头说明）。
+      const undeclared = document.createElement('span')
+      undeclared.className = 'sub undeclared'
+      undeclared.textContent = '不声明'
+      chips.appendChild(undeclared)
+    }
+    levelCell.appendChild(chips)
+    tr.appendChild(levelCell)
+
+    tbody.appendChild(tr)
+  }
+  renderModelCount()
+}
+
+function renderModelCount() {
+  const checked = checkedRows().length
+  const shown = visibleRows().length
+  const parts = ['已选 ' + checked + '/' + S.rows.length]
+  if (shown !== S.rows.length) parts.push('显示 ' + shown)
+  byId('model-count').textContent = parts.join(' · ')
+  const all = byId('model-toggle-all')
+  all.checked = shown > 0 && visibleRows().every((row) => row.checked)
+  all.indeterminate = !all.checked && checked > 0
+  renderBulkLevels()
+}
+
+/** 批量操作只作用于勾选的模型；一个都没勾时作用于当前显示的全部。 */
+function bulkTargets() {
+  const selected = checkedRows()
+  return selected.length > 0 ? selected : visibleRows()
+}
+
+function bulkNote() {
+  const targets = bulkTargets()
+  if (targets.length === 0) {
+    status('form-status', '表里没有模型可以设置。', 'bad')
+    return []
+  }
+  const selected = checkedRows().length > 0
+  status('form-status', (selected ? '已作用于勾选的 ' : '没有勾选，已作用于当前显示的 ')
+    + targets.length + ' 个模型，别忘了保存。', '')
+  return targets
+}
+
+function applyBulkLevel(level, on) {
+  const targets = bulkNote()
+  if (targets.length === 0) return
+  for (const row of targets) {
+    if (on) row.levels[level] = true
+    else delete row.levels[level]
+  }
+  renderModelTable()
+}
+
+/**
+ * 批量档位药丸。亮着 = 目标里的每个模型都声明了这一档；点一下就是给目标加上／去掉它。
+ * 它们跟着表格一起重画，所以"点完按钮变成亮的"这件事不需要另外记状态。
+ */
+function renderBulkLevels() {
+  const box = byId('bulk-levels')
   box.textContent = ''
-  const chosen = new Set(selected || [])
-  // 还没连上令牌时（点了"新增上游"就会走到这里）S.state 是 null，用同一份兜底清单，
-  // 连上之后 fillForm 会再渲染一遍，以服务端给的顺序为准。
-  for (const level of (S.state ? S.state.thinkingLevels : FALLBACK_THINKING_LEVELS)) {
-    const label = document.createElement('label')
-    const input = document.createElement('input')
-    input.type = 'checkbox'
-    input.value = level
-    input.checked = chosen.has(level)
-    label.appendChild(input)
-    const text = document.createElement('span')
-    text.textContent = level
-    label.appendChild(text)
-    box.appendChild(label)
+  const targets = bulkTargets()
+  for (const level of thinkingLevels()) {
+    const all = targets.length > 0 && targets.every((row) => row.levels[level])
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'mchip' + (all ? ' on' : '')
+    button.textContent = level
+    button.title = '给勾选的模型加上 ' + level + '（' + (LEVEL_NOTES[level] || level) + '）；都加上之后再点就是取消'
+    button.addEventListener('click', () => applyBulkLevel(level, !all))
+    box.appendChild(button)
   }
 }
 
-function checkedThinkingLevels() {
-  const out = []
-  for (const input of byId('reasoning-levels').querySelectorAll('input')) {
-    if (input.checked) out.push(input.value)
-  }
-  return out
+function applyBulkVision(on) {
+  const targets = bulkNote()
+  if (targets.length === 0) return
+  for (const row of targets) row.vision = on
+  renderModelTable()
 }
 
-function renderModelChoices(models) {
-  S.fetched = models
-  const box = byId('model-list')
-  box.textContent = ''
-  const chosen = new Set(byId('models').value.split(/[\s,]+/).filter((id) => id !== ''))
-  for (const id of models) {
-    const label = document.createElement('label')
-    const input = document.createElement('input')
-    input.type = 'checkbox'
-    input.value = id
-    input.checked = chosen.has(id)
-    label.appendChild(input)
-    const text = document.createElement('span')
-    text.textContent = id
-    label.appendChild(text)
-    box.appendChild(label)
+/** 手写一个模型 id：上游不实现 /models 时的唯一出路。 */
+function addManualModel() {
+  const input = byId('model-manual')
+  const id = input.value.trim()
+  if (id === '') return
+  if (/[\s,'"\\]/.test(id)) {
+    status('form-status', '模型 id 不能含空白、逗号、引号或反斜杠：' + id, 'bad')
+    return
   }
-}
-
-function checkedModels() {
-  const out = []
-  for (const input of byId('model-list').querySelectorAll('input')) {
-    if (input.checked) out.push(input.value)
+  const existing = S.rows.find((row) => row.id === id)
+  if (existing) {
+    // 已经在表里就不再插一行：同一条 id 出现两次，保存时的记录会互相覆盖，
+    // 而用户看到的只是"点了没反应"。
+    existing.checked = true
+    input.value = ''
+    renderModelTable()
+    status('form-status', id + ' 已经在清单里了，已替你勾上。', '')
+    return
   }
-  return out
+  S.rows.push(newRow(id, 'manual', true))
+  input.value = ''
+  renderModelTable()
+  status('form-status', '已加入 ' + id + '，别忘了保存。', '')
 }
 
 function seedSummary(payload) {
@@ -385,6 +620,7 @@ async function connect() {
     sessionStorage.setItem(TOKEN_KEY, value)
     byId('token').value = ''
     if (S.state.upstreams.length > 0) fillForm(null)
+    else renderModelTable()
   } catch (error) {
     status('auth-status', String(error.message || error), 'bad')
   }
@@ -434,31 +670,54 @@ function main() {
     const shape = S.state.defaultShapes[name]
     if (shape) byId('shape').value = shape
   })
-  byId('reasoning-default').addEventListener('click', () => renderThinkingLevels(defaultThinkingLevels()))
-  byId('reasoning-none').addEventListener('click', () => renderThinkingLevels([]))
-  byId('check-all').addEventListener('click', () => {
-    for (const input of byId('model-list').querySelectorAll('input')) input.checked = true
+  // --- 模型清单表 ---
+  byId('model-search').addEventListener('input', () => renderModelTable())
+  byId('model-toggle-all').addEventListener('change', (event) => {
+    // 只作用于当前显示的行：搜着 "gpt" 时点全选框，不该把别的模型也一起勾上。
+    for (const row of visibleRows()) row.checked = event.target.checked
+    renderModelTable()
   })
-  byId('check-none').addEventListener('click', () => {
-    for (const input of byId('model-list').querySelectorAll('input')) input.checked = false
+  byId('model-select-none').addEventListener('click', () => {
+    for (const row of visibleRows()) row.checked = false
+    renderModelTable()
   })
-  byId('apply-models').addEventListener('click', () => {
-    byId('models').value = checkedModels().join(', ')
-    status('form-status', '已写入 ' + checkedModels().length + ' 个模型 id，别忘了保存。', '')
+  byId('model-invert').addEventListener('click', () => {
+    for (const row of visibleRows()) row.checked = !row.checked
+    renderModelTable()
   })
+  byId('model-add').addEventListener('click', addManualModel)
+  byId('model-manual').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') addManualModel()
+  })
+  // 批量档位：一排档位药丸直接把档位打到"勾选的模型"（没勾选则打到当前显示的）身上。
+  // 逐模型勾一遍 200 个不现实，但"这批模型都吃 low/medium/high"才是常见情况。
+  // 它们是真的按钮，不是勾选框：点一下就是"给选中的这批加上这一档"，再点一下取消。
+  renderBulkLevels()
+  byId('bulk-levels-none').addEventListener('click', () => {
+    const targets = bulkNote()
+    if (targets.length === 0) return
+    for (const row of targets) row.levels = {}
+    renderModelTable()
+  })
+  byId('bulk-vision-on').addEventListener('click', () => applyBulkVision(true))
+  byId('bulk-vision-off').addEventListener('click', () => applyBulkVision(false))
   byId('fetch-models').addEventListener('click', () => guard('form-status', async () => {
     const payload = await api('/api/models', readForm())
-    renderModelChoices(payload.models)
+    const applied = applyFetched(payload.models)
     // 拉取成功只说明"这个地址上有模型列表"，不代表 base_url 对：清单只在带版本段的地址上
     // 有，而 DSH 发请求时不补版本段。所以拉到之后顺手把 base_url 改对，否则用户看到的
     // 就是"面板能拉到模型、网页里一用就说密钥无效"。
+    const kept = (applied.kept > 0
+      ? '其中 ' + applied.kept + ' 个是已保存、这次上游没返回的，留在表里并标了出来，不想要就取消勾选。'
+      : '') + (applied.off > 0 ? '另外 ' + applied.off + ' 个你取消过勾选，保持没勾。' : '')
     if (payload.suggestedBaseUrl) {
       byId('base-url').value = payload.suggestedBaseUrl
       status('form-status', '模型列表在 ' + payload.endpoint + '（' + payload.models.length + ' 个）。'
         + 'base_url 少了版本段，已替你改成 ' + payload.suggestedBaseUrl
-        + '——DSH 发请求时不会自己补这一段，不改就会 403。勾选模型后记得保存。', 'good')
+        + '——DSH 发请求时不会自己补这一段，不改就会 403。' + kept, 'good')
     } else {
-      status('form-status', '上游 ' + payload.endpoint + ' 返回了 ' + payload.models.length + ' 个模型，勾选后点"把勾选的写进上面"。', 'good')
+      status('form-status', '上游 ' + payload.endpoint + ' 返回了 ' + payload.models.length
+        + ' 个模型。' + kept, 'good')
     }
     log(payload.models.join('\n') || '（上游没有返回任何模型 id）')
   }))
@@ -468,10 +727,21 @@ function main() {
     S.editing = payload.name
     byId('form-title').textContent = '编辑上游：' + payload.name
     byId('key').value = ''
-    // 保存时 base_url 和模型清单可能被自动改过，表单要跟着变，不然下一次保存会写回旧值。
+    // 保存时 base_url 和模型清单可能被自动改过（补版本段、自动拉清单），表单要跟着变，
+    // 不然下一次保存又会把旧值写回去。回填也用服务端那份：它才是真正落盘的内容。
     if (payload.baseUrl) byId('base-url').value = payload.baseUrl
-    if (Array.isArray(payload.models) && payload.models.length > 0) byId('models').value = payload.models.join(', ')
-    status('form-status', '已保存 ' + payload.name + '。', 'good')
+    if (Array.isArray(payload.models)) setModelRows(payload.models, 'saved')
+    // "已保存"只是说 keys.json 写进去了。模型清单在这张表里编辑之后，DSH 那边写不进去
+    // 就等于这次编辑没生效，所以那种情况不能再报成一句干净的绿色成功。
+    const seed = payload.seed ?? {}
+    const warned = Boolean(seed.warnings)
+    if (seed.failed) {
+      status('form-status', '密钥已保存，但写 DSH 配置失败（见下方日志），模型清单还没生效。', 'bad')
+    } else if (warned) {
+      status('form-status', '已保存 ' + payload.name + '；DSH 那边有没写进去的上游，见下方日志。', 'bad')
+    } else {
+      status('form-status', '已保存 ' + payload.name + '。', 'good')
+    }
     log(seedSummary(payload))
   }))
   byId('delete').addEventListener('click', () => deleteUpstream(byId('name').value.trim(), 'form-status'))
