@@ -1533,14 +1533,21 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
      * 返回 [{item, x, y, w, h}]；过小的项聚合进 item.aggregated 的"其它"块。
      */
     function squarify(items, width, height) {
-      const total = items.reduce(function (sum, it) { return sum + it.size }, 0)
+      // 先滤掉脏值：NaN/Infinity 会让面积算成 NaN，React 里变成 w:null 的块；
+      // 负数会让块画到画布外。总量按过滤后的集合重算，保证面积守恒。
+      const clean = []
+      for (const it of items) {
+        if (typeof it.size !== 'number' || !Number.isFinite(it.size) || it.size <= 0) continue
+        clean.push(it)
+      }
+      const total = clean.reduce(function (sum, it) { return sum + it.size }, 0)
       if (total <= 0 || width <= 0 || height <= 0) return []
       const canvas = width * height
 
       // 面积阈值分流后还要做一次收敛：聚合出来的"其它"本身可能仍低于阈值
       // （例如一个 100GB 旁边跟着几个 1KB），那就继续把最小的那个大块并进去，
       // 直到"其它"自己站得住。否则它会被画成一条点不中的细线。
-      const sorted = items.slice().sort(function (a, b) { return b.size - a.size })
+      const sorted = clean.slice().sort(function (a, b) { return b.size - a.size })
       let cut = sorted.length
       while (cut > 0) {
         let smallBytes = 0
@@ -1653,6 +1660,8 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
       const node = props.node
       const width = props.width
       const height = props.height
+      // 多个根并排摆放时需要横向偏移；缺省 0 保证子节点递归不受影响。
+      const left = typeof props.left === 'number' ? props.left : 0
       const depth = props.depth
       const selected = props.selected
       const onSelect = props.onSelect
@@ -1661,7 +1670,7 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
       if (children.length === 0 || width < 24 || height < 24) {
         return h('div', {
           style: {
-            position: 'absolute', left: 0, top: 0, width: width, height: height,
+            position: 'absolute', left: left, top: 0, width: width, height: height,
             background: blockColor(node, depth),
             opacity: node.kind === 'system' || node.kind === 'data' ? 0.55 : 1,
           },
@@ -1715,7 +1724,7 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
           },
         }, label))
       }
-      return h('div', { style: { position: 'absolute', left: 0, top: 0, width: width, height: height } }, blocks)
+      return h('div', { style: { position: 'absolute', left: left, top: 0, width: width, height: height } }, blocks)
     }
 
     function DiskUsagePanel() {
@@ -1804,9 +1813,10 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
           },
         },
           state.status === 'ready'
-            ? roots.map((root) => h(DiskTreemap, {
+            ? roots.map((root, rootIndex) => h(DiskTreemap, {
               key: root.path,
               node: root,
+              left: rootIndex * (size.width / Math.max(1, roots.length)),
               width: size.width / Math.max(1, roots.length) - 2,
               height: size.height,
               depth: 0,

@@ -454,22 +454,18 @@ function asksForDiskUsage(request) {
 // 这样用户能看到"剩下的到底是什么"，而不是疑惑总量对不上。
 const DISK_SCAN_ROOTS = ['/data', '/workspace', '/tmp', '/app', '/usr']
 
-async function readJsonBody(request) {
-  const chunks = []
-  let total = 0
-  for await (const chunk of request) {
-    total += chunk.length
-    if (total > MAX_REQUEST_BYTES) throw new RequestBodyError('请求体过大 / request body too large')
-    chunks.push(chunk)
-  }
-  if (chunks.length === 0) return {}
-  const text = Buffer.concat(chunks).toString('utf8')
-  try {
-    return JSON.parse(text)
-  } catch {
-    throw new RequestBodyError('请求体不是合法 JSON / request body is not valid JSON')
-  }
+// 扫描单次飞行：/info?disk=1 落在 nginx 不限流的只读组，用户连点"重新扫描"会
+// 并发起好几个 du（实测单次 3.7s CPU），把容器 CPU 打满。这里让并发请求复用同
+// 一个 in-flight promise，结果一致，代价只付一次。
+let diskScanInflight = null
+function scanDiskUsageOnce() {
+  if (diskScanInflight !== null) return diskScanInflight
+  diskScanInflight = scanDiskUsage(DISK_SCAN_ROOTS).finally(function () {
+    diskScanInflight = null
+  })
+  return diskScanInflight
 }
+
 
 function trustedLoopbackRequest(request) {
   const address = request.socket.remoteAddress
@@ -555,7 +551,7 @@ export function apply(ctx) {
         }
         // 同上：借 /info 放行，用 ?disk=1 取 treemap 数据。
         if (asksForDiskUsage(request)) {
-          sendJson(response, 200, { ok: true, ...await scanDiskUsage(DISK_SCAN_ROOTS) })
+          sendJson(response, 200, { ok: true, ...await scanDiskUsageOnce() })
           return
         }
         sendJson(response, 200, await dshInfo())
@@ -685,6 +681,13 @@ export function apply(ctx) {
           const target = typeof body.path === 'string' ? body.path : null
           if (target === null) {
             sendJson(response, 400, { ok: false, error: '缺少待清理路径 / missing path' })
+            return
+          }
+          // /tmp/dsh-stage 既是"可清理的构建缓存"，也是 DSH 更新的暂存目录（里面
+          // 放着 rc1/rc2）。更新进行中把它删掉会让更新半途而废，所以这里与更新
+          // 流程互斥。
+          if (updateRunning()) {
+            sendJson(response, 409, { ok: false, error: 'DSH 更新正在进行，暂不清理 / a DSH update is running' })
             return
           }
           try {

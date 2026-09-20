@@ -14,6 +14,7 @@
 // size 单位字节。父 size 由 du 给出整棵子树大小，天然逐层一致。
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { realpath, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 
 const execFileAsync = promisify(execFile)
@@ -37,24 +38,39 @@ const SYSTEM_PREFIXES = ['/app', '/usr', '/bin', '/sbin', '/lib', '/lib64', '/et
 const DSH_DATA_PREFIXES = ['/data/dsh', '/data/agents', '/data/mcp']
 
 // 明确可清理的模式：崩溃转储与各类构建缓存。删掉不影响任何功能。
+//
+// `onlyUnder` 限定父目录：gradle-home、watcher、dsh-stage 这类名字很通用，只按
+// basename 判定会把用户自己建的 /data/home/x/watcher 也划成可删（审查指出 /tmp/watcher
+// 疑似正被 watch-profile-plugins 使用）。限定父目录后，同名但位置不同的目录不会被误判。
 const CLEANABLE_PATTERNS = [
+  // core dump 出现在任何地方都该清：它只是某次崩溃的内存快照。
   { test: /^core\.\d+$/, reason: 'core-dump' },
-  { test: /^gradle-home$/, reason: 'build-cache' },
-  { test: /^dsh-stage$/, reason: 'build-cache' },
-  { test: /^chromium-clean$/, reason: 'build-cache' },
-  { test: /^watcher$/, reason: 'build-cache' },
+  { test: /^gradle-home$/, reason: 'build-cache', onlyUnder: ['/tmp'] },
+  { test: /^dsh-stage$/, reason: 'build-cache', onlyUnder: ['/tmp'] },
+  { test: /^chromium-clean$/, reason: 'build-cache', onlyUnder: ['/tmp'] },
+  { test: /^watcher$/, reason: 'build-cache', onlyUnder: ['/tmp'] },
   { test: /^\.pnpm-store$/, reason: 'package-cache' },
-  { test: /^node-compile-cache$/, reason: 'build-cache' },
-  { test: /^miniflare-/, reason: 'build-cache' },
-  { test: /^\.org\.chromium\.Chromium\./, reason: 'build-cache' },
+  { test: /^node-compile-cache$/, reason: 'build-cache', onlyUnder: ['/tmp'] },
+  { test: /^miniflare-/, reason: 'build-cache', onlyUnder: ['/tmp'] },
+  { test: /^\.org\.chromium\.Chromium\./, reason: 'build-cache', onlyUnder: ['/tmp'] },
 ]
+
+/** 判断 path 是否落在 onlyUnder 限定的父目录里（含父目录自身）。 */
+function underAllowedParent(path, parents) {
+  if (!Array.isArray(parents) || parents.length === 0) return true
+  for (const parent of parents) {
+    if (path === parent) return true
+    if (path.startsWith(parent.endsWith('/') ? parent : `${parent}/`)) return true
+  }
+  return false
+}
 
 function classify(path) {
   if (SYSTEM_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))) {
     return { kind: 'system', deletable: false, cleanable: false }
   }
   const name = basename(path)
-  const hit = CLEANABLE_PATTERNS.find((rule) => rule.test.test(name))
+  const hit = CLEANABLE_PATTERNS.find((rule) => rule.test.test(name) && underAllowedParent(path, rule.onlyUnder))
   // 先判可清理：缓存可能寄生在数据目录里（如 /data/dsh/.pnpm-store），
   // 若先按父目录判成"数据不可删"，这些本该能清的缓存就永远清不掉了。
   if (hit) return { kind: 'cleanable', deletable: true, cleanable: true, reason: hit.reason }
@@ -147,9 +163,10 @@ function buildTree(root, sizes) {
  * 三、四层。只靠固定深度的 du 会漏掉它们，界面上就看不到最能省空间的那几项。
  * 所以用 find 直接按名字定位——它只匹配文件/目录名，代价很低。
  */
-async function findCleanable(roots) {
+async function findCleanable(roots, deadline) {
   const found = []
   for (const root of roots) {
+    if (Date.now() > deadline) break
     let stdout = ''
     try {
       const result = await execFileAsync(
@@ -158,7 +175,7 @@ async function findCleanable(roots) {
           '-o', '-name', 'dsh-stage', '-o', '-name', 'watcher', '-o', '-name', 'chromium-clean',
           '-o', '-name', '.pnpm-store', '-o', '-name', 'node-compile-cache', ')',
           '-not', '-path', '*/node_modules/*'],
-        { timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
+        { timeout: Math.max(1000, Math.min(15000, deadline - Date.now())), maxBuffer: 16 * 1024 * 1024 },
       )
       stdout = result.stdout
     } catch (error) {
@@ -174,9 +191,11 @@ async function findCleanable(roots) {
   // 逐个量大小（数量有限，find 已经把候选收敛到很小的集合）
   const out = []
   for (const path of [...new Set(found)]) {
+    if (Date.now() > deadline) break
     let size = 0
     try {
-      const { stdout } = await execFileAsync('du', ['-sk', '--', path], { timeout: 10000 })
+      const remaining = Math.max(1000, Math.min(10000, deadline - Date.now()))
+      const { stdout } = await execFileAsync('du', ['-sk', '--', path], { timeout: remaining })
       const first = stdout.split('\t')[0]
       const kb = Number.parseInt(first, 10)
       if (Number.isFinite(kb)) size = kb * 1024
@@ -221,7 +240,7 @@ export async function scanDiskUsage(roots) {
   }
   return {
     roots: trees,
-    cleanable: await findCleanable(roots),
+    cleanable: await findCleanable(roots, Date.now() + SCAN_TIMEOUT_MS),
     generatedAt: new Date().toISOString(),
     errors,
   }
@@ -237,15 +256,48 @@ export async function removeCleanable(path) {
   if (!info.deletable || !info.cleanable) {
     throw new Error(`不允许清理该路径 / refusing to remove non-cleanable path: ${path}`)
   }
-  // 再卡一道根目录白名单，防止 `../../` 之类的路径穿越。
-  const allowed = ['/tmp/', '/workspace/', '/data/home/', '/data/']
   const normalized = path.startsWith('/') ? path : `/${path}`
   if (normalized.includes('/../') || normalized.endsWith('/..')) {
     throw new Error('路径含上级引用 / path contains parent traversal')
   }
-  if (!allowed.some((p) => normalized.startsWith(p))) {
-    throw new Error(`路径不在允许范围内 / path outside allowed roots: ${path}`)
+
+  // 关键：解析成真实路径后**重新判定一次**。
+  //
+  // rm -rf 会跟随符号链接：若 /tmp/x/gradle-home 是指向别处的软链，仅凭名字判定
+  // "gradle-home 可删"就会把链接指向的真实目录删掉 —— 审查中实测利用成功。所以
+  // 这里先 realpath，再对解析结果重跑分类、白名单与穿越检查，最后用真实路径删除。
+  let real
+  try {
+    real = await realpath(normalized)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: true, path: normalized, alreadyAbsent: true }
+    throw error
   }
-  await execFileAsync('rm', ['-rf', '--', normalized], { timeout: 120000 })
-  return { ok: true, path: normalized }
+
+  // 目标自身是软链就拒绝：即便解析后的路径落在允许范围内，删除范围也和用户看到
+  // 的不一致。
+  try {
+    const link = await stat(normalized)
+    if (link.isSymbolicLink()) {
+      throw new Error('目标本身是符号链接，拒绝清理 / refusing to remove a symlink')
+    }
+  } catch (error) {
+    if (error instanceof Error && /符号链接|symlink/i.test(error.message)) throw error
+    return { ok: true, path: normalized, alreadyAbsent: true }
+  }
+
+  const realInfo = classify(real)
+  if (!realInfo.deletable || !realInfo.cleanable) {
+    throw new Error(`解析后的真实路径不允许清理 / resolved path is not cleanable: ${real}`)
+  }
+  const allowed = ['/tmp/', '/workspace/', '/data/home/', '/data/']
+  if (!allowed.some((p) => real.startsWith(p))) {
+    throw new Error(`解析后的路径不在允许范围内 / resolved path outside allowed roots: ${real}`)
+  }
+  if (real.includes('/../') || real.endsWith('/..')) {
+    throw new Error('解析后的路径含上级引用 / resolved path contains parent traversal')
+  }
+
+  await execFileAsync('rm', ['-rf', '--', real], { timeout: 120000 })
+  return { ok: true, path: real }
 }
