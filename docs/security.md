@@ -231,8 +231,36 @@ Linux 上还有一条比 `userns-remap` 更强的路径：rootless Docker，整�
 - 网络走 RootlessKit / slirp4netns 等用户态实现，吞吐与源 IP 保留上有取舍；部分存储与网络驱动不可用或需要较新内核。
 - cgroup 资源限制需要 cgroup v2 加 systemd 委派才完整，否则 `pids_limit` 等约束可能不生效。
 
+## trusted-proxy 模式的边界与自检
+
+`DSH_ACCESS_MODE=trusted-proxy` 把认证责任**完全委托给外层入口**（Cloudflare Access、面板认证、VPN、外层 Nginx）。容器内生成的是 `auth_basic off`，即容器自身**不持有任何应用层凭据**。外层的锁必须挂在每一个可能的入口上，而不只是你日常使用的那个。
+
+**直连源站 IP 会绕过外层认证。** 攻击者只要能连到源站的 443，并让请求被转发进 DSH 容器，Cloudflare Access 就完全不参与 —— 它只在 Cloudflare 边缘执行。
+
+```bash
+curl -k -i -H "Host: <你的域名>" https://<源站IP>/
+```
+
+若返回 `200` 且带 `set-cookie: dsh-auth-...`，说明**直连可以绕过**，部署实际处于无认证状态。修复后应变为 `401`、`403` 或连接超时。
+
+**两个容易误判的点：**
+
+- **不带 Host 头访问裸 IP 返回 403，不代表安全。** 那只是请求没匹配上转发规则、或 authority 缺失，与认证无关。必须带上真实域名的 Host 头复测。
+- **`DSH_TRUSTED_HOSTS` 不是访问控制列表。** 它有两重作用，都不是「放行名单」：一是 cookie 的绑定键（同一浏览器访问不同域名时会话互相隔离），二是上游 API 的 Host/Origin 边界。填错或留空的后果是**功能问题**（cookie 绑错 authority、反复要求登录、换域名掉线），**不会**因此更安全或更危险。不要靠配置它来防护。
+
+**根因（为什么伪装成本为零）：** 应用侧判断请求 authority 时读的是 HTTP `Host` 头，而容器 Nginx 的 `location /` 会把 `Host` 与 `Origin` **无条件重写**为 `127.0.0.1:3081`，以便应用侧保持回环语义。结果是 authority 恒为回环地址，客户端填什么域名都不影响判定；`Host` 头真正起作用的场合是**外层反代按域名做路由选择**，而不是 DSH 这一层的身份判断。因此在 DSH 这一侧做任何「校验 authority 是否在 `DSH_TRUSTED_HOSTS` 内」的过滤都**不会生效**，反而会让 trusted-proxy 模式整体失效。
+
+**因此 trusted-proxy 必须叠加一层不依赖 IP 与 Host 判断的凭据。** 按推荐度：
+
+1. **Cloudflare Tunnel**：源站零入站端口，直连在物理上不成立，且保留 Access 的 MFA 与审计。
+2. **改用 `DSH_ACCESS_MODE=basic`**：容器内 Nginx 用 bcrypt 哈希校验，任何到达容器的请求都要过。
+3. **两者叠加**：外层 MFA + 内层凭据，任一层被绕开时另一层仍在。
+
+若继续保留 trusted-proxy，请在**宿主机网络层**把 443 限制为只接受外层入口的来源地址（例如 Cloudflare 官方网段），不要依赖面板里的扩展 Nginx 配置 —— 那类配置需要 reload 才生效，且硬编码网段会因对方扩容而误伤正常用户。
+
 ## 已知限制
 
+- **trusted-proxy 模式没有应用层锁**：认证完全依赖外层，直连源站即绕过。自检方法见上一节。
 - **共享内核**：容器与宿主共用内核，Dirty Pipe、runC 一类内核与运行时漏洞无法在容器内加固层面拦住，只能升级宿主内核与 Docker；user namespace remap 只降低逃逸的影响面，不消除逃逸本身。
 - **免密 apt**：默认 `DSH_PRIVILEGED_APT=nopasswd`，容器内可以通过白名单代理成为容器 root。这是「Agent 能自行安装软件」与「容器内不可提权」之间的取舍，收紧方式是 `DSH_PRIVILEGED_APT=password`，代价是每次安装都需要人工输入密码。
 - **卸载保护是按包名的白名单**：只覆盖启动链依赖的包，名单外的包被卸载仍可能导致功能不可用。级联绕过依靠执行前的 `apt -s` 模拟拦截，模拟与真实执行之间理论上存在时间差。

@@ -92,8 +92,8 @@ For scripted deletion, `DSH_DELETE_KEEP=1` selects the keep branch (the deletion
 DSH provides no login authentication of its own, and the installer binds port 3080 to `127.0.0.1` by default. Public access must go through HTTPS and an authenticated entry point; do not use wildcard binds such as `0.0.0.0` or `::`. Three access modes are available:
 
 1. `local`: local browser or SSH tunnel only.
-2. `trusted-proxy`: Cloudflare Access, a Docker panel, host Nginx, a VPN, or another outer entry point authenticates requests; trusted hosts and an external Docker network can be recorded.
-3. `basic`: the container Nginx authenticates against a bcrypt password file. It has no MFA, and public deployments still need HTTPS at the outer proxy.
+2. `trusted-proxy`: Cloudflare Access, a Docker panel, host Nginx, a VPN, or another outer entry point authenticates requests; trusted hosts and an external Docker network can be recorded. **In this mode the container performs no authentication of its own: a request that reaches the DSH container by connecting straight to the origin IP never passes the outer authentication, so it is effectively unlocked.** Self-check: `curl -k -i -H "Host: <your-domain>" https://<origin-IP>/` returning `200` means it is bypassable. This mode needs a credential that does not depend on IP or Host (a Cloudflare Tunnel, or switching to `basic`); see "Boundaries and self-check for trusted-proxy mode" in `docs/security.en.md`. Note that `DSH_TRUSTED_HOSTS` is only the cookie binding key, **not an access allow list**.
+3. `basic`: the container Nginx authenticates against a bcrypt password file. It has no MFA, and public deployments still need HTTPS at the outer proxy. This is the only application-layer lock that does not depend on the source IP or the Host header.
 
 Host Nginx example:
 

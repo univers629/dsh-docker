@@ -3,6 +3,7 @@ set -euo pipefail
 
 ACTION=""
 ACCESS_MODE_OVERRIDE=""
+TRUSTED_PROXY_ACK=""
 BIND_HOST_OVERRIDE=""
 TRUSTED_HOSTS_OVERRIDE=""
 NETWORK_OVERRIDE=""
@@ -236,6 +237,7 @@ while [ "$#" -gt 0 ]; do
       EGRESS_ALLOW_OVERRIDE="${EGRESS_ALLOW_OVERRIDE:+$EGRESS_ALLOW_OVERRIDE,}$1"
       ;;
     --egress-allow=*) EGRESS_ALLOW_OVERRIDE="${EGRESS_ALLOW_OVERRIDE:+$EGRESS_ALLOW_OVERRIDE,}${1#*=}" ;;
+    --ack-trusted-proxy) TRUSTED_PROXY_ACK=true ;;
     --userns-preflight) USERNS_PREFLIGHT=true ;;
     --network-external) NETWORK_EXTERNAL_OVERRIDE=true ;;
     --network-internal) NETWORK_EXTERNAL_OVERRIDE=false ;;
@@ -2080,6 +2082,26 @@ configure_dsh() {
     esac
   fi
 
+  # trusted-proxy 把认证全部交给外层，容器内不持有任何应用层凭据：任何能连到
+  # 源站 443 并让请求被转发进来的来源都不经过外层认证。这里必须把这件事讲清楚，
+  # 否则用户容易把「外层有 Access」误当成「容器有锁」。
+  if [ "$access_mode" = trusted-proxy ] && [ -z "$TRUSTED_PROXY_ACK" ]; then
+    echo
+    echo "[注意] trusted-proxy 模式下容器内不做认证，认证完全依赖外层入口："
+    echo "  - 直连源站 IP 不经过 Cloudflare Access，等于没有锁；"
+    echo "  - 源站 IP 通常会被 Shodan / Censys 按证书信息索引，应按「已公开」设计防护；"
+    echo "  - DSH_TRUSTED_HOSTS 只是 cookie 绑定键，不是访问白名单。"
+    echo "建议叠加一层不依赖 IP 与 Host 判断的凭据：改用 basic 模式，或走 Cloudflare Tunnel。"
+    echo "自检：curl -k -i -H \"Host: <你的域名>\" https://<源站IP>/  返回 200 即为可绕过。"
+    echo "详见 docs/security.md 的「trusted-proxy 模式的边界与自检」。"
+    if [ "$INTERACTIVE" = true ]; then
+      prompt_yes_no "我已了解：外层认证之外，还配置了不依赖 IP/Host 的防护（或未确认，继续安装风险自负）" y
+      if [ "$PROMPT_RESULT" != true ]; then
+        echo "[警告] 未确认网络层防护。该模式下直连源站即可绕过认证，请务必先加固。" >&2
+      fi
+    fi
+  fi
+
   bind_host="${BIND_HOST_OVERRIDE:-$(get_compose_env DSH_BIND_HOST 127.0.0.1)}"
   trusted_hosts="${TRUSTED_HOSTS_OVERRIDE:-$(get_compose_env DSH_TRUSTED_HOSTS '')}"
   network="${NETWORK_OVERRIDE:-$(get_compose_env DSH_DOCKER_NETWORK dsh-private)}"
@@ -2140,7 +2162,7 @@ configure_dsh() {
         ;;
       *) echo "[错误] 无效反向代理位置。" >&2; exit 2 ;;
     esac
-    prompt "公网域名或 trusted host（多个用逗号分隔，不带 https://）" "${trusted_hosts:-agent.example.com}"
+    prompt "公网域名（多个用逗号分隔，不带 https://；仅用于绑定会话 cookie，不是访问白名单）" "${trusted_hosts:-agent.example.com}"
     trusted_hosts="$PROMPT_RESULT"
     prompt "宿主机端口绑定地址（推荐 127.0.0.1）" "$bind_host"
     bind_host="$PROMPT_RESULT"

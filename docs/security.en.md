@@ -231,8 +231,36 @@ On Linux, rootless Docker is stronger than `userns-remap` because the daemon its
 - Networking goes through userspace implementations such as RootlessKit / slirp4netns, with trade-offs in throughput and source IP preservation; some storage and network drivers are unavailable or need a newer kernel.
 - cgroup resource limits require cgroup v2 with systemd delegation to work fully, otherwise constraints such as `pids_limit` may not apply.
 
+## Boundaries and self-check for trusted-proxy mode
+
+`DSH_ACCESS_MODE=trusted-proxy` delegates authentication **entirely to the outer entry point** (Cloudflare Access, a panel login, a VPN, an outer Nginx). The container generates `auth_basic off`, so the container itself holds **no application-layer credential**. The outer lock has to sit on every reachable entry point, not just the one you use daily.
+
+**Connecting straight to the origin IP bypasses the outer authentication.** An attacker who can reach the origin's 443 and get the request forwarded into the DSH container never touches Cloudflare Access — it runs only at the Cloudflare edge.
+
+```bash
+curl -k -i -H "Host: <your-domain>" https://<origin-IP>/
+```
+
+A `200` carrying `set-cookie: dsh-auth-...` means **direct access bypasses authentication** and the deployment is effectively unauthenticated. After a fix it should return `401`, `403`, or time out.
+
+**Two easy misreadings:**
+
+- **`403` from hitting the bare IP without a Host header does not mean you are safe.** That only means no forwarding rule matched, or the authority was missing; it has nothing to do with authentication. Always retest with the Host header of the real domain.
+- **`DSH_TRUSTED_HOSTS` is not an access control list.** It serves two purposes, neither of which is an allow list: it is the cookie binding key (so sessions stay separated when one browser visits several domains), and it is the Host/Origin boundary for the upstream API. Getting it wrong or leaving it empty causes **functional** problems (cookie bound to the wrong authority, repeated login prompts, session loss when switching domains) — it does **not** make the deployment safer or riskier. Do not configure it expecting protection.
+
+**Root cause (why impersonation costs nothing):** the application derives the request authority from the HTTP `Host` header, while the container Nginx `location /` **unconditionally rewrites** `Host` and `Origin` to `127.0.0.1:3081` so the application keeps its loopback semantics. The authority is therefore always the loopback address and the domain a client sends never affects the decision; the `Host` header actually matters at the **outer proxy, for routing by domain**, not for identity inside DSH. Any filter that checks "is the authority in `DSH_TRUSTED_HOSTS`?" on the DSH side **will not take effect**, and would break trusted-proxy mode outright.
+
+**trusted-proxy therefore needs a credential that does not depend on IP or Host.** In order of preference:
+
+1. **Cloudflare Tunnel**: the origin exposes no inbound port, so direct access is physically impossible, and Access keeps its MFA and audit log.
+2. **Switch to `DSH_ACCESS_MODE=basic`**: the container Nginx checks a bcrypt hash, so every request that reaches the container is challenged.
+3. **Both**: outer MFA plus an inner credential, so bypassing either one still leaves the other.
+
+If you keep trusted-proxy, restrict 443 at the **host network layer** to the outer provider's source ranges (for example Cloudflare's published ranges). Do not rely on a panel's extra Nginx snippet — such config only takes effect after a reload, and hard-coded ranges break real users when the provider expands them.
+
 ## Known limits
 
+- **trusted-proxy mode has no application-layer lock**: authentication depends entirely on the outer layer, so reaching the origin directly bypasses it. See the previous section for the self-check.
 - **Shared kernel**: the container and the host share one kernel, so kernel and runtime vulnerabilities such as Dirty Pipe or the runC CVEs cannot be blocked by in-container hardening. Updating the host kernel and Docker is the only fix; user namespace remap reduces the blast radius without preventing the escape.
 - **Passwordless apt**: `DSH_PRIVILEGED_APT=nopasswd` is the default, so the container root identity is reachable through the allow-listed helper. This is the trade-off between letting the agent install software and making the container non-escalatable; `DSH_PRIVILEGED_APT=password` tightens it at the cost of a password prompt per install.
 - **The removal guard is a package-name allow list**: it covers boot-chain dependencies only, and removing other packages can still break functionality. Cascade bypasses are caught by the `apt -s` dry run, which leaves a theoretical gap between simulation and execution.

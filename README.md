@@ -92,8 +92,8 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [服务]|status|shell|root-sh
 DSH 自身不提供登录认证，安装器默认把 3080 绑定到 `127.0.0.1`。公网访问必须经过 HTTPS 与认证入口，不要使用 `0.0.0.0`、`::` 等通配绑定。安装器提供三种访问模式：
 
 1. `local`：仅本地或 SSH 隧道访问。
-2. `trusted-proxy`：由 Cloudflare Access、Docker 面板、宿主机 Nginx、VPN 等外层入口负责认证，可记录 trusted hosts 与外部 Docker 网络。
-3. `basic`：容器内 Nginx 使用 bcrypt 密码文件认证，不含 MFA，公网部署仍需外层 HTTPS。
+2. `trusted-proxy`：由 Cloudflare Access、Docker 面板、宿主机 Nginx、VPN 等外层入口负责认证，可记录 trusted hosts 与外部 Docker 网络。**该模式下容器内不做认证：直连源站 IP 并让请求被转发进 DSH 容器时，外层认证完全不参与，等同于无锁。** 自检：`curl -k -i -H "Host: <你的域名>" https://<源站IP>/` 返回 `200` 即为可绕过。该模式必须叠加一层不依赖 IP 与 Host 判断的凭据（Cloudflare Tunnel，或改用 `basic`），详见 `docs/security.md` 的「trusted-proxy 模式的边界与自检」。注意 `DSH_TRUSTED_HOSTS` 只是 cookie 绑定键，**不是访问白名单**。
+3. `basic`：容器内 Nginx 使用 bcrypt 密码文件认证，不含 MFA，公网部署仍需外层 HTTPS。这是唯一不依赖来源 IP 与 Host 判断的应用层锁。
 
 宿主机 Nginx 反代示例：
 

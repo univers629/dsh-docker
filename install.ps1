@@ -28,6 +28,7 @@ param(
     [string]$Egress = '',
     [string[]]$EgressAllow = @(),
     [switch]$UsernsPreflight,
+    [switch]$AckTrustedProxy,
     [ValidateSet('','prebuilt','build')]
     [string]$ImageSource = '',
     [string]$Image = '',
@@ -1570,9 +1571,25 @@ if ($DshAction -in @('install','configure')) {
         $accessDefault = switch ($accessMode) { 'trusted-proxy' {'2'}; 'basic' {'3'}; default {'1'} }
         $accessMode = switch (Ask "访问保护：1=本机/SSH  2=已有 Access/面板  3=内置 Basic Auth" $accessDefault) { '2' {'trusted-proxy'}; '3' {'basic'}; default {'local'} }
     }
+    if (-not $AckTrustedProxy -and $accessMode -eq 'trusted-proxy') {
+        Write-Host ''
+        Write-Host '[注意] trusted-proxy 模式下容器内不做认证，认证完全依赖外层入口：' -ForegroundColor Yellow
+        Write-Host '  - 直连源站 IP 不经过 Cloudflare Access，等于没有锁；'
+        Write-Host '  - 源站 IP 通常会被 Shodan / Censys 按证书信息索引，应按“已公开”设计防护；'
+        Write-Host '  - DSH_TRUSTED_HOSTS 只是 cookie 绑定键，不是访问白名单。'
+        Write-Host '建议叠加一层不依赖 IP 与 Host 判断的凭据：改用 basic 模式，或走 Cloudflare Tunnel。'
+        Write-Host '自检：curl -k -i -H "Host: <你的域名>" https://<源站IP>/  返回 200 即为可绕过。'
+        Write-Host '详见 docs/security.md 的“trusted-proxy 模式的边界与自检”。'
+        if ($interactive) {
+            $ack = Ask '我已了解：外层认证之外，还配置了不依赖 IP/Host 的防护（否则继续安装风险自负）' 'y'
+            if ($ack -notin @('y','Y','yes','YES','是')) {
+                Write-Host '[警告] 未确认网络层防护。该模式下直连源站即可绕过认证，请务必先加固。' -ForegroundColor Red
+            }
+        }
+    }
     if ($accessMode -eq 'local') { $bind = '127.0.0.1'; $trusted = ''; $networkName = 'dsh-private'; $networkExternalValue = 'false' }
     elseif ($interactive) {
-        $trusted = Ask '公网域名或 trusted host（多个用逗号分隔）' $(if ($trusted) { $trusted } else { 'agent.example.com' })
+        $trusted = Ask '公网域名（多个用逗号分隔；仅用于绑定会话 cookie，不是访问白名单）' $(if ($trusted) { $trusted } else { 'agent.example.com' })
         $defaultRoute = if ($networkExternalValue -eq 'true') { '2' } else { '1' }
         $proxyRoute = Ask '反向代理在哪里：1=宿主机 2=Docker 容器/面板' $defaultRoute
         if ($proxyRoute -eq '2') {
