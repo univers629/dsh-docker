@@ -6,6 +6,7 @@ import { join, basename } from 'node:path'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { containerMetrics } from './metrics.js'
+import { scanDiskUsage, removeCleanable } from './disk-usage.js'
 
 export const name = 'dsh-docker-control'
 export const inject = ['webServer']
@@ -433,6 +434,43 @@ function asksForMetrics(request) {
   return METRICS_QUERY_VALUES.has(value.toLowerCase())
 }
 
+// 磁盘视图走 /info 而不是新路径：nginx 只把白名单里的插件路径改写成回环请求
+// （见 nginx/dsh-nginx.conf），新增路径不会被改写，Host 会保留成公网域名，
+// trustedLoopbackRequest 就会一律 403。所以这里复用 /info，用 query 区分。
+function infoQuery(request) {
+  if (typeof request.url !== 'string') return null
+  const at = request.url.indexOf('?')
+  if (at < 0) return null
+  return new URLSearchParams(request.url.slice(at + 1))
+}
+
+function asksForDiskUsage(request) {
+  const query = infoQuery(request)
+  return query !== null && query.has('disk')
+}
+
+// 磁盘视图的扫描根：容器可写层里真正占地方的地方 + 宿主挂载进来的数据。
+// 系统目录（/app、/usr…）也放进去，前端按 kind=system 画成灰度不可点，
+// 这样用户能看到"剩下的到底是什么"，而不是疑惑总量对不上。
+const DISK_SCAN_ROOTS = ['/data', '/workspace', '/tmp', '/app', '/usr']
+
+async function readJsonBody(request) {
+  const chunks = []
+  let total = 0
+  for await (const chunk of request) {
+    total += chunk.length
+    if (total > MAX_REQUEST_BYTES) throw new RequestBodyError('请求体过大 / request body too large')
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) return {}
+  const text = Buffer.concat(chunks).toString('utf8')
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new RequestBodyError('请求体不是合法 JSON / request body is not valid JSON')
+  }
+}
+
 function trustedLoopbackRequest(request) {
   const address = request.socket.remoteAddress
   if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false
@@ -513,6 +551,11 @@ export function apply(ctx) {
         // 路径取同一份快照；命令行与回环调用仍然直接用 /metrics。
         if (asksForMetrics(request)) {
           sendJson(response, 200, containerMetrics())
+          return
+        }
+        // 同上：借 /info 放行，用 ?disk=1 取 treemap 数据。
+        if (asksForDiskUsage(request)) {
+          sendJson(response, 200, { ok: true, ...await scanDiskUsage(DISK_SCAN_ROOTS) })
           return
         }
         sendJson(response, 200, await dshInfo())
@@ -635,6 +678,22 @@ export function apply(ctx) {
           return
         }
         const body = await readRequestBody(request)
+        // 磁盘清理复用这条已放行的写路径（同样是 nginx 白名单的原因），
+        // 用 body.action 区分，不新增路径。删除前 disk-usage 会再独立判定一次
+        // 可清理性，不信任这里的任何标记。
+        if (body && body.action === 'disk-clean') {
+          const target = typeof body.path === 'string' ? body.path : null
+          if (target === null) {
+            sendJson(response, 400, { ok: false, error: '缺少待清理路径 / missing path' })
+            return
+          }
+          try {
+            sendJson(response, 200, { ok: true, ...await removeCleanable(target) })
+          } catch (error) {
+            sendJson(response, 422, { ok: false, error: error instanceof Error ? error.message : String(error) })
+          }
+          return
+        }
         const text = typeof body.text === 'string' ? body.text : null
         const expected = typeof body.revision === 'string' ? body.revision : null
         if (text === null || expected === null) {

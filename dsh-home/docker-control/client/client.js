@@ -11,6 +11,11 @@ window.__ModuleLoader__.load({
 
     const NS = 'dsh-docker-control'
     const h = React.createElement
+    // better-sidebar 是**可选**依赖，刻意不列进 inject：cordis 对 inject 里声明
+    // 的服务，在其未提供时会抛 "cannot get required service"（见 cordis 的 proxy
+    // get trap）；而 ctx.get() 明确是"read a service without the inject
+    // requirement"，服务缺席只返回 undefined。官方 better-sidebar 自己也用
+    // ctx.get('betterSidebar') 取服务，正是同一个原因。
     const inject = ['slots', 'locale', 'layout']
     let dshInfoCache = null
     let dshInfoRequest = null
@@ -304,6 +309,8 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
       updateFailed: 'DSH 更新失败',
       updateTimeout: 'DSH 未在 90 秒内完成重启',
       dshInfoFailed: '读取 DSH 版本失败',
+      diskUsageTabTitle: '磁盘占用',
+      diskUsageTabDesc: '按方块面积查看各处占用，只有标为可清理的能删',
     }
 
     const en = {
@@ -367,6 +374,8 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
       updateFailed: 'DSH update failed',
       updateTimeout: 'DSH did not restart within 90 seconds',
       dshInfoFailed: 'Could not read DSH version',
+      diskUsageTabTitle: 'Disk usage',
+      diskUsageTabDesc: 'Treemap of disk usage; only items marked cleanable can be removed',
     }
 
     function fallbackText(key) {
@@ -1479,6 +1488,400 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
       return h(RestartActionBoundary, null, h(ConfigEditor, props))
     }
 
+    // ---------------------------------------------------------------------
+    // 磁盘占用视图（SpaceSniffer 风格的 treemap）
+    //
+    // 布局用 squarified treemap：把一组值切成尽量接近正方形的矩形，面积正比于
+    // 大小。这是 SpaceSniffer 观感的来源 —— 官方没公开算法，但它的手册说布局
+    // 会"尽量让元素保持指定长宽比"，与 squarify 的目标一致。
+    // ---------------------------------------------------------------------
+
+    const DISK_COLORS = {
+      // 可清理：醒目的暖色，用户一眼看到"这些能点"
+      cleanable: '#d97706',
+      // 用户数据：中性蓝
+      user: '#2563eb',
+      // DSH 数据：紫，暗示"是程序的，不是你的文件"
+      data: '#7c3aed',
+      // 系统：灰，且不可点
+      system: '#6b7280',
+      // 聚合出来的"其它"
+      other: '#94a3b8',
+    }
+
+    function formatBytes(bytes) {
+      if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+      const units = ['B', 'KB', 'MB', 'GB', 'TB']
+      let value = bytes
+      let unit = 0
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024
+        unit += 1
+      }
+      return `${value >= 100 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
+    }
+
+    // 小于这个面积（像素）的块不单独绘制，而是聚合进"其它"。
+    // 对应 SpaceSniffer 手册 4.2 的 minimum element size：太小的元素画出来只是
+    // 一条不可点的线，反而让用户以为那里有东西可看。
+    const MIN_BLOCK_AREA = 400
+    // 每个块的最小边长（像素）：面积达标但被挤成细条的块仍要能点中。
+    const MIN_BLOCK_SIDE = 3
+
+    /**
+     * Squarified treemap：把 items 摆进 width×height，面积正比于 size。
+     * 返回 [{item, x, y, w, h}]；过小的项聚合进 item.aggregated 的"其它"块。
+     */
+    function squarify(items, width, height) {
+      const total = items.reduce(function (sum, it) { return sum + it.size }, 0)
+      if (total <= 0 || width <= 0 || height <= 0) return []
+      const canvas = width * height
+
+      // 面积阈值分流后还要做一次收敛：聚合出来的"其它"本身可能仍低于阈值
+      // （例如一个 100GB 旁边跟着几个 1KB），那就继续把最小的那个大块并进去，
+      // 直到"其它"自己站得住。否则它会被画成一条点不中的细线。
+      const sorted = items.slice().sort(function (a, b) { return b.size - a.size })
+      let cut = sorted.length
+      while (cut > 0) {
+        let smallBytes = 0
+        for (let i = cut; i < sorted.length; i += 1) smallBytes += sorted[i].size
+        const smallArea = (smallBytes / total) * canvas
+        if (cut === sorted.length || smallArea >= MIN_BLOCK_AREA) break
+        cut -= 1
+      }
+      const big = []
+      for (let i = 0; i < cut; i += 1) {
+        big.push({ item: sorted[i], area: (sorted[i].size / total) * canvas })
+      }
+      if (cut < sorted.length) {
+        let smallBytes = 0
+        for (let i = cut; i < sorted.length; i += 1) smallBytes += sorted[i].size
+        big.push({
+          item: {
+            name: '其它 ' + (sorted.length - cut) + ' 项',
+            path: '__other__',
+            size: smallBytes,
+            kind: 'other',
+            deletable: false,
+            cleanable: false,
+            aggregated: true,
+          },
+          area: (smallBytes / total) * canvas,
+        })
+      }
+
+      const out = []
+      let x = 0
+      let y = 0
+      let w = width
+      let h = height
+      let i = 0
+      while (i < big.length) {
+        const row = []
+        let rowArea = 0
+        let best = Infinity
+        while (i < big.length) {
+          const candidate = big[i]
+          const nextArea = rowArea + candidate.area
+          const nextRatio = worstRatio(row.concat([candidate]), Math.min(w, h), nextArea)
+          if (row.length > 0 && nextRatio > best) break
+          row.push(candidate)
+          rowArea = nextArea
+          best = nextRatio
+          i += 1
+        }
+        if (row.length === 0) break
+        // 沿较短的那条边铺这一行
+        if (w >= h) {
+          const rowWidth = Math.max(MIN_BLOCK_SIDE, rowArea / h)
+          let cy = y
+          for (const cell of row) {
+            const cellHeight = cell.area / rowWidth
+            out.push({ item: cell.item, x: x, y: cy, w: rowWidth, h: Math.max(MIN_BLOCK_SIDE, cellHeight) })
+            cy += cellHeight
+          }
+          x += rowWidth
+          w -= rowWidth
+        } else {
+          const rowHeight = Math.max(MIN_BLOCK_SIDE, rowArea / w)
+          let cx = x
+          for (const cell of row) {
+            const cellWidth = cell.area / rowHeight
+            out.push({ item: cell.item, x: cx, y: y, w: Math.max(MIN_BLOCK_SIDE, cellWidth), h: rowHeight })
+            cx += cellWidth
+          }
+          y += rowHeight
+          h -= rowHeight
+        }
+      }
+      return out
+    }
+
+    /** 一行元素里的最差长宽比：越接近 1 越方。 */
+    function worstRatio(row, side, area) {
+      if (area <= 0) return Infinity
+      let max = 0
+      let min = Infinity
+      for (const cell of row) {
+        if (cell.area <= 0) continue
+        max = Math.max(max, cell.area)
+        min = Math.min(min, cell.area)
+      }
+      if (!Number.isFinite(min)) return Infinity
+      const side2 = side * side
+      const area2 = area * area
+      return Math.max((side2 * max) / area2, area2 / (side2 * min))
+    }
+
+    /**
+     * 一个块的最终颜色：基础色 + 按层级调暗（SpaceSniffer 的 Level Contrast）。
+     * 系统目录额外去饱和成灰，传达"不可动"。
+     */
+    function blockColor(node, depth) {
+      const base = DISK_COLORS[node.kind] ?? DISK_COLORS.user
+      if (node.unknown) return 'repeating-linear-gradient(45deg, #9ca3af, #9ca3af 6px, #6b7280 6px, #6b7280 12px)'
+      if (!base.startsWith('#')) return base
+      const darken = Math.min(depth * 0.12, 0.42)
+      const num = parseInt(base.slice(1), 16)
+      const r = Math.round(((num >> 16) & 255) * (1 - darken))
+      const g = Math.round(((num >> 8) & 255) * (1 - darken))
+      const b = Math.round((num & 255) * (1 - darken))
+      return `rgb(${r}, ${g}, ${b})`
+    }
+
+    function DiskTreemap(props) {
+      const node = props.node
+      const width = props.width
+      const height = props.height
+      const depth = props.depth
+      const selected = props.selected
+      const onSelect = props.onSelect
+      const onClean = props.onClean
+      const children = node.children ?? []
+      if (children.length === 0 || width < 24 || height < 24) {
+        return h('div', {
+          style: {
+            position: 'absolute', left: 0, top: 0, width: width, height: height,
+            background: blockColor(node, depth),
+            opacity: node.kind === 'system' || node.kind === 'data' ? 0.55 : 1,
+          },
+        })
+      }
+      const cells = squarify(children.filter(function (c) { return c.size > 0 }), width, height)
+      const blocks = []
+      for (let index = 0; index < cells.length; index += 1) {
+        const cell = cells[index]
+        const child = cell.item
+        const isSelected = selected === child.path
+        let label = null
+        if (cell.w > 44 && cell.h > 30 && (child.children ?? []).length > 0) {
+          label = h(DiskTreemap, {
+            node: child,
+            width: cell.w - 1,
+            height: cell.h - 1,
+            depth: depth + 1,
+            selected: selected,
+            onSelect: onSelect,
+            onClean: onClean,
+          })
+        } else if (cell.w > 62 && cell.h > 20) {
+          label = h('span', {
+            style: {
+              position: 'absolute', left: 3, top: 2, fontSize: '10px',
+              color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,0.7)',
+              maxWidth: cell.w - 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            },
+          }, child.name)
+        }
+        blocks.push(h('div', {
+          key: child.path + '-' + index,
+          title: child.path + '\n' + formatBytes(child.size),
+          onClick: function (event) { event.stopPropagation(); onSelect(child) },
+          onDoubleClick: function (event) {
+            event.stopPropagation()
+            if (child.kind === 'cleanable') onClean(child)
+          },
+          style: {
+            position: 'absolute',
+            left: cell.x, top: cell.y,
+            width: Math.max(0, cell.w - 1), height: Math.max(0, cell.h - 1),
+            background: blockColor(child, depth + 1),
+            opacity: child.deletable ? 1 : 0.5,
+            filter: child.deletable ? 'none' : 'grayscale(0.7)',
+            cursor: child.deletable || (child.children ?? []).length > 0 ? 'pointer' : 'default',
+            border: isSelected ? '2px solid #fff' : '1px solid rgba(255,255,255,0.25)',
+            boxSizing: 'border-box',
+            overflow: 'hidden',
+          },
+        }, label))
+      }
+      return h('div', { style: { position: 'absolute', left: 0, top: 0, width: width, height: height } }, blocks)
+    }
+
+    function DiskUsagePanel() {
+      const [state, setState] = React.useState({ status: 'idle', data: null, error: null })
+      const [selected, setSelected] = React.useState(null)
+      const [pending, setPending] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+      const boxRef = React.useRef(null)
+      const [size, setSize] = React.useState({ width: 320, height: 260 })
+
+      const load = React.useCallback(async () => {
+        setState((s) => ({ ...s, status: 'loading', error: null }))
+        try {
+          const response = await fetch('/dsh-docker-control/info?disk=1', {
+            cache: 'no-store', credentials: 'same-origin',
+          })
+          const body = await response.json()
+          if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
+          setState({ status: 'ready', data: body, error: null })
+        } catch (error) {
+          setState({ status: 'error', data: null, error: error instanceof Error ? error.message : String(error) })
+        }
+      }, [])
+
+      React.useEffect(() => { load() }, [load])
+
+      // 方块图需要像素尺寸，用 ResizeObserver 跟随侧边栏宽度。
+      React.useEffect(() => {
+        const element = boxRef.current
+        if (!element || typeof ResizeObserver === 'undefined') return undefined
+        const observer = new ResizeObserver((entries) => {
+          const rect = entries[0]?.contentRect
+          if (rect && rect.width > 0) setSize({ width: rect.width, height: Math.max(200, rect.height) })
+        })
+        observer.observe(element)
+        return () => observer.disconnect()
+      }, [])
+
+      const clean = async (node) => {
+        setPending(node)
+      }
+      const confirmClean = async () => {
+        if (pending === null) return
+        setBusy(true)
+        try {
+          const response = await fetch('/dsh-docker-control/config', {
+            method: 'PUT',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'disk-clean', path: pending.path }),
+          })
+          const body = await response.json()
+          if (response.status === 429) throw new Error('清理太频繁，Nginx 已限流，请稍后再试 / rate limited, retry shortly')
+          if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`)
+          await load()
+        } catch (error) {
+          setState((s) => ({ ...s, error: error instanceof Error ? error.message : String(error) }))
+        } finally {
+          setBusy(false)
+          setPending(null)
+        }
+      }
+
+      const data = state.data
+      const roots = data?.roots ?? []
+      const cleanable = data?.cleanable ?? []
+      const totalBytes = roots.reduce((sum, r) => sum + r.size, 0)
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+          h('strong', { style: { fontSize: '13px' } }, '磁盘占用'),
+          h('span', { style: { fontSize: '11px', opacity: 0.7 } }, formatBytes(totalBytes)),
+          h('div', { style: { flex: 1 } }),
+          h(Button, {
+            size: 'small', variant: 'secondary', disabled: state.status === 'loading' || busy,
+            onClick: load,
+          }, state.status === 'loading' ? '扫描中…' : '重新扫描')),
+        state.error === null ? null : h('div', {
+          style: { fontSize: '11px', color: 'var(--dsw-alias-negative, #b91c1c)' },
+        }, state.error),
+        h('div', {
+          ref: boxRef,
+          style: {
+            position: 'relative', width: '100%', height: '260px',
+            background: 'var(--dsw-alias-bg-secondary, #111827)', borderRadius: '6px', overflow: 'hidden',
+          },
+        },
+          state.status === 'ready'
+            ? roots.map((root) => h(DiskTreemap, {
+              key: root.path,
+              node: root,
+              width: size.width / Math.max(1, roots.length) - 2,
+              height: size.height,
+              depth: 0,
+              selected,
+              onSelect: setSelected,
+              onClean: clean,
+            }))
+            : h('div', { style: { padding: '12px', fontSize: '12px', opacity: 0.7 } },
+              state.status === 'loading' ? '正在扫描…' : '暂无数据')),
+        // 图例
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '10px', fontSize: '10px' } },
+          [['cleanable', '可清理'], ['user', '你的文件'], ['data', 'DSH 数据'], ['system', '系统'], ['other', '其它']]
+            .map(([kind, label]) => h('span', { key: kind, style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+              h('i', {
+                style: {
+                  width: '9px', height: '9px', borderRadius: '2px', display: 'inline-block',
+                  background: DISK_COLORS[kind],
+                  opacity: kind === 'cleanable' ? 1 : 0.5,
+                  filter: kind === 'cleanable' ? 'none' : 'grayscale(0.7)',
+                },
+              }),
+              h('span', { style: { opacity: 0.75 } }, label)))),
+        cleanable.length === 0 ? null : h('div', {
+          style: { fontSize: '11px' },
+        },
+          h('div', { style: { fontWeight: 600, marginBottom: '4px' } },
+            '可清理 ' + cleanable.length + ' 项 · 共 ' + formatBytes(cleanable.reduce(function (a, b) { return a + b.size }, 0))),
+          cleanable.slice(0, 8).map(function (item) {
+            return h('div', { key: item.path, style: { display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 0' } },
+              h('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: '10px' }, title: item.path }, item.path),
+              h('span', { style: { opacity: 0.75, fontSize: '10px' } }, formatBytes(item.size)),
+              h(Button, { size: 'small', variant: 'secondary', disabled: busy, onClick: function () { clean(item) } }, '清理'))
+          })),
+        selected === null ? null : h('div', {
+          style: {
+            fontSize: '11px', padding: '8px', borderRadius: '5px',
+            background: 'var(--dsw-alias-bg-tertiary, #1f2937)',
+          },
+        },
+          h('div', { style: { wordBreak: 'break-all', fontFamily: 'monospace' } }, selected.path),
+          h('div', { style: { opacity: 0.75, marginTop: '2px' } },
+            `${formatBytes(selected.size)} · ${selected.kind}${selected.deletable ? ' · 可清理' : ''}`),
+          selected.deletable
+            ? h(Button, { size: 'small', variant: 'secondary', style: { marginTop: '6px' }, onClick: () => clean(selected) },
+              '清理这一项')
+            : null),
+        pending === null ? null : h('div', {
+          style: {
+            position: 'fixed', inset: 0, zIndex: 9999, display: 'flex',
+            alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)',
+          },
+          onClick: () => setPending(null),
+        },
+          h('div', {
+            onClick: (event) => event.stopPropagation(),
+            style: {
+              background: 'var(--dsw-alias-bg-primary, #fff)', borderRadius: '8px',
+              padding: '16px', maxWidth: '360px', color: 'var(--dsw-alias-label-primary, #111)',
+            },
+          },
+            h('h3', { style: { margin: '0 0 8px', fontSize: '14px' } }, '确认清理？'),
+            h('p', { style: { margin: '0 0 4px', fontSize: '12px' } },
+              h('code', { style: { wordBreak: 'break-all' } }, pending.path)),
+            h('p', { style: { margin: '0 0 12px', fontSize: '12px', opacity: 0.75 } },
+              `将释放 ${formatBytes(pending.size)}。此操作不可撤销。`),
+            h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'flex-end' } },
+              h(Button, { size: 'small', variant: 'secondary', onClick: () => setPending(null) }, '取消'),
+              h(Button, { size: 'small', disabled: busy, onClick: confirmClean }, busy ? '清理中…' : '确认删除')))),
+      )
+    }
+
+    function SafeDiskUsagePanel() {
+      return h(RestartActionBoundary, null, h(DiskUsagePanel))
+    }
+
     function apply(ctx) {
       const fail = (phase, error) => {
         console.error(`[dsh-docker-control] ${phase} failed:`, error)
@@ -1545,6 +1948,20 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
           order: 1,
           locale: NS,
         }, SafeContainerMetrics))
+
+        // 磁盘视图注册成 better-sidebar 的一个标签页：只有装了该侧边栏插件才
+        // 会出现，否则这里什么也不做。
+        const sidebar = ctx.get('betterSidebar')
+        if (sidebar && typeof sidebar.registerTab === 'function') {
+          ctx.effect(() => sidebar.registerTab({
+            id: 'dsh-docker-control:disk-usage',
+            title: () => fallbackText('diskUsageTabTitle'),
+            description: () => fallbackText('diskUsageTabDesc'),
+            single: true,
+            order: 120,
+            component: SafeDiskUsagePanel,
+          }), 'dsh-docker-control: disk usage tab')
+        }
       } catch (error) {
         fail('load', error)
       }

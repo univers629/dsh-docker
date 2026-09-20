@@ -117,6 +117,8 @@ const client = registration.factory((request) => {
 
 assert.deepEqual(requests, ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'])
 assert.equal(typeof client.apply, 'function')
+// betterSidebar 刻意不列进 inject：它是可选依赖，列进去会让 cordis 在该插件未
+// 安装时抛 "cannot get required service"，把整个 docker-control 一起带崩。
 assert.deepEqual(Array.from(client.inject), ['slots', 'locale', 'layout'])
 
 const dictionaries = []
