@@ -289,7 +289,6 @@ assert.equal(errors.some(args => String(args[0]).includes('[dsh-docker-control] 
 
 const pkg = JSON.parse(await readFile(new URL('../dsh-home/docker-control/package.json', import.meta.url), 'utf8'))
 assert.deepEqual(pkg.dsh.client.inject, [
-  '@deepseek-ai/dsh-client-runtime',
   '@deepseek-ai/dsh-client-locale',
   '@deepseek-ai/dsh-client-ui-settings',
   '@deepseek-ai/dsh-client-ui-layout',

@@ -17,11 +17,6 @@ const optionalIds = new Set([
   'app-boot-realpath-import',
   'app-boot-realpath-package-dir',
   'public-local-mode',
-  'workspace-pending-attachments-field',
-  'workspace-pending-attachments-methods',
-  'workspace-pending-attachments-remove',
-  'workspace-pending-attachments-install-views',
-  'workspace-note-attachment-on-create',
 ])
 for (const patch of artifactPatches) {
   assert.ok(patch.id && !ids.has(patch.id), `duplicate or missing id: ${patch.id}`)

@@ -18,11 +18,11 @@ export const artifactPatches = [
     package: "@deepseek-ai/dsh-sandbox",
     file: "lib/index.js",
     why: "容器内 DSH 以 danger-full-access 运行；请求与当前模式相同时不应被判为“不够宽”而抛错。",
-    marker: `if (effectiveMode === mode) return mode;`,
+    marker: `if (mode === effectiveMode) return effectiveMode;`,
     find: `const { requestedMode: mode, effectiveMode, justification, subject } = request;
 	if (!(WIDER_MODES[effectiveMode]`,
     replace: `const { requestedMode: mode, effectiveMode, justification, subject } = request;
-	if (effectiveMode === mode) return mode;
+	if (mode === effectiveMode) return effectiveMode;
 	if (!(WIDER_MODES[effectiveMode]`,
   },
   {
@@ -91,8 +91,20 @@ export const artifactPatches = [
     file: "lib/index.js",
     why: "profile 的 node_modules 是软链；返回真实路径才能保证同一包只有一个模块实例。",
     marker: `return realpathSync(candidate);`,
-    find: `if (existsSync(join(candidate, "package.json"))) return candidate;`,
-    replace: `if (existsSync(join(candidate, "package.json"))) return realpathSync(candidate);`,
+    find: `function packageDirFromAnchor(anchor, packageName) {
+	/* v8 ignore next */
+	for (const searchPath of createRequire(anchor).resolve.paths(packageName) ?? []) {
+		const candidate = join(searchPath, packageName);
+		if (existsSync(join(candidate, "package.json"))) return candidate;
+	}
+}`,
+    replace: `function packageDirFromAnchor(anchor, packageName) {
+	/* v8 ignore next */
+	for (const searchPath of createRequire(anchor).resolve.paths(packageName) ?? []) {
+		const candidate = join(searchPath, packageName);
+		if (existsSync(join(candidate, "package.json"))) return realpathSync(candidate);
+	}
+}`,
   },
   {
     id: "public-local-mode",
@@ -103,125 +115,6 @@ export const artifactPatches = [
     marker: `DSH_PUBLIC_LOCAL_MODE=1`,
     find: `isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),`,
     replace: `isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname) || (typeof document !== "undefined" && document.cookie.split(";").some((entry) => entry.trim() === "DSH_PUBLIC_LOCAL_MODE=1")),`,
-  },
-  {
-    id: "workspace-pending-attachments-field",
-    optional: true,
-    package: "@deepseek-ai/dsh-client-runtime",
-    file: "lib/client.js",
-    why: "记录已被 session.create 响应证实、但 Host 快照尚未确认的会话归属。",
-    marker: `pendingSessionAttachments = /* @__PURE__ */ new Map();`,
-    find: `			removedIds = /* @__PURE__ */ new Set();
-			snapshotCache;`,
-    replace: `			removedIds = /* @__PURE__ */ new Set();
-			/**
-			* Session attachments proven by a successful session.create response but
-			* not yet confirmed by a Host Workspace snapshot. Response and stream
-			* delivery are independent, so an older frame must not hide committed
-			* membership while the confirming frame is still in flight.
-			*/
-			pendingSessionAttachments = /* @__PURE__ */ new Map();
-			snapshotCache;`,
-  },
-  {
-    id: "workspace-pending-attachments-methods",
-    optional: true,
-    package: "@deepseek-ai/dsh-client-runtime",
-    file: "lib/client.js",
-    why: "响应与事件流是两条独立通道；旧快照不得把已提交的会话归属抹掉。",
-    marker: `noteSessionAttachment(workspaceId, sessionId) {`,
-    find: `			/** Upsert one Host view, optionally retaining the local object that materialized it. */
-			upsert(view, identity) {
-				if (this.removedIds.has(view.workspaceId)) return;`,
-    replace: `			/**
-			* Publish a session.create attachment proven by its successful response.
-			* The matching Host Workspace snapshot later confirms and retires this
-			* response-side echo; older snapshots retain it in the meantime.
-			*/
-			noteSessionAttachment(workspaceId, sessionId) {
-				if (this.removedIds.has(workspaceId)) return;
-				const index = this.items.findIndex((item) => item.getSnapshot().view?.workspaceId === workspaceId);
-				const workspace = this.items[index];
-				if (workspace === void 0) return;
-				const view = workspace.getSnapshot().view;
-				if (view === void 0 || view.sessionIds.includes(sessionId)) return;
-				const pending = this.pendingSessionAttachments.get(workspaceId) ?? [];
-				if (!pending.includes(sessionId)) this.pendingSessionAttachments.set(workspaceId, [sessionId, ...pending]);
-				workspace.adopt(this.withPendingSessionAttachments(view));
-				this.items = [...this.items];
-				this.notifier.notifyNow();
-			}
-			/** Overlay response-confirmed attachments without consuming their pending confirmation. */
-			withPendingSessionAttachments(view) {
-				const pending = this.pendingSessionAttachments.get(view.workspaceId);
-				if (pending === void 0) return view;
-				const missing = pending.filter((sessionId) => !view.sessionIds.includes(sessionId));
-				return missing.length === 0 ? view : {
-					...view,
-					sessionIds: [...missing, ...view.sessionIds]
-				};
-			}
-			/** Confirm attachments present in a Host snapshot and overlay any still awaiting confirmation. */
-			reconcilePendingSessionAttachments(view) {
-				const pending = this.pendingSessionAttachments.get(view.workspaceId);
-				if (pending === void 0) return view;
-				const remaining = pending.filter((sessionId) => !view.sessionIds.includes(sessionId));
-				if (remaining.length === 0) this.pendingSessionAttachments.delete(view.workspaceId);
-				else this.pendingSessionAttachments.set(view.workspaceId, remaining);
-				return remaining.length === 0 ? view : {
-					...view,
-					sessionIds: [...remaining, ...view.sessionIds]
-				};
-			}
-			/** Upsert one Host view, optionally retaining the local object that materialized it. */
-			upsert(view, identity) {
-				if (this.removedIds.has(view.workspaceId)) return;
-				view = this.reconcilePendingSessionAttachments(view);`,
-  },
-  {
-    id: "workspace-pending-attachments-remove",
-    optional: true,
-    package: "@deepseek-ai/dsh-client-runtime",
-    file: "lib/client.js",
-    why: "工作区被删除时一并丢弃其待确认归属。",
-    marker: `this.pendingSessionAttachments.delete(workspaceId);`,
-    find: `				this.removedIds.add(workspaceId);
-				this.committedOrder = this.committedOrder.filter((id) => id !== workspaceId);`,
-    replace: `				this.removedIds.add(workspaceId);
-				this.pendingSessionAttachments.delete(workspaceId);
-				this.committedOrder = this.committedOrder.filter((id) => id !== workspaceId);`,
-  },
-  {
-    id: "workspace-pending-attachments-install-views",
-    optional: true,
-    package: "@deepseek-ai/dsh-client-runtime",
-    file: "lib/client.js",
-    why: "list 基线同样要叠加待确认归属。",
-    marker: `const view = this.reconcilePendingSessionAttachments(hostView);`,
-    find: `				const installed = /* @__PURE__ */ new Map();
-				for (const view of views) {
-					const duplicate = installed.get(view.workspaceId);`,
-    replace: `				const installed = /* @__PURE__ */ new Map();
-				for (const hostView of views) {
-					const view = this.reconcilePendingSessionAttachments(hostView);
-					const duplicate = installed.get(view.workspaceId);`,
-  },
-  {
-    id: "workspace-note-attachment-on-create",
-    optional: true,
-    package: "@deepseek-ai/dsh-client-runtime",
-    file: "lib/client.js",
-    why: "session.create 成功后立刻发布归属，不等 Host 帧。",
-    marker: `this.manager.noteSessionAttachment(workspaceId, sessionId);`,
-    find: `				const attempt = this.sessions.create({ workspaceId }).finally(() => {
-					this.connecting.delete(workspaceId);
-				});`,
-    replace: `				const attempt = this.sessions.create({ workspaceId }).then((sessionId) => {
-					this.manager.noteSessionAttachment(workspaceId, sessionId);
-					return sessionId;
-				}).finally(() => {
-					this.connecting.delete(workspaceId);
-				});`,
   },
   {
     id: "workspace-model-pending-attachments-field",
@@ -247,8 +140,8 @@ export const artifactPatches = [
     file: "lib/client.js",
     why: "新版 UI workspace 在 session.create 成功后通知 Workspace model。",
     marker: `this.workspaces.list.noteSessionAttachment(workspaceId, sessionId);`,
-    find: `\t\t\t\tconst attempt = this.sessions.create({ workspaceId }).finally(() => {\n\t\t\t\t\tthis.connecting.delete(workspaceId);\n\t\t\t\t});`,
-    replace: `\t\t\t\tconst attempt = this.sessions.create({ workspaceId }).then((sessionId) => {\n\t\t\t\t\tthis.workspaces.list.noteSessionAttachment(workspaceId, sessionId);\n\t\t\t\t\treturn sessionId;\n\t\t\t\t}).finally(() => {\n\t\t\t\t\tthis.connecting.delete(workspaceId);\n\t\t\t\t});`,
+    find: `\t\t\t\tconst attempt = this.reuseOrCreateBlank(workspace).finally(() => {\n\t\t\t\t\tthis.connecting.delete(workspaceId);\n\t\t\t\t});`,
+    replace: `\t\t\t\tconst attempt = this.reuseOrCreateBlank(workspace).then((sessionId) => {\n\t\t\t\t\tthis.workspaces.list.noteSessionAttachment(workspaceId, sessionId);\n\t\t\t\t\treturn sessionId;\n\t\t\t\t}).finally(() => {\n\t\t\t\t\tthis.connecting.delete(workspaceId);\n\t\t\t\t});`,
   },
   {
     id: "public-local-mode-transport-owner",
