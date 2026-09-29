@@ -1,7 +1,14 @@
-# Runtime state and user data. Keep only directory markers in Git.
+# Runtime state and user data. Keep only the directory markers in Git.
+#
+# `data/**` does not match `data` itself, so the top level needs no re-include.
+# Negating `data/*/` (trailing slash = directory) re-includes each first level
+# directory while `data/*/**` keeps everything below it out of the index. A
+# nested `!data/**/` would instead expose every runtime file and directory,
+# including credential backups under data/home.
 data/**
-!data/**/
-!data/**/.gitkeep
+!data/*/
+data/*/**
+!data/*/.gitkeep
 workspace/**
 !workspace/
 !workspace/.gitkeep
