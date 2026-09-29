@@ -57,6 +57,11 @@ services:
       # 这个目录也读不到哈希，只能通过带失败锁定的特权代理校验密码。
       - ./data/secret:/root/dsh-secret:ro
       - ./workspace:/workspace
+      # 启动编排脚本从工程目录挂进容器，而不是只用镜像构建时烘进去的那份。镜像里的
+      # 副本会在 `docker compose up --build` 时更新，但本工程不重建也能更新运行时，
+      # 两条路径的 supervisor 行为就会不一致 —— 曾经出现过「仓库已修、容器仍跑旧版」
+      # 导致的误判。挂载后重启容器即生效。只读：运行期不需要修改它。
+      - ./bin/dsh-supervisor:/usr/local/bin/dsh-supervisor:ro
     init: true
     # 逃逸面收敛：不特权、不挂 Docker socket、不共享宿主 namespace，保留 Docker
     # 默认 seccomp/AppArmor 配置，并禁止通过 setuid 程序提权。
