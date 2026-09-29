@@ -13,6 +13,10 @@ workspace/**
 !workspace/
 !workspace/.gitkeep
 
+# Host-side archive of configuration files recovered from a replaced data
+# directory. It holds credential and settings copies, so it never goes to Git.
+backup/
+
 # Cloned source, dependency stores, and local build artifacts.
 deepseek-harness/
 scratch_repos/
