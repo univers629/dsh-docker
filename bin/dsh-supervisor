@@ -16,6 +16,8 @@ DSH_RUN_UID=${DSH_RUN_UID:-}
 DSH_RUN_GID=${DSH_RUN_GID:-}
 DSH_USER_HOME=${DSH_USER_HOME:-/data/home}
 DSH_WEB_PORT=${DSH_WEB_PORT:-3081}
+# 启动就绪窗口：进程起来了但这么久还没就绪，就按启动失败处理（0 = 关闭该判定）。
+DSH_BOOT_READY_TIMEOUT_SECONDS=${DSH_BOOT_READY_TIMEOUT_SECONDS:-180}
 
 stopping=false
 dsh_pid=
@@ -118,8 +120,45 @@ run_stage() {
   "$@"
 }
 
-# 后台轮询「DSH 已拉起」到「HTTP 首次可用」的耗时。判据与 restart-dsh wait-ready
-# 一致（非 5xx 即算可用），两个数字可以直接对照。
+# 探一次「应用就绪」。必须探一条不需要认证的路径：
+#
+# `GET /` 对每个请求都要求浏览器会话 cookie，未带 cookie 必定 401，所以拿它当就绪判据
+# 永远是「未就绪」——这正是旧实现里 `dsh-http-ready: not ready within 600s` 每轮必现的
+# 原因。`/dsh-docker-control/status` 是无条件 200 的只读端点，但内置插件被卸载时不存在，
+# 因此需要回退到「端口在监听」这一弱判据。
+#
+# 返回 0 表示就绪。注意 `GET /` 的 401 也算「应用已启动」，DNS/连接失败才算未就绪。
+dsh_ready_probe() {
+  node -e 'const base=`http://127.0.0.1:${process.env.DSH_WEB_PORT ?? "3081"}`;
+    const t=(url,ok)=>fetch(url,{signal:AbortSignal.timeout(2000)}).then(r=>ok(r.status)).catch(()=>false);
+    Promise.all([t(base+"/dsh-docker-control/status",s=>s===200),t(base+"/",s=>s<500)])
+      .then(([control,root])=>process.exit(control||root?0:1));' 2>/dev/null
+}
+
+# 等应用就绪；超时返回 1。`DSH_BOOT_READY_TIMEOUT_SECONDS=0` 关闭该判定（回到旧行为）。
+wait_dsh_boot_ready() {
+  [ "${DSH_BOOT_READY_TIMEOUT_SECONDS:-180}" -gt 0 ] || return 0
+  boot_started_ms=$(now_ms)
+  while [ "$(( ($(now_ms) - boot_started_ms) / 1000 ))" -lt "${DSH_BOOT_READY_TIMEOUT_SECONDS:-180}" ]; do
+    dsh_ready_probe && {
+      echo "[dsh-supervisor] DSH became ready in $(( $(now_ms) - boot_started_ms ))ms" >&2
+      return 0
+    }
+    sleep 2
+  done
+  return 1
+}
+
+# 进程还在、端口能连上，却迟迟不就绪 —— 这是插件在启动期空转/死等。旧实现只判「进程是否
+# 存在」，这种「活着但永远起不来」的状态会无限重试同一套坏组合，网页持续不可达而容器还
+# 报 healthy。这里把它转成一次可计数的启动失败，交给 quarantine_plugins 摘掉元凶。
+detect_boot_spin() {
+  wait_dsh_boot_ready && return 0
+  echo "[dsh-supervisor] DSH 已运行 ${DSH_BOOT_READY_TIMEOUT_SECONDS:-180}s 仍未就绪（端口在监听但不响应），按启动失败处理" >&2
+  return 1
+}
+
+# 后台轮询「DSH 已拉起」到「HTTP 首次可用」的耗时。
 watch_dsh_readiness() {
   startup_timing || return 0
   target_pid=$1
@@ -128,7 +167,7 @@ watch_dsh_readiness() {
     deadline=$(( $(date +%s) + ${DSH_STARTUP_TIMING_TIMEOUT:-600} ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
       process_running "$target_pid" || exit 0
-      if node -e 'fetch(`http://127.0.0.1:${process.env.DSH_WEB_PORT ?? "3081"}/`,{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status>=500?1:0)).catch(()=>process.exit(1))' 2>/dev/null; then
+      if dsh_ready_probe; then
         echo "[dsh-supervisor][timing] dsh-http-ready: $(( $(now_ms) - started_ms ))ms" >&2
         exit 0
       fi
@@ -406,6 +445,40 @@ while [ "$stopping" != true ]; do
       sleep "$backoff"
       continue
     fi
+    # 等到「真的能用」再进入常驻监控：端口在监听不等于应用起来了。超时就杀掉这一轮，
+    # 让它走下面的失败计数与插件隔离，而不是抱着一个永远转圈的进程常驻。
+    boot_failed_before_ready=false
+    if ! detect_boot_spin; then
+      boot_failed_before_ready=true
+      dsh_failures=$((dsh_failures + 1))
+      kill -TERM "$dsh_pid" 2>/dev/null || true
+      sleep 3
+      kill -KILL "$dsh_pid" 2>/dev/null || true
+      wait "$dsh_pid" 2>/dev/null || true
+      dsh_pid=
+      rm -f "$DSH_PID_FILE"
+      if [ -n "${plugin_log_tail:-}" ]; then
+        kill "$plugin_log_tail" 2>/dev/null || true
+        plugin_log_tail=
+      fi
+      if [ "$dsh_failures" -ge "$DSH_PLUGIN_FAILURE_LIMIT" ]; then
+        echo "[dsh-supervisor] 连续 ${dsh_failures} 次启动未能就绪，尝试隔离导致失败的插件" >&2
+        if quarantine_plugins; then
+          dsh_failures=0
+          backoff=$DSH_RESTART_DELAY
+          echo "[dsh-supervisor] 已隔离新插件，立即重试；原 profile 未被修改，解除隔离请删掉 $DSH_PLUGIN_OVERLAY" >&2
+        else
+          echo "[dsh-supervisor] 日志里没有可隔离的插件条目，按原组合继续重试" >&2
+          dsh_failures=0
+        fi
+      fi
+      sleep "$backoff"
+      if [ "$backoff" -lt 30 ]; then
+        backoff=$((backoff * 2))
+        [ "$backoff" -le 30 ] || backoff=30
+      fi
+      continue
+    fi
   fi
 
   while process_running "$dsh_pid"; do
@@ -446,6 +519,10 @@ while [ "$stopping" != true ]; do
   if [ "$runtime" -ge 60 ]; then
     dsh_failures=0
     snapshot_plugins
+  elif [ "${boot_failed_before_ready:-false}" = true ]; then
+    # 这一次失败已经在「等了 DSH_BOOT_READY_TIMEOUT_SECONDS 仍未就绪」处计过数并尝试过
+    # 隔离，这里不能再记一遍，否则同一个故障会被重复累计。
+    boot_failed_before_ready=false
   else
     dsh_failures=$((dsh_failures + 1))
   fi
