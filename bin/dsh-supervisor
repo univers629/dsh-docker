@@ -87,17 +87,68 @@ adoptable_dsh_pid() {
   printf '%s\n' "$candidate"
 }
 
+# ── 启动分段计时 ────────────────────────────────────────────────────────────
+# 重启后网页长时间不可达时，只报一个总耗时无法判断是哪一段慢。这里把启动前准备逐脚本
+# 计时，并单独测量「拉起 DSH 进程」到「HTTP 首次可用」的间隔，全部写进 stderr，
+# 也就是 docker logs 能看到的内容。
+# 关闭方式：DSH_STARTUP_TIMING=false
+startup_timing() {
+  [ "${DSH_STARTUP_TIMING:-true}" != false ]
+}
+
+now_ms() {
+  ms=$(date +%s%3N 2>/dev/null || true)
+  case "$ms" in
+    ''|*[!0-9]*) echo "$(( $(date +%s) * 1000 ))" ;;
+    *) echo "$ms" ;;
+  esac
+}
+
+# 执行一个准备脚本并把它自己的耗时打出来。退出码原样返回，不改变原有的失败语义。
+run_stage() {
+  stage_name=$1
+  shift
+  if startup_timing; then
+    stage_started=$(now_ms)
+    "$@"
+    stage_status=$?
+    echo "[dsh-supervisor][timing] ${stage_name}: $(( $(now_ms) - stage_started ))ms" >&2
+    return "$stage_status"
+  fi
+  "$@"
+}
+
+# 后台轮询「DSH 已拉起」到「HTTP 首次可用」的耗时。判据与 restart-dsh wait-ready
+# 一致（非 5xx 即算可用），两个数字可以直接对照。
+watch_dsh_readiness() {
+  startup_timing || return 0
+  target_pid=$1
+  started_ms=$2
+  (
+    deadline=$(( $(date +%s) + ${DSH_STARTUP_TIMING_TIMEOUT:-600} ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      process_running "$target_pid" || exit 0
+      if node -e 'fetch(`http://127.0.0.1:${process.env.DSH_WEB_PORT ?? "3081"}/`,{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status>=500?1:0)).catch(()=>process.exit(1))' 2>/dev/null; then
+        echo "[dsh-supervisor][timing] dsh-http-ready: $(( $(now_ms) - started_ms ))ms" >&2
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "[dsh-supervisor][timing] dsh-http-ready: not ready within ${DSH_STARTUP_TIMING_TIMEOUT:-600}s" >&2
+  ) &
+}
+
 prepare_dsh() {
   if [ -n "$DSH_PREPARE_EXECUTABLE" ]; then
-    "$DSH_PREPARE_EXECUTABLE"
+    run_stage "prepare-external" "$DSH_PREPARE_EXECUTABLE"
     return
   fi
-  [ ! -x /usr/local/bin/cleanup-dsh-plugin-transactions ] || run_unprivileged /usr/local/bin/cleanup-dsh-plugin-transactions
-  [ ! -f /usr/local/bin/prepare-profile-modules.mjs ] || run_unprivileged node /usr/local/bin/prepare-profile-modules.mjs
-  [ ! -f /usr/local/bin/install-docker-control.mjs ] || run_unprivileged node /usr/local/bin/install-docker-control.mjs
-  [ ! -f /usr/local/bin/patch-profile-plugins.mjs ] || run_unprivileged node /usr/local/bin/patch-profile-plugins.mjs
+  [ ! -x /usr/local/bin/cleanup-dsh-plugin-transactions ] || run_stage "prepare-cleanup-transactions" run_unprivileged /usr/local/bin/cleanup-dsh-plugin-transactions
+  [ ! -f /usr/local/bin/prepare-profile-modules.mjs ] || run_stage "prepare-profile-modules" run_unprivileged node /usr/local/bin/prepare-profile-modules.mjs
+  [ ! -f /usr/local/bin/install-docker-control.mjs ] || run_stage "prepare-install-docker-control" run_unprivileged node /usr/local/bin/install-docker-control.mjs
+  [ ! -f /usr/local/bin/patch-profile-plugins.mjs ] || run_stage "prepare-patch-profile-plugins" run_unprivileged node /usr/local/bin/patch-profile-plugins.mjs
   # 被隔离插件的禁用叠加必须在 DSH 启动前刷新，否则进度日志里记下的凶手不会真的被挡掉。
-  [ ! -f /usr/local/bin/dsh-plugin-quarantine.mjs ] || run_unprivileged node /usr/local/bin/dsh-plugin-quarantine.mjs apply
+  [ ! -f /usr/local/bin/dsh-plugin-quarantine.mjs ] || run_stage "prepare-plugin-quarantine" run_unprivileged node /usr/local/bin/dsh-plugin-quarantine.mjs apply
 }
 
 # 插件故障隔离。
@@ -346,6 +397,7 @@ while [ "$stopping" != true ]; do
       HOME="$DSH_USER_HOME" "$DSH_EXECUTABLE" "$@" 2>>"$DSH_PLUGIN_LOG" &
     fi
     dsh_pid=$!
+    watch_dsh_readiness "$dsh_pid" "$(now_ms)"
     if ! write_pid_record "$DSH_PID_FILE" "$dsh_pid"; then
       kill -TERM "$dsh_pid" 2>/dev/null || true
       wait "$dsh_pid" 2>/dev/null || true
