@@ -54,6 +54,7 @@ COPY bin/dsh-update-shim /usr/local/bin/update-dsh
 COPY bin/apply-dsh-artifact-patches.mjs /usr/local/lib/dsh/apply-dsh-artifact-patches.mjs
 COPY bin/write-dsh-metadata.mjs /usr/local/lib/dsh/write-dsh-metadata.mjs
 COPY bin/write-dsh-update-status.mjs /usr/local/lib/dsh/write-dsh-update-status.mjs
+COPY bin/preflight-profile-plugins.mjs /usr/local/lib/dsh/preflight-profile-plugins.mjs
 COPY patches/ /etc/dsh-patches/
 COPY bin/dsh /usr/local/bin/dsh
 COPY bin/dsh-supervisor /usr/local/bin/dsh-supervisor
@@ -163,8 +164,12 @@ EXPOSE 3080
 # Nginx 的 /healthz 直接返回 204，只能证明入口活着：DSH 崩溃循环时容器依然是
 # healthy。所以这里同时探 Nginx 入口和 DSH 自己的回环监听端口，DSH 起不来就必须
 # 变成 unhealthy。
+#
+# 判据是「没有 5xx」而不是「2xx」：DSH 自己在监听就说明进程活着，而开了认证入口之后
+# 首页会回 401，用 response.ok 判定会让容器恒定 unhealthy，真正的故障反而淹没在
+# 常态报警里。docker-compose.yml 的覆盖版本用的是同一判据，两处必须一致。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD node -e "const dshPort = process.env.DSH_WEB_PORT || '3081';const check = (url) => fetch(url).then((response) => {if (!response.ok) throw new Error(url + ' ' + response.status)});Promise.all([check('http://127.0.0.1:3080/healthz'), check('http://127.0.0.1:' + dshPort + '/')]).then(() => process.exit(0)).catch(() => process.exit(1))"
+  CMD node -e "const dshPort = process.env.DSH_WEB_PORT || '3081';const check = (url) => fetch(url).then((response) => {if (response.status >= 500) throw new Error(url + ' ' + response.status)});Promise.all([check('http://127.0.0.1:3080/healthz'), check('http://127.0.0.1:' + dshPort + '/')]).then(() => process.exit(0)).catch(() => process.exit(1))"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["web"]

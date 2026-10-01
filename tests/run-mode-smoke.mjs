@@ -191,6 +191,9 @@ assert.match(runtimeDockerfile, /COPY bin\/verify-dsh-hardening \/usr\/local\/bi
 // update-dsh 拆成 root 用的真实脚本和面向 dsh 账户的入口包装。
 assert.match(runtimeDockerfile, /COPY bin\/update-dsh\.sh \/usr\/local\/lib\/dsh\/update-dsh\.sh/)
 assert.match(runtimeDockerfile, /COPY bin\/dsh-update-shim \/usr\/local\/bin\/update-dsh/)
+// 更新流程用这个预检脚本判断 profile 插件在新版本下会不会被禁用，镜像里少一份就等于
+// 升级后插件静默消失。
+assert.match(runtimeDockerfile, /COPY bin\/preflight-profile-plugins\.mjs \/usr\/local\/lib\/dsh\/preflight-profile-plugins\.mjs/)
 assert.match(runtimeDockerfile, /ln -sf apt \/usr\/local\/bin\/apt-get/)
 assert.match(runtimeDockerfile, /chown 0:1000 \/run\/dsh-priv \/run\/dsh-state/)
 assert.match(runtimeDockerfile, /chmod 750 \/run\/dsh-priv/)

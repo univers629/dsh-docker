@@ -73,6 +73,10 @@ for (const [label, source] of [['compose', compose], ['Dockerfile', dockerfile]]
   assert.match(source, /127\.0\.0\.1:3080\/healthz/, `${label} must keep probing the Nginx entry`)
   assert.match(source, /DSH_WEB_PORT \|\| '3081'/, `${label} must probe the DSH web port`)
   assert.match(source, /'http:\/\/127\.0\.0\.1:' \+ dshPort \+ '\/'/, `${label} must probe DSH over HTTP`)
+  // 判据是「没有 5xx」：开了认证入口后首页回 401，用 response.ok 判定会让容器恒定
+  // unhealthy，真正的故障反而淹没在常态报警里。
+  assert.match(source, /if \(response\.status >= 500\) throw/, `${label} must treat only 5xx as dead`)
+  assert.doesNotMatch(source, /if \(!response\.ok\) throw/, `${label} must not require a 2xx from a page behind auth`)
 }
 assert.match(dockerfile, /apache2-utils/)
 

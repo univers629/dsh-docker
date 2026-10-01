@@ -77,6 +77,7 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [服务]|status|shell|root-sh
 - `shell` 进入非特权 `dsh` 账户，`root-shell` 是宿主机侧的管理通道（容器内部无法以此提权）。
 - `verify` 在容器内运行整套加固自检，`keys` 与 `egress` 打印密钥代理和出站代理的状态，`key-panel` 打印密钥管理面板的地址与访问令牌。
 - 健康检查同时探测 Nginx 入口与 DSH 自身端口，DSH 崩溃循环时容器状态为 `unhealthy`。
+- 容器内更新会在替换 `/app/dsh` 之前预检 profile 插件的兼容性：DSH 会禁用 peer 范围不满足新版本的插件，这种禁用不会让进程起不来，存活检测和回滚都看不到，所以预检结果写进容器日志与更新状态。升级到新 DSH 版本前的准备见 [DSH 0.2.0-rc.2 迁移说明](docs/dsh-0.2.0-rc.2-migration.md)。
 
 彻底清空本项目：在工程目录运行菜单第 8 项，或执行 `./install.sh delete`（Windows：`powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`）。删除按精确名称清理本项目的容器、镜像、挂载、网络和工程目录，不使用子串匹配，也不会删除外部共享网络。
 

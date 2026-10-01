@@ -315,8 +315,15 @@ if [ ! -f "$DSH_HOME/cordis.patch.yml" ]; then
     /usr/local/share/dsh-home/cordis.patch.yml "$DSH_HOME/cordis.patch.yml"
 fi
 
-find /data -name "*credentials*" -exec chmod 600 {} + 2>/dev/null || true
-find /data -name ".*credentials*" -exec chmod 600 {} + 2>/dev/null || true
+# 只对「文件」收紧权限。这里必须限定 -type f：目录被 chmod 600 会丢掉 x 位，
+# 之后谁都进不去——源码仓库里任何名为 credentials 的包目录都会被误伤
+# （例如 <repo>/packages/credentials），而它本意只是保护凭据文件。
+# 只保护真正的凭据数据文件。两个约束都不能省：
+#   -type f        目录被 chmod 会丢掉 x 位，仓库里名为 credentials 的包目录会被毁；
+#   精确的后缀/取名  按子串匹配会误伤任何名字含 credentials 的文件（例如本脚本的备份）。
+find /data -type f \( -name "*.credentials.yml" -o -name "*.credentials.yaml" \
+  -o -name ".credentials.yml" -o -name ".credentials.yaml" \) \
+  -exec chmod 600 {} + 2>/dev/null || true
 if [ -d "$DSH_USER_HOME/.ssh" ]; then
   chmod 700 "$DSH_USER_HOME/.ssh"
   find "$DSH_USER_HOME/.ssh" -type f -exec chmod 600 {} + 2>/dev/null || true

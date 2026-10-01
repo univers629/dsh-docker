@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, openSync, readFileSync } from 'node:fs'
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createHash, randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { join, basename } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { containerMetrics } from './metrics.js'
@@ -132,7 +132,7 @@ async function dshInfo() {
     },
     update: updateStatus(),
     plugin: controlInstallReport(),
-    websocketKeepalive: wsKeepalive,
+    websocketKeepalive: keepaliveReport(),
   }
 }
 
@@ -145,21 +145,53 @@ async function dshInfo() {
 // 段 AbortController 代码——上游改动一个字符就整条失效。搬到插件里之后，依赖面从
 // "那一段代码的字面形状"缩小到"ws 仍然叫 ws、仍然有 handleUpgrade"。
 //
-// 之所以能在插件里做到：DSH 的下行 WebSocket 用的是普通的 ws 包
-// （client-connection 里 new WebSocketServer({ noServer: true })），而 ws 是 CJS，
-// 所以 createRequire + NODE_PATH 拿到的就是 client-connection 自己在用的那一份
-// require.cache 条目，包装 prototype 上的 handleUpgrade 对它同样生效。
+// 之所以能在插件里做到：下行 mux 用的是普通的 ws 包
+// （api-gateway 的 RemoteStreamMuxServer 里 new WebSocketServer({ noServer: true })），
+// 而 ws 是 CJS，所以包装 prototype 上的 handleUpgrade 对它生效。
+//
+// 两个必须踩准的点，错一个保活就静默失效（功能没了，日志里什么都没有）：
+//   1. 包装的必须是 mux 自己 require 到的那一份 ws。profile 里通常也装着一份 ws
+//      （插件依赖被提升安装），包装那一份对 mux 毫无影响。
+//   2. 路径必须与 mux 注册的 upgrade 路由一致。上游把它写在产物常量里
+//      （当前是 api-gateway 的 REMOTE_STREAM_MUX_PATH = /api/remote.mux），
+//      module 层不导出，所以按产物文本取，取不到才退回字面量。
+// /info 会报告路径来源与真正挂上保活的连接数，两者对不上就是上游改了产物。
 // ---------------------------------------------------------------------------
 
 const WS_KEEPALIVE_INTERVAL_MS = Number(process.env.DSH_WS_KEEPALIVE_INTERVAL_MS) || 25_000
-// client-connection 导出了这两个常量；能 import 到就用导出值，import 不到才退回
-// 字面量。/info 会如实报告用的是哪一种，免得上游改名之后保活静默失效。
-const WS_DOWNLINK_FALLBACK_PATHS = ['/api/events.mux', '/api/events.host']
+const WS_DOWNLINK_LITERAL_PATHS = ['/api/remote.mux']
+const WS_PATH_SOURCES = ['@deepseek-ai/dsh-api-gateway', '@deepseek-ai/dsh-client-connection']
 
 let wsKeepalive = { state: 'pending', detail: '尚未安装' }
+let wsAttached = 0
+const wsUnmatchedUpgrades = new Map()
+
+function keepaliveReport() {
+  return {
+    ...wsKeepalive,
+    attached: wsAttached,
+    unmatchedUpgrades: [...wsUnmatchedUpgrades].map(([path, count]) => ({ path, count })),
+  }
+}
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
+}
+
+// module 层不导出这些常量，只能按产物文本取。取不到的后果是退回字面量：仍然可用，
+// 但上游改名后保活会静默失效，所以 /info 把来源与 attached 计数一并报出来。
+function declaredDownlinkPaths() {
+  for (const endpoint of WS_PATH_SOURCES) {
+    try {
+      const entry = require.resolve(endpoint)
+      const source = readFileSync(entry, 'utf8')
+      const declared = [...source.matchAll(
+        /(?:REMOTE_STREAM_MUX_PATH|REMOTE_STREAM_HOST_PATH|MUX_EVENTS_PATH|HOST_EVENTS_PATH)\s*=\s*"([^"]+)"/g,
+      )].map((match) => match[1]).filter((value) => value.startsWith('/'))
+      if (declared.length > 0) return [...new Set(declared)]
+    } catch {}
+  }
+  return []
 }
 
 async function downlinkPaths() {
@@ -167,9 +199,23 @@ async function downlinkPaths() {
     const connection = await import('@deepseek-ai/dsh-client-connection')
     const exported = [connection.MUX_EVENTS_PATH, connection.HOST_EVENTS_PATH]
       .filter((value) => typeof value === 'string' && value.startsWith('/'))
-    if (exported.length === 2) return { paths: new Set(exported), source: 'exported' }
+    if (exported.length > 0) return { paths: new Set(exported), source: 'exported' }
   } catch {}
-  return { paths: new Set(WS_DOWNLINK_FALLBACK_PATHS), source: 'fallback' }
+  const declared = declaredDownlinkPaths()
+  if (declared.length > 0) return { paths: new Set(declared), source: 'upstream-constant' }
+  return { paths: new Set(WS_DOWNLINK_LITERAL_PATHS), source: 'literal' }
+}
+
+// mux 用的 ws 必须按 mux 所在包解析：插件自己那一份解析结果通常是 profile 里被提升
+// 安装的另一份，包装它对 mux 一点作用都没有，而且从日志上看不出区别。
+function resolveMuxWs() {
+  for (const endpoint of WS_PATH_SOURCES) {
+    try {
+      const dir = dirname(require.resolve(`${endpoint}/package.json`))
+      return createRequire(join(dir, 'index.js')).resolve('ws')
+    } catch {}
+  }
+  return undefined
 }
 
 function isDownlinkUpgrade(request, paths) {
@@ -180,6 +226,21 @@ function isDownlinkUpgrade(request, paths) {
   } catch {
     return false
   }
+}
+
+// 见过但不被认作下行的升级路径：上游把 mux 挪到别的路径时，这里会留下真实路径，
+// 与保活路径的差异就能直接读出来。
+function noteUnmatchedUpgrade(request) {
+  const target = request?.url
+  if (typeof target !== 'string' || target === '') return
+  let path
+  try {
+    path = new URL(target, 'http://127.0.0.1').pathname
+  } catch {
+    return
+  }
+  wsUnmatchedUpgrades.set(path, (wsUnmatchedUpgrades.get(path) ?? 0) + 1)
+  if (wsUnmatchedUpgrades.size > 20) wsUnmatchedUpgrades.delete(wsUnmatchedUpgrades.keys().next().value)
 }
 
 // 每 25s 发一次 ping；上一轮的 pong 没回来就直接 terminate，否则半开连接会一直
@@ -214,8 +275,9 @@ function installWebSocketKeepalive() {
 
   void (async () => {
     let WebSocketServer
+    const wsPath = resolveMuxWs()
     try {
-      ;({ WebSocketServer } = require('ws'))
+      ;({ WebSocketServer } = require(wsPath ?? 'ws'))
       if (typeof WebSocketServer?.prototype?.handleUpgrade !== 'function') {
         throw new Error('ws 没有可包装的 handleUpgrade')
       }
@@ -230,7 +292,14 @@ function installWebSocketKeepalive() {
     const original = WebSocketServer.prototype.handleUpgrade
     const patched = function (request, socket, head, callback) {
       return original.call(this, request, socket, head, (websocket, ...rest) => {
-        if (active && isDownlinkUpgrade(request, paths)) attachKeepalive(websocket)
+        if (active) {
+          if (isDownlinkUpgrade(request, paths)) {
+            wsAttached += 1
+            attachKeepalive(websocket)
+          } else {
+            noteUnmatchedUpgrade(request)
+          }
+        }
         return callback(websocket, ...rest)
       })
     }
@@ -247,6 +316,7 @@ function installWebSocketKeepalive() {
       intervalMs: WS_KEEPALIVE_INTERVAL_MS,
       paths: [...paths],
       pathSource: source,
+      wsPath: wsPath ?? 'ws',
     }
   })()
 

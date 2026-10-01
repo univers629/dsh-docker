@@ -18,6 +18,12 @@ assert.match(script, /"\$RESTART_EXECUTABLE" check/)
 assert.match(script, /"\$RESTART_EXECUTABLE" request 1/)
 assert.match(script, /"\$RESTART_EXECUTABLE" wait-ready/)
 assert.match(script, /DSH_UPDATE_READY_TIMEOUT/)
+// 插件在新版本下会被禁用这件事不会让进程起不来，回滚逻辑看不见它，所以预检结果必须
+// 进日志和更新状态；正因为它只报告，旗标 --fail-on-incompatible 不能出现在更新路径上。
+assert.match(script, /DSH_PROFILE_PREFLIGHT/)
+assert.match(script, /preflight-profile-plugins/)
+assert.match(script, /PLUGIN_NOTE/)
+assert.doesNotMatch(script, /--fail-on-incompatible/)
 // 重启只针对 DSH 进程；容器是长期存活的 Debian 系统，绝不能被更新流程重建。
 assert.doesNotMatch(script, /gosu|node:node/)
 assert.doesNotMatch(script, /kill -TERM "\$\(cat \/run\/dsh\.pid\)"/)

@@ -229,13 +229,24 @@ try {
   assert.equal(refusedSnapshot.captured.status, 403, '快照走的是同一道回环鉴权')
 
   // 9. 白名单必须覆盖浏览器要用的每一条插件路径，否则它会被 location / 带着
-  // X-Forwarded-For 转发，插件按设计拒掉。
+  // X-Forwarded-For 转发，插件按设计拒掉。读接口与写接口分成两条 location
+  // （读组要避开高频轮询、写组单独限流），所以核对的是两条 location 的并集。
   const nginxConfig = readFileSync(new URL('../nginx/dsh-nginx.conf', import.meta.url), 'utf8')
-  const whitelist = nginxConfig.match(/location ~ \^\/dsh-docker-control\/\(([^)]+)\)\$/)
-  assert.notEqual(whitelist, null, 'nginx 配置里要能解析出插件路径白名单')
-  const listed = whitelist[1].split('|')
+  const listed = new Set()
+  let groupCount = 0
+  for (const line of nginxConfig.split('\n')) {
+    const group = line.match(/location ~ \^\/dsh-docker-control\/\(([^)]+)\)\$/)
+    if (group) {
+      groupCount += 1
+      for (const entry of group[1].split('|')) listed.add(entry)
+      continue
+    }
+    const single = line.match(/location = \/dsh-docker-control\/(\S+)\s*\{/)
+    if (single) listed.add(single[1])
+  }
+  assert.ok(groupCount > 0, 'nginx 配置里要能解析出插件路径白名单')
   for (const path of ['info', 'metrics', 'update', 'update/status', 'update/latest']) {
-    assert.ok(listed.includes(path), `nginx 白名单必须包含 ${path}`)
+    assert.ok(listed.has(path), `nginx 白名单必须包含 ${path}`)
   }
 
   for (const off of offs) off()

@@ -14,6 +14,8 @@ STATUS_WRITER=${DSH_STATUS_WRITER:-/usr/local/lib/dsh/write-dsh-update-status.mj
 INSTALLER=${DSH_RUNTIME_INSTALLER:-/usr/local/bin/install-dsh-runtime}
 NGINX_CONFIG=${DSH_NGINX_CONFIG:-/usr/local/share/dsh/nginx.conf}
 RESTART_EXECUTABLE=${DSH_RESTART_EXECUTABLE:-/usr/local/bin/restart-dsh}
+PREFLIGHT=${DSH_PROFILE_PREFLIGHT:-/usr/local/lib/dsh/preflight-profile-plugins.mjs}
+PROFILE_DIR=${DSH_PROFILE_ROOT:-${DSH_HOME:-/data/dsh}/profiles/web}
 
 mkdir -p "$STATE_DIR"
 
@@ -62,6 +64,21 @@ if ! "$INSTALLER" "$STAGE_DIR" "$VERSION"; then
   exit 1
 fi
 
+# 换上新运行时之前先算一遍 profile 插件在新版本下的兼容性。DSH 会禁用 peer 不满足的
+# 插件：进程照常启动、健康检查照样通过、下面的回滚逻辑也看不到，只有 stderr 上一行
+# 提示，插件功能却整块消失。预检只读、只报告，不作为闸门——新版本起不来会回滚，
+# 而插件被禁用不会，所以这一条必须写进日志和更新状态，让人在重启前就知道。
+PLUGIN_NOTE=""
+if [ -r "$PREFLIGHT" ]; then
+  PREFLIGHT_OUTPUT="$(node "$PREFLIGHT" "$STAGE_DIR/lib/node_modules/$PACKAGE/node_modules" "$PROFILE_DIR" 2>&1 || true)"
+  printf '%s\n' "$PREFLIGHT_OUTPUT" >&2
+  PLUGIN_SUMMARY="$(printf '%s\n' "$PREFLIGHT_OUTPUT" | tail -n 1 | sed -n 's/^摘要：//p')"
+  case "$PLUGIN_SUMMARY" in
+    '' | *'，0 个在新版本下会被禁用，0 个未装载') ;;
+    *) PLUGIN_NOTE="；插件预检 $PLUGIN_SUMMARY" ;;
+  esac
+fi
+
 write_status running '正在原子替换 DSH 并检查 Nginx 配置'
 OLD_DIR="$WORK_DIR/previous"
 if ! mv "$APP_DIR" "$OLD_DIR"; then
@@ -82,7 +99,7 @@ if ! nginx -t -c "$NGINX_CONFIG"; then
 fi
 
 NEW_VERSION="$(node -e 'const {readFileSync}=require("node:fs");try{process.stdout.write(JSON.parse(readFileSync(process.argv[1],"utf8")).version??"unknown")}catch{process.stdout.write("unknown")}' "$APP_DIR/DSH-BUILD-METADATA.json" 2>/dev/null || printf 'unknown')"
-write_status success "DSH 已更新到 $NEW_VERSION，正在重启 DSH 进程"
+write_status success "DSH 已更新到 $NEW_VERSION，正在重启 DSH 进程$PLUGIN_NOTE"
 
 # 新版本起来了就没什么可回滚的，旧版本目录可以放掉。
 # 回滚必须在本进程内完成：$OLD_DIR 在 $WORK_DIR 里，而 trap EXIT 会删掉整个

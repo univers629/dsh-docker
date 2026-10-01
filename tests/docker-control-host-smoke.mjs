@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -84,6 +85,49 @@ try {
   assert.equal(infoBody.ok, true)
   assert.equal(infoBody.dsh.version, 'unknown')
   assert.equal(typeof infoBody.system.nodeVersion, 'string')
+
+  // 下行 WS 保活：路径必须与 mux 注册的 upgrade 路由一致。上游挪了恒定值而这里没跟上
+  // 时，保活会静默失效（功能没了，日志里什么都没有），所以 /info 必须同时报出路径来源
+  // 与真正挂上保活的连接数。
+  const keepalive = await (async () => {
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+      const probe = response()
+      await infoRoute.handler({
+        method: 'GET',
+        socket: { remoteAddress: '127.0.0.1' },
+        headers: { host: '127.0.0.1:3081', origin: 'http://127.0.0.1:3081' },
+      }, probe)
+      const report = JSON.parse(probe.body).websocketKeepalive
+      if (report.state !== 'pending') return report
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('websocket keepalive never left the pending state')
+  })()
+  assert.ok(['active', 'unavailable'].includes(keepalive.state), keepalive.state)
+  assert.equal(typeof keepalive.attached, 'number')
+  assert.ok(Array.isArray(keepalive.unmatchedUpgrades))
+  if (keepalive.state === 'active') {
+    assert.ok(['exported', 'upstream-constant', 'literal'].includes(keepalive.pathSource))
+    // 环境里能解析到 DSH 产物时，路径只能来自产物常量的扫描：退回字面量意味着上游
+    // 挪了路径而字面量还是旧的，保活会静默失效，这条断言把这种情况变成红灯。
+    const declared = (() => {
+      try {
+        const require = createRequire(new URL('../dsh-home/docker-control/lib/index.js', import.meta.url))
+        const source = readFileSync(require.resolve('@deepseek-ai/dsh-api-gateway'), 'utf8')
+        return [...new Set([...source.matchAll(/REMOTE_STREAM_MUX_PATH\s*=\s*"([^"]+)"/g)].map(match => match[1]))]
+      } catch {
+        return []
+      }
+    })()
+    if (declared.length > 0) {
+      assert.equal(keepalive.pathSource, 'upstream-constant', 'keepalive path must come from the upstream artifact')
+      assert.deepEqual([...keepalive.paths].sort(), [...declared].sort())
+    } else {
+      assert.equal(keepalive.pathSource, 'literal')
+      assert.deepEqual(keepalive.paths, ['/api/remote.mux'])
+    }
+  }
 
   // The remote check is a privileged, loopback-only GET, and it reports the
   // failure instead of pretending the runtime is current when the network or

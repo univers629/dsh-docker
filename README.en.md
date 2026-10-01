@@ -77,6 +77,7 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [service]|status|shell|root-s
 - `shell` enters the unprivileged `dsh` account; `root-shell` is a host-side administration channel that cannot be reached from inside the container.
 - `verify` runs the full hardening self-check inside the container; `keys` and `egress` print the status of the key broker and the egress proxy, and `key-panel` prints the key admin panel URL and access token.
 - The healthcheck probes both the Nginx entry and DSH's own port, so a DSH crash loop shows the container as `unhealthy`.
+- An in-container update checks the profile plugins against the new version before it replaces `/app/dsh`: DSH disables plugins whose peer ranges the new version does not satisfy, and that kind of failure neither stops the process nor triggers the health check or the rollback, so the preflight verdict is written to the container log and the update status. See the [DSH 0.2.0-rc.2 migration notes](docs/dsh-0.2.0-rc.2-migration.en.md) for what upgrading to a new DSH version requires.
 
 To remove the project completely, run menu item 8 from the project directory or `./install.sh delete` (Windows: `powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`). Deletion targets this project's container, images, mounts, networks, and directory by exact name; it never uses substring matching and never removes external shared networks.
 
