@@ -3,6 +3,12 @@ set -euo pipefail
 
 ACTION=""
 ACCESS_MODE_OVERRIDE=""
+# 多用户模式：账户注册 + 每用户独立实例。仅自定义向导或显式旗标可开启，
+# 一键安装恒为单管理员模式。
+MULTI_USER_OVERRIDE=""
+REGISTER_GATE_OVERRIDE=""
+IDLE_TIMEOUT_OVERRIDE=""
+DISK_QUOTA_OVERRIDE=""
 TRUSTED_PROXY_ACK=""
 BIND_HOST_OVERRIDE=""
 TRUSTED_HOSTS_OVERRIDE=""
@@ -11,6 +17,14 @@ NETWORK_EXTERNAL_OVERRIDE=""
 IMAGE_SOURCE_OVERRIDE=""
 IMAGE_OVERRIDE=""
 INTERACTIVE=auto
+# 一键安装：--quick 显式开启；无 TTY 的 curl|bash 直灌也默认走一键（随机安全凭据、零提问）。
+# 显式 --non-interactive 保留旧的自动化语义（全显式参数、不随机、不打印横幅）。
+QUICK_INSTALL=auto
+NON_INTERACTIVE_FLAG=false
+# 一键模式下本次生成的明文凭据，只在结尾回显一次；只存哈希，绝不写进 .env。
+GENERATED_BASIC_USER=""
+GENERATED_BASIC_PASSWORD=""
+GENERATED_ROOT_PASSWORD=""
 TARGET_DIR="${DSH_INSTALL_DIR:-dsh-docker}"
 PROMPT_RESULT=""
 PENDING_BASIC_USER="${DSH_BASIC_AUTH_USER:-}"
@@ -19,6 +33,10 @@ PENDING_ROOT_PASSWORD="${DSH_ROOT_PASSWORD:-}"
 ROOT_PASSWORD_OVERRIDE=""
 NO_ROOT_PASSWORD=false
 PENDING_ACCESS_MODE=""
+PENDING_MULTI_USER=""
+PENDING_REGISTER_GATE=""
+PENDING_IDLE_TIMEOUT=""
+PENDING_USER_DISK_QUOTA=""
 PENDING_BIND_HOST=""
 PENDING_TRUSTED_HOSTS=""
 PENDING_NETWORK=""
@@ -81,7 +99,9 @@ usage() {
       key-panel（给已装好的部署开/关模型密钥管理面板）、
       start、stop、restart、logs、status、delete（删除）
 选项：
-  --access local|trusted-proxy|basic
+  --access local|trusted-proxy|basic|password
+                                  password 由内置认证网关承担认证（多用户模式使用，
+                                  容器内 Nginx 不再做 Basic Auth）
   --bind-host ADDRESS             Docker 发布端口绑定地址
   --trusted-hosts HOSTS           逗号分隔的公网 host[:port]
   --network NAME                  与 Docker 反向代理共享的外部网络
@@ -106,6 +126,13 @@ usage() {
   --egress-allow HOSTS            allowlist 下额外放行的域名（可重复，逗号分隔，支持 *.example.com）
   --userns-preflight              只做宿主 userns-remap 预检并退出，不安装
   --non-interactive               不显示问答，使用参数或安全默认值
+  --quick                         一键安装：basic 认证 + 随机账密 + 关闭密钥代理，零提问
+  --multi-user                    多用户：开放注册 + 每用户独立实例（与 --access=password 搭配）
+  --no-multi-user                 单管理员模式（默认）
+  --register-gate=open|invite     多用户模式的注册门槛：开放注册，或需要邀请码
+  --idle-timeout=SECONDS          多用户模式：实例闲置多久后停用（默认 1800）
+  --user-disk-quota=GB            多用户模式：每用户磁盘配额 GB（0 表示不限制，默认 5）
+                                  （不显式给动作且无 TTY 的 curl|bash 直灌也默认走一键）
   --dir PATH                      工程目录（默认 ./dsh-docker）
 
 关于删除：先问数据范围——全部删除，或者只保留会话（data/dsh/sessions）、工作目录
@@ -241,7 +268,13 @@ while [ "$#" -gt 0 ]; do
     --userns-preflight) USERNS_PREFLIGHT=true ;;
     --network-external) NETWORK_EXTERNAL_OVERRIDE=true ;;
     --network-internal) NETWORK_EXTERNAL_OVERRIDE=false ;;
-    --non-interactive|-y|--yes) INTERACTIVE=false ;;
+    --non-interactive|-y|--yes) INTERACTIVE=false; NON_INTERACTIVE_FLAG=true ;;
+    --quick) QUICK_INSTALL=true ;;
+  --multi-user) MULTI_USER_OVERRIDE=on ;;
+  --no-multi-user) MULTI_USER_OVERRIDE=off ;;
+  --register-gate=*) REGISTER_GATE_OVERRIDE="${1#*=}" ;;
+  --idle-timeout=*) IDLE_TIMEOUT_OVERRIDE="${1#*=}" ;;
+  --user-disk-quota=*) DISK_QUOTA_OVERRIDE="${1#*=}" ;;
     --dir)
       [ "$#" -ge 2 ] || { echo "[错误] --dir 缺少值。" >&2; exit 2; }
       shift
@@ -279,11 +312,33 @@ case "$EGRESS_MODE_OVERRIDE" in
 esac
 
 if [ "$INTERACTIVE" = auto ]; then
-  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  # 交互 = stdin 是 TTY（能读答案）且 /dev/tty 可读写（prompt 从这里读）。curl|bash
+  # 直灌时 stdout 有 TTY 但 stdin 是管道，`-t 0` 为假 → 不是交互。
+  if [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
     INTERACTIVE=true
   else
     INTERACTIVE=false
   fi
+fi
+# 一键判定：--quick 显式开；或没显式给 --non-interactive 且连 TTY 都没有（curl|bash 直灌）。
+# 只有 install / configure 才有一键语义；维护动作不能占一键的默认。
+if [ "$QUICK_INSTALL" = auto ]; then
+  case "$ACTION" in
+    ''|install|configure)
+      if [ "$INTERACTIVE" = false ] && [ "$NON_INTERACTIVE_FLAG" = false ]; then
+        QUICK_INSTALL=true
+      else
+        QUICK_INSTALL=false
+      fi
+      ;;
+    *) QUICK_INSTALL=false ;;
+  esac
+fi
+# 一键 = 零提问：强制走非交互，但没有显式动作时默认 install。这里同时覆盖
+# 显式 --quick（哪怕有 TTY）与无 TTY 的 curl|bash 两条路，于是主菜单对它整体短路。
+if [ "$QUICK_INSTALL" = true ]; then
+  INTERACTIVE=false
+  [ -z "$ACTION" ] && ACTION=install
 fi
 
 prompt() {
@@ -337,9 +392,58 @@ prompt_yes_no() {
   done
 }
 
-echo "==================================================="
-echo "  DeepSeek Harness (DSH) 安装与管理向导"
-echo "==================================================="
+# 生成一个强随机密码：至少 16 位，含大小写、数字，并从一组 URL 安全符号里选一个。
+# 只在 /dev/urandom 可用时叫用；退回空白时调用方必须报错而不是降级成弱口令。
+generate_password() {
+  local i pick length="${1:-16}" out="" pool
+  if [ ! -r /dev/urandom ]; then
+    echo ""
+    return 1
+  fi
+  pool='abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  while :; do
+    out=""
+    for i in $(seq 1 "$length"); do
+      pick="$(od -An -N1 -tu1 /dev/urandom | tr -d '[:space:]')"
+      out="$out$(printf '%s' "$pool" | cut -c$((pick % ${#pool} + 1)))"
+    done
+    case "$out" in
+      *[a-z]*) case "$out" in *[A-Z]*) case "$out" in *[0-9]*) printf '%s' "$out"; return 0 ;; esac ;; esac ;;
+    esac
+  done
+}
+
+# Static properties for the two-ink art below. Cached so the reset/color codes aren't
+# re-decoded per line; the plain check keeps the banner a no-op when the terminal can't show it.
+ANSI_CLEAR=""
+if [ -t 1 ] || [ -t 2 ]; then
+  # 品牌蓝 #4D6BFE 作为前景；鲸鱼符号用半块字符，占用每个格子的上半/下半。
+  ANSI_CLEAR="$(printf '\033[0m')"
+fi
+
+# 官方 DeepSeek 鲸鱼徽标（来源 @lobehub/icons 的 deepseek 图标，品牌蓝 #4D6BFE）。
+# 用 Unicode 半块字符（▀/▄/█）光栅化成纯文本，不依赖任何外部字体或图片。
+print_banner() {
+  local blue=""
+  if [ -n "$ANSI_CLEAR" ]; then
+    blue="$(printf '\033[38;2;77;107;254m')"
+  fi
+  printf '%s\n' "$blue"'      ▄▄▄▄▄▄▄█    █▄'
+  printf '%s\n' "$blue"'  ▄██████████▄▄   ███▄▄▄▄▄█'
+  printf '%s\n' "$blue"' ███████████████▄ ▀███████'
+  printf '%s\n' "$blue"'██████████████████▄ ███▀'
+  printf '%s\n' "$blue"'██████████████████████▀'
+  printf '%s\n' "$blue"'██████████████████████'
+  printf '%s\n' "$blue"'▀████████████████████'
+  printf '%s\n' "$blue"' ▀█████████████████▀'
+  printf '%s\n' "$blue"'   ▀████████████████▄'
+  printf '%s\n' "$blue"'     ▀▀███████▀▀'"$ANSI_CLEAR"
+}
+
+print_banner
+echo
+echo "DeepSeek Harness (DSH) 安装与管理向导"
+echo "（无 TTY 的 curl|bash 直灌会默认走「一键安装」；也可显式加 --quick）"
 echo
 
 # --userns-preflight 只做宿主检查，不该被"这次要做什么"的菜单挡住。
@@ -792,7 +896,11 @@ prune_dir_except() {
   local dir="$1" child base keep matched status=0
   shift
   [ -d "$dir" ] || return 0
-  while IFS= read -r child; do
+  # 用 NUL 分隔读 find 的输出：文件名里可以合法地含换行，按行读会把一个条目拆成
+  # 两条待删路径，而 delete_project 已经把工作目录切到项目父目录，拆出的相对名会
+  # 在项目之外解析（审计复现：含换行的目录名让保留路径被连带删掉、项目外的同名
+  # sibling 被 rm -rf）。-print0 配合 read -d '' 才能让文本行与路径一一对应。
+  while IFS= read -r -d '' child; do
     [ -n "$child" ] || continue
     base="${child##*/}"
     matched=false
@@ -804,9 +912,7 @@ prune_dir_except() {
     done
     [ "$matched" = true ] && continue
     remove_path "$child" || status=1
-  done <<EOF
-$(find "$dir" -mindepth 1 -maxdepth 1 2>/dev/null)
-EOF
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
   return "$status"
 }
 
@@ -963,6 +1069,51 @@ set_compose_args() {
   elif [ "$PENDING_KEY_ADMIN" = on ]; then
     echo "[警告] 密钥代理关着，密钥管理面板不会启动（它管理的就是代理那份密钥配置）。" >&2
     PENDING_KEY_ADMIN=off
+  fi
+  # 认证层（网关 + 入口）在 password 模式与多用户模式下都需要：password 模式的含义是
+  # 「容器内不做认证」，认证全在网关侧；多用户还要靠网关把请求按身份路由到实例。
+  # 只设模式不部署这一层，等于容器内不认证、外面也没有认证。
+  #
+  # 入口容器二选一，靠 profile 区分：单管理员用 authgate，多用户用 multiuser 叠加层里的
+  # dsh-ingress。两者发布同一个宿主端口，同时激活会让第二个入口绑定失败。
+  if [ "$PENDING_ACCESS_MODE" = password ] || [ "$PENDING_MULTI_USER" = on ]; then
+    if [ ! -f docker-compose.auth.yml ]; then
+      echo "[错误] 需要 docker-compose.auth.yml 才能使用 password 访问模式或多用户模式，但工程目录里没有它。" >&2
+      echo "       请更新工程源码，或改用 basic / trusted-proxy 模式。" >&2
+      exit 1
+    fi
+    if [ "$PENDING_MULTI_USER" = on ]; then
+      # 入口交给 multiuser 叠加层的 dsh-ingress，因此不激活 authgate profile。
+      COMPOSE_ARGS+=(-f docker-compose.auth.yml)
+    else
+      COMPOSE_ARGS+=(--profile authgate -f docker-compose.auth.yml)
+    fi
+  fi
+  # basic 模式只把 htpasswd 这一个文件挂进容器（整目录挂载会把认证数据库暴露给
+  # 容器内的 Agent，见 docker-compose.basic-auth.yml 的注释）。
+  if [ "$PENDING_ACCESS_MODE" = basic ]; then
+    if [ ! -f docker-compose.basic-auth.yml ]; then
+      echo "[错误] 需要 docker-compose.basic-auth.yml 才能使用 basic 访问模式，但工程目录里没有它。" >&2
+      echo "       请更新工程源码，或改用 local / trusted-proxy / password 模式。" >&2
+      exit 1
+    fi
+    COMPOSE_ARGS+=(-f docker-compose.basic-auth.yml)
+  fi
+  # 多用户模式在认证层之上再叠加实例编排；它同时改变入口与网络拓扑，
+  # 因此必须与其它叠加层一起传给 build 与 up（两者用的是同一个 COMPOSE_ARGS）。
+  if [ "$PENDING_MULTI_USER" = on ]; then
+    if [ ! -f docker-compose.multiuser.yml ]; then
+      echo "[错误] 需要 docker-compose.multiuser.yml 才能启用多用户模式，但工程目录里没有它。" >&2
+      echo "       请更新工程源码，或用 --no-multi-user 保持单管理员模式。" >&2
+      exit 1
+    fi
+    COMPOSE_ARGS+=(--profile multiuser)
+    # 多用户建立在认证层之上：上面的分支已经把它加进来了，这里只做兜底声明。
+    case " ${COMPOSE_ARGS[*]} " in
+      *" docker-compose.auth.yml "*) ;;
+      *) COMPOSE_ARGS+=(-f docker-compose.auth.yml) ;;
+    esac
+    COMPOSE_ARGS+=(-f docker-compose.multiuser.yml)
   fi
   # blocklist 与 allowlist 用同一套隔离形态：都要把 dsh 收进没有网关的网络，出站全部
   # 经过 dsh-egress。两者只差代理里那最后一道域名判定，而那是策略文件的事。
@@ -2038,6 +2189,7 @@ configure_dsh() {
   local access_mode bind_host trusted_hosts network network_external
   local route default_route default_network keep_auth confirm_password
   local keep_root_password confirm_root_password
+  local multi_user register_gate idle_timeout user_disk_quota
   local candidates image_source image_ref
 
   image_source="${IMAGE_SOURCE_OVERRIDE:-$(get_compose_env DSH_IMAGE_SOURCE prebuilt)}"
@@ -2065,7 +2217,14 @@ configure_dsh() {
     case "$image_ref" in "$DEFAULT_LOCAL_IMAGE") image_ref="$DEFAULT_PREBUILT_IMAGE" ;; esac
   fi
 
-  access_mode="${ACCESS_MODE_OVERRIDE:-$(get_compose_env DSH_ACCESS_MODE local)}"
+  # 一键：默认做认证。已写进 .env 的访问模式（例如老部署的 local）仍然尊重，只把
+  # 「没写过」的默认值从 local 换成 basic——一键就是冲着「开箱即有锁」去的。
+  if [ "$QUICK_INSTALL" = true ] && [ -z "$ACCESS_MODE_OVERRIDE" ]; then
+    access_mode="$(get_compose_env DSH_ACCESS_MODE basic)"
+    case "$access_mode" in local|trusted-proxy|basic) ;; *) access_mode=basic ;; esac
+  else
+    access_mode="${ACCESS_MODE_OVERRIDE:-$(get_compose_env DSH_ACCESS_MODE local)}"
+  fi
   if [ "$INTERACTIVE" = true ] && [ -z "$ACCESS_MODE_OVERRIDE" ]; then
     case "$access_mode" in local) default_route=1 ;; trusted-proxy) default_route=2 ;; basic) default_route=3 ;; *) default_route=1 ;; esac
     echo
@@ -2073,11 +2232,13 @@ configure_dsh() {
     echo "1) 仅本机或 SSH 隧道"
     echo "2) 已有 Cloudflare Access / 面板认证 / 私有 VPN"
     echo "3) DSH 内置 Nginx Basic Auth（外层仍须提供 HTTPS）"
+    echo "4) 多用户（开放注册 + 每用户独立实例；认证由内置网关承担）"
     prompt "请选择" "$default_route"
     case "$PROMPT_RESULT" in
       1) access_mode=local ;;
       2) access_mode=trusted-proxy ;;
       3) access_mode=basic ;;
+      4) access_mode=password; MULTI_USER_OVERRIDE=on ;;
       *) echo "[错误] 无效访问保护选项。" >&2; exit 2 ;;
     esac
   fi
@@ -2188,6 +2349,18 @@ configure_dsh() {
     else
       keep_auth=false
     fi
+    # 一键：随机生成账密，但尊重环境变量显式给过的值（DSH_BASIC_AUTH_*）与命令行参数。
+    # 老部署盘上有 htpasswd 时沿用，不反复改密码把它弄丢。
+    if [ "$QUICK_INSTALL" = true ] && [ "$keep_auth" != true ] && [ -z "$PENDING_BASIC_USER" ] && [ -z "$PENDING_BASIC_PASSWORD" ]; then
+      GENERATED_BASIC_USER="${DSH_BASIC_AUTH_USER:-dsh}"
+      GENERATED_BASIC_PASSWORD="$(generate_password 16)" || {
+        echo "[错误] 读不到 /dev/urandom，一键安装无法生成 Basic Auth 密码。" >&2
+        exit 1
+      }
+      PENDING_BASIC_USER="$GENERATED_BASIC_USER"
+      PENDING_BASIC_PASSWORD="$GENERATED_BASIC_PASSWORD"
+      case "$PENDING_BASIC_USER" in *[!A-Za-z0-9._-]*|'') echo "[错误] 用户名只允许字母、数字、点、下划线和连字符。" >&2; exit 2 ;; esac
+    fi
     if [ "$keep_auth" != true ]; then
       if [ "$INTERACTIVE" = true ]; then
         prompt "Basic Auth 用户名" "${PENDING_BASIC_USER:-dsh}"
@@ -2256,13 +2429,27 @@ configure_dsh() {
         rm -f data/secret/root.hash
       fi
     fi
+  elif [ "$QUICK_INSTALL" = true ] && [ ! -s data/secret/root.hash ]; then
+    # 一键：随机生成容器 root 密码。有了它摘要里才能把完整凭据一次给齐，省得用户
+    # 装完还要回来再配一道。老部署若有 root.hash 则保持不动。
+    GENERATED_ROOT_PASSWORD="$(generate_password 16)" || {
+      echo "[错误] 读不到 /dev/urandom，一键安装无法生成容器 root 密码。" >&2
+      exit 1
+    }
+    PENDING_ROOT_PASSWORD="$GENERATED_ROOT_PASSWORD"
   fi
+
+  configure_user_mode "$access_mode"
 
   configure_model_broker
   configure_key_admin
   configure_egress_mode
 
   PENDING_ACCESS_MODE="$access_mode"
+  PENDING_MULTI_USER="$multi_user"
+  PENDING_REGISTER_GATE="$register_gate"
+  PENDING_IDLE_TIMEOUT="$idle_timeout"
+  PENDING_USER_DISK_QUOTA="$user_disk_quota"
   PENDING_BIND_HOST="$bind_host"
   PENDING_TRUSTED_HOSTS="$trusted_hosts"
   PENDING_NETWORK="$network"
@@ -2272,6 +2459,103 @@ configure_dsh() {
   # 叠加文件由上面两段问答决定，所以 COMPOSE_ARGS 必须在这里重算一次；
   # build 与 up 都用它，两边不能出现不同的 -f 组合。
   set_compose_args
+}
+
+# 用户模式问答。
+#
+# 默认单管理员：行为与既有部署完全一致。多用户会额外部署认证网关与实例编排服务，
+# 并按账户隔离会话与文件；它把访问保护方式固定为 password（认证在网关侧完成）。
+#
+# 一键安装（QUICK_INSTALL=true）短路整个问答：保持单管理员，不出现任何新提问。
+configure_user_mode() {
+  local access_mode="$1"
+  local existing
+
+  multi_user="${MULTI_USER_OVERRIDE:-}"
+  register_gate="${REGISTER_GATE_OVERRIDE:-}"
+  idle_timeout="${IDLE_TIMEOUT_OVERRIDE:-}"
+  user_disk_quota="${DISK_QUOTA_OVERRIDE:-}"
+
+  if [ -z "$multi_user" ]; then
+    existing="$(get_compose_env DSH_MULTI_USER off)"
+    if [ "$QUICK_INSTALL" = true ]; then
+      multi_user="$existing"
+    elif [ "$access_mode" = password ]; then
+      echo
+      echo "用户模式："
+      echo "1) 单管理员（默认）—— 一套管理员凭据，不开放注册"
+      echo "2) 多用户 —— 开放注册；每个账户拥有独立会话与文件（独立 DSH 实例，"
+      echo "    默认 200MB 上限 + 闲置自动停用 + 负载动态调整）"
+      prompt "请选择" "1"
+      case "$PROMPT_RESULT" in
+        2) multi_user=on ;;
+        1) multi_user=off ;;
+        *) multi_user="$PROMPT_RESULT" ;;
+      esac
+    else
+      multi_user="$existing"
+    fi
+  fi
+
+  if [ "$multi_user" != on ]; then
+    multi_user=off
+    # 单管理员模式用不到这些参数；仍然写进 .env（取现值或默认），便于将来切换。
+    register_gate="${register_gate:-$(get_compose_env DSH_REGISTER_GATE open)}"
+    idle_timeout="${idle_timeout:-$(get_compose_env DSH_IDLE_TIMEOUT_SECONDS 1800)}"
+    user_disk_quota="${user_disk_quota:-$(get_compose_env DSH_USER_DISK_QUOTA_BYTES 5)}"
+    return 0
+  fi
+
+  # 多用户把访问保护方式固定为 password：认证只能有一个来源。
+  if [ "$access_mode" != password ]; then
+    echo "==> 多用户模式需要内置认证网关承担认证，访问保护方式已改为 password。"
+  fi
+
+  if [ "$QUICK_INSTALL" = true ]; then
+    register_gate="${register_gate:-open}"
+    idle_timeout="${idle_timeout:-1800}"
+    user_disk_quota="${user_disk_quota:-5}"
+    echo "==> 多用户模式：注册门槛=${register_gate}，闲置停用=${idle_timeout}s，每用户配额=${user_disk_quota}GB。"
+    return 0
+  fi
+
+  echo
+  echo "注册门槛："
+  echo "1) 开放注册（默认）"
+  echo "2) 需要邀请码（安装结束时会生成一个初始码并显示一次）"
+  prompt "请选择" "1"
+  case "$PROMPT_RESULT" in
+    2) register_gate=invite ;;
+    *) register_gate="${register_gate:-open}" ;;
+  esac
+
+  echo
+  echo "闲置停用阈值（实例无活动超过该时长即停用，内存归零、数据保留）："
+  echo "1) 30 分钟（默认）"
+  echo "2) 15 分钟"
+  echo "3) 60 分钟"
+  echo "4) 从不"
+  prompt "请选择" "1"
+  case "$PROMPT_RESULT" in
+    2) idle_timeout=900 ;;
+    3) idle_timeout=3600 ;;
+    4) idle_timeout=0 ;;
+    *) idle_timeout="${idle_timeout:-1800}" ;;
+  esac
+
+  echo
+  echo "每用户磁盘配额："
+  echo "1) 5GB（默认）"
+  echo "2) 2GB"
+  echo "3) 10GB"
+  echo "4) 不限制"
+  prompt "请选择" "1"
+  case "$PROMPT_RESULT" in
+    2) user_disk_quota=2 ;;
+    3) user_disk_quota=10 ;;
+    4) user_disk_quota=0 ;;
+    *) user_disk_quota="${user_disk_quota:-5}" ;;
+  esac
 }
 
 build_dsh_image() {
@@ -2466,6 +2750,33 @@ prepare_pending_env() {
   set_compose_env DSH_KEY_ADMIN_HOST_PORT "$PENDING_KEY_ADMIN_PORT" "$PENDING_ENV_FILE"
   set_compose_env DSH_EGRESS_MODE "$PENDING_EGRESS_MODE" "$PENDING_ENV_FILE"
   set_compose_env DSH_EGRESS_ALLOWED_HOSTS "$PENDING_EGRESS_ALLOWED_HOSTS" "$PENDING_ENV_FILE"
+  # 多用户模式的三组开关；单管理员模式下这些键仍然写入，便于重跑向导时回填默认值。
+  set_compose_env DSH_MULTI_USER "$PENDING_MULTI_USER" "$PENDING_ENV_FILE"
+  set_compose_env DSH_REGISTER_GATE "$PENDING_REGISTER_GATE" "$PENDING_ENV_FILE"
+  set_compose_env DSH_IDLE_TIMEOUT_SECONDS "$PENDING_IDLE_TIMEOUT" "$PENDING_ENV_FILE"
+  set_compose_env DSH_USER_DISK_QUOTA_BYTES "$PENDING_USER_DISK_QUOTA" "$PENDING_ENV_FILE"
+  # 多用户模式必须生成入口↔网关共享密钥：留空时网关的进程内对端校验是 fail-open 的，
+  # 任何能连到 dsh-auth 的 dsh-private/dsh-internal 容器都能用被窃取的会话 cookie 换取
+  # 身份头（nginx 的 internal 只约束「经由入口」的请求）。已有值则沿用，不覆盖。
+  if [ "$PENDING_MULTI_USER" = on ]; then
+    ensure_ingress_token "$PENDING_ENV_FILE"
+  fi
+}
+
+# 确保 .env 里有 DSH_AUTH_INGRESS_TOKEN。已有非空值就不动（重跑向导不该轮换密钥）。
+ensure_ingress_token() {
+  local file="${1:-.env}" current
+  current="$(awk -F= '$1 == "DSH_AUTH_INGRESS_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$file" 2>/dev/null)"
+  if [ -n "$current" ]; then
+    return 0
+  fi
+  if [ ! -r /dev/urandom ]; then
+    echo "[警告] 读不到 /dev/urandom，无法生成入口共享密钥。" >&2
+    echo "       请手动设置 DSH_AUTH_INGRESS_TOKEN，否则网关的进程内对端校验不生效。" >&2
+    return 0
+  fi
+  set_compose_env DSH_AUTH_INGRESS_TOKEN "$(od -An -tx1 -N24 /dev/urandom | tr -d '[:space:]')" "$file"
+  echo "==> 已生成入口↔网关共享密钥（DSH_AUTH_INGRESS_TOKEN 写入 .env）。"
 }
 
 compose_up_with_pending_env() {
@@ -2830,6 +3141,7 @@ print_config_summary() {
     echo "    模型密钥代理: 关（密钥若写进容器内的配置或环境，容器里的 Agent 一条 cat 就能读到）"
   fi
   print_key_admin_access
+  print_multiuser_summary
   case "$PENDING_EGRESS_MODE" in
     allowlist)
       echo "    出站模式: allowlist（dsh 不直连外网，出站只经过 dsh-egress；宿主 3080 由 dsh-ingress 发布）"
@@ -2849,6 +3161,74 @@ print_config_summary() {
       echo "    出站模式: open（容器可访问任意外网地址，出站流量不做域名限制）"
       ;;
   esac
+}
+
+# 多用户模式的收尾说明。把「谁来管理、入口在哪、邀请码是什么、怎么运维」一次讲清，
+# 否则装完只剩一个登录页，管理员不知道下一步该做什么。
+print_multiuser_summary() {
+  local invite_code_file="data/auth/invite-code" entry_port="${DSH_HTTP_PORT:-3080}"
+  local initial_password_file="data/auth/initial-password"
+
+  # password 模式：认证由网关承担，先把「从哪进、拿什么登录」讲清楚。
+  if [ "$PENDING_ACCESS_MODE" = password ]; then
+    echo "    访问认证: password 模式（dsh-auth 认证网关 + 七层入口，容器内不做认证）"
+    echo "      入口: http://$PENDING_BIND_HOST:$entry_port（经网关判定后转发到工作台）"
+    if [ -s "$initial_password_file" ]; then
+      echo "      root 初始口令: $(cat "$initial_password_file")"
+      echo "        （只显示这一次；登录后请到 $PENDING_BIND_HOST:$entry_port/account 修改密码）"
+    else
+      echo "      root 口令: 沿用已有配置（未重新生成）"
+    fi
+    echo "      账户安全页: http://$PENDING_BIND_HOST:$entry_port/account"
+    echo "        可改密码、开启两步验证（TOTP，含恢复码）、添加通行密钥、查看并吊销登录会话。"
+    if [ "$PENDING_MULTI_USER" != on ]; then
+      echo "      单管理员模式: 不开放注册、不含用户管理面板；登录后直接进入工作台。"
+    fi
+    [ -z "${DSH_PUBLIC_ORIGIN:-}" ] && \
+      echo "      提示: 未设置 DSH_PUBLIC_ORIGIN，通行密钥（Passkey）已自动禁用（需要固定 HTTPS 域名）。"
+  fi
+
+  [ "$PENDING_MULTI_USER" = on ] || return 0
+
+  echo "    多用户模式: 开（开放注册 + 每用户独立 DSH 实例，会话与文件按账户隔离）"
+  echo "      组件: dsh-auth（认证网关）、dsh-instances（持有 docker.sock 的实例编排）、"
+  echo "            dsh-ingress（七层入口，按会话身份把请求转发到对应用户实例）"
+  echo "      注册门槛: $PENDING_REGISTER_GATE"
+  if [ "$PENDING_REGISTER_GATE" = invite ] && [ -s "$invite_code_file" ]; then
+    echo "      初始邀请码: $(cat "$invite_code_file")（单次有效，用掉后可在管理面板里换一个）"
+  fi
+  echo "      闲置停用: ${PENDING_IDLE_TIMEOUT}s（0 表示不回收）；每用户磁盘配额: ${PENDING_USER_DISK_QUOTA}GB（0 表示不限制）"
+  echo "      每实例内存上限: ${DSH_INSTANCE_MEMORY_MB:-200}MB"
+  echo "      管理面板: http://$PENDING_BIND_HOST:$entry_port/admin（仅初始管理员可访问）"
+  echo "      账户数据: data/users/<uid>/（属主为该实例 uid；删除账户可在管理面板里连带清理）"
+  echo "      注意: 实例被闲置停用后，用户再次访问会看到等待页并自动拉起，通常需要 10–30 秒。"
+  return 0
+}
+
+# 一键安装结束时单独打印的一块：访问入口 + 本次随机生成的凭据（只回显这一次）。
+# 显式传入的密码（命令行 / 环境变量）不回显——那是用户自己管着的值。
+print_quick_summary() {
+  [ "$QUICK_INSTALL" = true ] || return 0
+  echo
+  print_banner
+  echo "  已按一键默认值完成：$PENDING_ACCESS_MODE 认证 + 无密钥代理 + 出站 open"
+  echo
+  echo "  ┌─────────────────────────────────────────────"
+  echo "  │ 访问入口   http://$PENDING_BIND_HOST:3080"
+  if [ "$PENDING_ACCESS_MODE" = basic ]; then
+    echo "  │ 登录用户名 ${GENERATED_BASIC_USER:-$PENDING_BASIC_USER}"
+    if [ -n "$GENERATED_BASIC_PASSWORD" ]; then
+      echo "  │ 登录密码   $GENERATED_BASIC_PASSWORD（只显示这一次）"
+    else
+      echo "  │ 登录密码   沿用已有的 Basic Auth 凭据（未改动）"
+    fi
+  fi
+  if [ -n "$GENERATED_ROOT_PASSWORD" ]; then
+    echo "  │ 容器 root  $GENERATED_ROOT_PASSWORD（只显示这一次）"
+  fi
+  echo "  └─────────────────────────────────────────────"
+  echo "  找回入口：重新运行 install.sh（有 TTY 时选「自定义配置」）即可查看或重设。"
+  echo "  提示：本机 Basic Auth 走 HTTP，公网请务必前置 HTTPS（CDN / 反代）后再暴露。"
 }
 
 # 给已经装好的部署补填模型密钥。单独做一个动作的理由：install/configure 见到 dsh 容器
@@ -3010,6 +3390,7 @@ case "$ACTION" in
     # ./dsh.sh remove 之后重装是常见路径，那会留下失去标签的旧镜像和退出的旁路容器。
     prune_project_leftovers
     print_config_summary
+    print_quick_summary
     ;;
   upgrade) upgrade_dsh ;;
   model-key) add_model_key ;;

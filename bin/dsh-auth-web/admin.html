@@ -1,0 +1,1141 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0e17" />
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#eef3fd" />
+<title>管理 · DeepSeek Harness</title>
+<link rel="stylesheet" href="/app.css" />
+<style>
+  .admin-shell { position: relative; z-index: 2; max-width: 1180px; margin: 0 auto; padding: 28px 24px 64px; padding-left: max(24px, env(safe-area-inset-left)); padding-right: max(24px, env(safe-area-inset-right)); }
+  .admin-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+  .admin-head__title { display: flex; align-items: center; gap: 12px; font-size: 18px; font-weight: 600; }
+  .admin-head__title small { display: block; font-size: 12.5px; color: var(--muted); font-weight: 400; margin-top: 3px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; backdrop-filter: blur(22px) saturate(140%); -webkit-backdrop-filter: blur(22px) saturate(140%); padding: 18px 18px 6px; box-shadow: var(--shadow); }
+  /* 表格在窄屏上横向滚动，而不是撑破版面；contain 防止滚动链到页面 */
+  .table-scroll { overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; margin: 0 -18px; padding: 0 18px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs button {
+    font: inherit; font-size: 13px; cursor: pointer; padding: 7px 14px; border-radius: 999px;
+    border: 1px solid var(--border); background: transparent; color: var(--text-soft);
+    transition: background 150ms var(--ease-out), border-color 150ms var(--ease-out), color 150ms var(--ease-out), transform 100ms var(--ease-out);
+  }
+  .tabs button.is-active { background: var(--brand-soft); border-color: color-mix(in srgb, var(--brand) 40%, transparent); color: var(--text); }
+  .tabs button:active { transform: scale(0.96); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.wrap { white-space: normal; word-break: break-all; }
+  .row-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  /* 行内按钮：padding/圆角/最小高度全部走 app.css 的 token（.mini 基础样式在那里），
+     这里只补管理面板特有的颜色与危险/主色变体，不再各自写尺寸。 */
+  .mini {
+    font: inherit; font-size: 12px; cursor: pointer;
+    border: 1px solid var(--border); background: transparent; color: var(--text-soft);
+    transition: color 150ms var(--ease-out), border-color 150ms var(--ease-out), transform 100ms var(--ease-out), background 150ms var(--ease-out);
+  }
+  .mini--primary {
+    color: #fff; font-weight: 500;
+    background: linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%);
+    border-color: transparent;
+  }
+  .mini--danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+  .mini--danger:active { transform: scale(0.95); }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; border: 1px solid var(--border); color: var(--text-soft); }
+  .pill--ok { color: var(--brand-bright); border-color: color-mix(in srgb, var(--brand) 40%, transparent); background: var(--brand-soft); }
+  .pill--off { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+  .empty { color: var(--muted); font-size: 13px; padding: 18px 4px; }
+  .section { display: none; }
+  .section.is-active { display: block; }
+  /* 标签切换的内容入场：200ms 淡入 + 4px 上浮，@starting-style 只在首次渲染时生效；
+     reduce-motion 下保留透明度过渡、去掉位移 */
+  @starting-style {
+    .section.is-active { opacity: 0; transform: translateY(4px); }
+  }
+  .section.is-active {
+    opacity: 1;
+    transform: none;
+    transition: opacity 200ms var(--ease-out), transform 200ms var(--ease-out);
+  }
+  .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .kv > div { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+  .kv span { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 4px; }
+  .kv strong { font-size: 15px; font-weight: 600; }
+
+  /* 可编辑的运行时设置：字段外观直接复用 .field（app.css），这里只管排布。
+     保存按钮用 .mini--field 与输入框同高；底部对齐加上同高，边缘才齐平。 */
+  .settings-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-bottom: 10px; }
+  .settings-row .field { flex: 1 1 180px; max-width: 260px; }
+  /* 数字输入去掉浏览器自带的上下箭头：它们与自绘控件不协调，且触屏上难按 */
+  .settings-row input::-webkit-outer-spin-button,
+  .settings-row input::-webkit-inner-spin-button { appearance: none; -webkit-appearance: none; margin: 0; }
+  .settings-row input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+  .settings-actions { display: flex; align-items: flex-end; }
+
+  /* ===== 注册策略区块 ===== */
+  .policy {
+    margin-top: 16px; padding: 14px 16px;
+    border: 1px solid var(--border); border-radius: var(--control-radius);
+    background: var(--surface-2);
+  }
+  .policy__head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .policy__head strong { font-size: 13.5px; font-weight: 600; }
+  .policy .muted { color: var(--muted); font-size: 12px; }
+  .policy__rows { display: flex; flex-direction: column; gap: 4px; }
+  /* 开关行：控件与两行文字（标题 + 说明）垂直居中 */
+  .policy .check-row { align-items: center; font-size: 13.5px; color: var(--text); }
+  .policy .check-row > span:last-child { display: flex; flex-direction: column; gap: 1px; }
+  .policy .check-row small { font-size: 11.5px; }
+  .policy__invite {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+  }
+  .policy__invite .label { font-size: 12.5px; color: var(--text-soft); }
+  .policy__invite code {
+    font-family: var(--font-mono); font-size: 13px; letter-spacing: .06em;
+    padding: 5px 10px; border-radius: 8px;
+    background: var(--brand-soft); color: var(--text);
+    border: 1px solid color-mix(in srgb, var(--brand) 35%, transparent);
+    user-select: all;
+  }
+  .toast { margin-bottom: 12px; }
+  @media (max-width: 640px) {
+    .admin-shell { padding-top: max(18px, env(safe-area-inset-top)); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .section.is-active { transition: opacity 200ms ease; transform: none !important; }
+    @starting-style { .section.is-active { transform: none; } }
+    .tabs button:active, .mini--danger:active { transform: none; }
+  }
+</style>
+</head>
+<body>
+<div class="backdrop"><canvas class="stars"></canvas><div class="orb orb--a"></div><div class="orb orb--b"></div></div>
+
+<div class="admin-shell">
+  <div class="admin-head">
+    <div class="admin-head__title">
+      <span class="auth-card__icon" aria-hidden="true">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 4 5.2v6.1c0 4.6 3.2 8.9 8 10.7 4.8-1.8 8-6.1 8-10.7V5.2L12 2Zm0 4.6a2.6 2.6 0 1 1 0 5.2 2.6 2.6 0 0 1 0-5.2Zm0 12c-1.8 0-3.4-.9-4.3-2.3.6-1.2 2.3-1.9 4.3-1.9s3.7.7 4.3 1.9A5.2 5.2 0 0 1 12 18.6Z"/></svg>
+      </span>
+      <div>
+        <span data-i18n="admin.title">管理面板</span>
+        <small data-i18n="admin.subtitle">账户、审计与实例状态</small>
+      </div>
+    </div>
+    <div class="auth-actions" style="margin:0;gap:8px">
+      <button class="mini" type="button" id="to-home" data-i18n="admin.home">进入工作台</button>
+      <button class="mini" type="button" id="do-logout" data-i18n="admin.logout">退出登录</button>
+    </div>
+  </div>
+
+  <div class="inline-alert inline-alert--danger" id="alert-error" role="alert"></div>
+  <div class="inline-alert inline-alert--info toast" id="alert-info" role="status"></div>
+
+  <div class="panel">
+    <div class="tabs">
+      <button type="button" data-tab="users" class="is-active" data-i18n="admin.tab.users">用户</button>
+      <button type="button" data-tab="audit" data-i18n="admin.tab.audit">审计</button>
+      <button type="button" data-tab="instances" data-i18n="admin.tab.instances">实例</button>
+      <button type="button" data-tab="account" data-i18n="admin.tab.account">账户安全</button>
+      <button type="button" data-tab="captcha" data-i18n="admin.tab.captcha">人机验证</button>
+      <button type="button" data-tab="models" data-i18n="admin.tab.models">模型开放</button>
+    </div>
+
+    <section class="section is-active" id="section-users">
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th data-i18n="admin.col.username">用户名</th>
+            <th data-i18n="admin.col.role">角色</th>
+            <th data-i18n="admin.col.status">状态</th>
+            <th data-i18n="admin.col.instance">实例</th>
+            <th data-i18n="admin.col.security">安全</th>
+            <th data-i18n="admin.col.lastLogin">最近登录</th>
+            <th data-i18n="admin.col.actions">操作</th>
+          </tr>
+        </thead>
+        <tbody id="users-body"></tbody>
+      </table>
+      </div>
+      <div class="empty" id="users-empty" style="display:none" data-i18n="admin.empty.users"></div>
+
+      <!-- 注册策略：两个独立开关 + 邀请码。参考 cloud-mail 的 register 与 regKey 两个
+           设置项——「是否开放注册」与「是否要求邀请码」是两件事，二选一的枚举表达不了
+           「开放但免码」与「关闭注册」的组合。 -->
+      <div class="policy">
+        <div class="policy__head">
+          <strong data-i18n="admin.reg.title">注册策略</strong>
+          <span class="muted" data-i18n="admin.reg.hint">关闭后任何人都无法自行注册；邀请码仅在要求凭码注册时生效。</span>
+        </div>
+        <div class="policy__rows">
+          <label class="check-row">
+            <span class="toggle">
+              <input id="registration-open" type="checkbox" />
+              <span class="toggle__track"></span>
+              <span class="toggle__thumb"></span>
+            </span>
+            <span>
+              <span data-i18n="admin.reg.open">开放注册</span>
+              <small class="muted" data-i18n="admin.reg.openHint">允许新用户自行注册账户</small>
+            </span>
+          </label>
+          <label class="check-row">
+            <span class="toggle">
+              <input id="invite-required" type="checkbox" />
+              <span class="toggle__track"></span>
+              <span class="toggle__thumb"></span>
+            </span>
+            <span>
+              <span data-i18n="admin.reg.invite">需要邀请码</span>
+              <small class="muted" data-i18n="admin.reg.inviteHint">注册时必须填写有效邀请码</small>
+            </span>
+          </label>
+        </div>
+        <div class="policy__invite" id="invite-block" style="display:none">
+          <span class="label" data-i18n="admin.reg.current">当前邀请码</span>
+          <code id="invite-value">—</code>
+          <button class="mini" type="button" id="rotate-invite" data-i18n="admin.invite.rotate">生成新邀请码</button>
+        </div>
+        <div class="empty" id="reg-note" style="display:none;padding:6px 0 0"></div>
+      </div>
+      <div style="height:16px"></div>
+    </section>
+
+    <section class="section" id="section-audit">
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th data-i18n="admin.col.time">时间</th>
+            <th data-i18n="admin.col.action">动作</th>
+            <th data-i18n="admin.col.result">结果</th>
+            <th data-i18n="admin.col.actor">主体</th>
+            <th data-i18n="admin.col.ip">来源</th>
+          </tr>
+        </thead>
+        <tbody id="audit-body"></tbody>
+      </table>
+      </div>
+      <div class="empty" id="audit-empty" style="display:none" data-i18n="admin.empty.audit"></div>
+      <div style="height:16px"></div>
+    </section>
+
+    <section class="section" id="section-instances">
+      <div class="kv" id="instances-summary"></div>
+      <div class="settings-row">
+        <label class="field">
+          <span class="label" data-i18n="admin.settings.idle">闲置阈值（秒）</span>
+          <span class="input-wrap">
+            <input id="idle-timeout" type="number" min="60" max="604800" step="60" inputmode="numeric" />
+          </span>
+        </label>
+        <label class="field">
+          <span class="label" data-i18n="admin.settings.memory">每实例内存（MB）</span>
+          <span class="input-wrap">
+            <input id="instance-memory" type="number" min="64" max="4096" step="32" inputmode="numeric" />
+          </span>
+        </label>
+        <div class="settings-actions">
+          <button class="mini mini--primary mini--field" type="button" id="settings-save" data-i18n="admin.settings.save">保存</button>
+        </div>
+      </div>
+      <p class="empty" id="settings-hint" style="display:block;padding:0 0 4px"></p>
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th data-i18n="admin.col.instance">实例</th>
+            <th data-i18n="admin.col.status">状态</th>
+            <th data-i18n="admin.col.busy">忙碌</th>
+            <th data-i18n="admin.col.disk">磁盘</th>
+            <th data-i18n="admin.col.retention">保留</th>
+          </tr>
+        </thead>
+        <tbody id="instances-body"></tbody>
+      </table>
+      </div>
+      <div class="empty" id="instances-empty" style="display:none" data-i18n="admin.empty.instances"></div>
+      <div style="height:16px"></div>
+    </section>
+    <section class="section" id="section-account">
+      <p class="empty" data-i18n="admin.account.hint" style="display:block;padding:0 0 12px"></p>
+      <div id="account-panel"></div>
+      <div style="height:16px"></div>
+    </section>
+
+    <section class="section" id="section-models">
+      <p class="empty" data-i18n="admin.models.hint" style="display:block;padding:0 0 14px"></p>
+      <div class="empty" id="models-note" style="display:none;padding:0 0 12px"></div>
+      <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th data-i18n="admin.col.username">用户名</th>
+            <th data-i18n="admin.col.status">状态</th>
+            <th data-i18n="admin.models.available">可用模型上游</th>
+            <th data-i18n="admin.col.actions">操作</th>
+          </tr>
+        </thead>
+        <tbody id="models-body"></tbody>
+      </table>
+      </div>
+      <div class="empty" id="models-empty" style="display:none" data-i18n="admin.empty.users"></div>
+      <div style="height:16px"></div>
+    </section>
+
+    <section class="section" id="section-captcha">
+      <p class="empty" data-i18n="admin.captcha.hint" style="display:block;padding:0 0 14px"></p>
+
+      <div class="kv" id="captcha-status"></div>
+
+      <label class="field">
+        <span class="label" data-i18n="admin.captcha.provider">服务</span>
+        <span class="select-wrap">
+          <select id="captcha-provider"></select>
+        </span>
+      </label>
+      <label class="field">
+        <span class="label" data-i18n="admin.captcha.siteKey">站点密钥（site key，公开值）</span>
+        <span class="input-wrap">
+          <input id="captcha-site-key" autocomplete="off" spellcheck="false" placeholder="0x4AAAAAAA..." />
+        </span>
+      </label>
+      <label class="field">
+        <span class="label" data-i18n="admin.captcha.secret">服务端密钥（secret，只写不可读）</span>
+        <span class="input-wrap">
+          <input id="captcha-secret" type="password" autocomplete="new-password" spellcheck="false" />
+        </span>
+      </label>
+      <p class="empty" id="captcha-secret-state" style="display:block;padding:0 0 10px"></p>
+
+      <label class="check-row" style="margin-bottom:4px">
+        <span class="toggle">
+          <input id="captcha-enabled" type="checkbox" />
+          <span class="toggle__track"></span>
+          <span class="toggle__thumb"></span>
+        </span>
+        <span data-i18n="admin.captcha.enabled">登录与注册时需要人机验证</span>
+      </label>
+
+      <div class="auth-actions" style="margin-top:14px;justify-content:flex-start">
+        <button class="mini mini--primary mini--field" type="button" id="captcha-save" data-i18n="admin.captcha.save">保存</button>
+      </div>
+      <div class="empty" id="captcha-note" style="display:none;padding:12px 0 0"></div>
+      <div style="height:16px"></div>
+    </section>
+
+  </div>
+</div>
+
+<script src="/backdrop.js"></script>
+<script src="/account-panel.js"></script>
+<script>
+(() => {
+  const I18N = {
+    zh: {
+      'admin.title': '管理面板',
+      'admin.subtitle': '账户、审计与实例状态',
+      'admin.home': '进入工作台',
+      'admin.logout': '退出登录',
+      'admin.tab.users': '用户',
+      'admin.tab.audit': '审计',
+      'admin.tab.instances': '实例',
+      'admin.tab.account': '账户安全',
+      'admin.tab.captcha': '人机验证',
+      'admin.tab.models': '模型开放',
+      'admin.models.hint': '勾选每个账户可以使用的模型上游。未单独设置的账户默认可以使用全部上游；用户也可以在自己的会话里配置模型，但未被开放的上游会被密钥代理拒绝。',
+      'admin.models.available': '可用模型上游',
+      'admin.models.all': '全部（默认）',
+      'admin.models.none': '不可用',
+      'admin.models.partial': '{n} 个',
+      'admin.models.unreachable': '读不到密钥代理的上游清单，请确认密钥代理已启动并配置了上游。',
+      'admin.models.saved': '{user}: 模型开放已更新。',
+      'admin.models.saveFailed': '保存失败。',
+      'admin.models.reset': '恢复默认（全部）',
+      'admin.models.selectAll': '全选',
+      'admin.models.selectNone': '取消全选',
+      'admin.models.apply': '保存',
+      'admin.captcha.hint': '开启后，登录与注册都需要先通过人机验证。密钥以主密钥加密后落盘，保存后不再回显；留空表示不修改。',
+      'admin.captcha.provider': '服务',
+      'admin.captcha.siteKey': '站点密钥（site key，公开值）',
+      'admin.captcha.secret': '服务端密钥（secret，只写不可读）',
+      'admin.captcha.secretSet': '已配置（留空则保持不变）',
+      'admin.captcha.secretMissing': '尚未配置',
+      'admin.captcha.enabled': '登录与注册时需要人机验证',
+      'admin.captcha.save': '保存',
+      'admin.captcha.saved': '已保存。',
+      'admin.captcha.needSiteKey': '开启前请先填写站点密钥。',
+      'admin.captcha.needSecret': '开启前请先填写服务端密钥。',
+      'admin.captcha.loadFailed': '读取人机验证配置失败。',
+      'admin.captcha.saveFailed': '保存失败。',
+      'admin.captcha.active': '当前生效',
+      'admin.captcha.inactive': '当前未生效',
+      'admin.account.hint': '这里的改动会立刻作用于当前管理员账户；改密或关闭两步验证会注销全部登录。',
+      'admin.col.username': '用户名',
+      'admin.col.role': '角色',
+      'admin.col.status': '状态',
+      'admin.col.instance': '实例',
+      'admin.col.security': '安全',
+      'admin.col.lastLogin': '最近登录',
+      'admin.col.actions': '操作',
+      'admin.col.time': '时间',
+      'admin.col.action': '动作',
+      'admin.col.result': '结果',
+      'admin.col.actor': '主体',
+      'admin.col.ip': '来源',
+      'admin.col.busy': '忙碌',
+      'admin.col.disk': '磁盘',
+      'admin.col.retention': '保留',
+      'admin.settings.idle': '闲置阈值（秒）',
+      'admin.settings.memory': '每实例内存（MB）',
+      'admin.settings.save': '保存',
+      'admin.settings.hint': '改动对新创建的实例生效；已在运行的容器保持原内存上限（Docker 不允许改运行中容器的 --memory），闲置阈值立即生效。',
+      'admin.settings.saved': '运行时设置已更新。',
+      'admin.settings.saveFailed': '保存失败：{reason}',
+      'admin.retention.forever': '永久保留中',
+      'admin.retention.auto': '设为永久保留',
+      'admin.retention.pin': '固化',
+      'admin.retention.unpin': '取消固化',
+      'admin.retention.pinned': '{name}: 已固化为永久保留。',
+      'admin.retention.unpinned': '{name}: 已恢复自动回收。',
+      'admin.retention.failed': '操作未完成。',
+      'admin.retention.hint': '固化的实例不会被闲置回收，内存紧张时也不会停用。',
+      'admin.empty.users': '还没有其他账户。',
+      'admin.empty.audit': '暂无审计记录。',
+      'admin.empty.instances': '还没有实例。',
+      'admin.status.enabled': '已启用',
+      'admin.status.disabled': '已停用',
+      'admin.action.enable': '启用',
+      'admin.action.disable': '停用',
+      'admin.action.reset': '重置密码',
+      'admin.action.delete': '删除',
+      'admin.reg.title': '注册策略',
+      'admin.reg.hint': '关闭后任何人都无法自行注册；邀请码仅在要求凭码注册时生效。',
+      'admin.reg.open': '开放注册',
+      'admin.reg.openHint': '允许新用户自行注册账户',
+      'admin.reg.invite': '需要邀请码',
+      'admin.reg.inviteHint': '注册时必须填写有效邀请码',
+      'admin.reg.current': '当前邀请码',
+      'admin.reg.noCode': '（尚无可用邀请码）',
+      'admin.reg.saved': '注册策略已更新。',
+      'admin.invite.rotate': '生成新邀请码',
+      'admin.invite.created': '新邀请码：{code}（只显示这一次）',
+      'admin.reset.done': '{user} 的新密码：{password}（只显示这一次）',
+      'admin.delete.confirm': '删除账户 {user}？其工作区数据将被一并清理。',
+      'admin.delete.done': '已删除 {user}。',
+      'admin.self': '当前账户',
+      'admin.noSecurity': '仅密码',
+      'admin.watermark': '水位模式',
+      'admin.online': '在线实例',
+      'admin.idleTimeout': '闲置阈值',
+      'admin.perInstance': '每实例内存',
+      'admin.busy.yes': '忙',
+      'admin.busy.no': '空闲',
+      'admin.disk.free': '{used} / {quota}',
+      'admin.disk.unlimited': '{used}',
+      'admin.error.forbidden': '只有管理员可以访问管理面板。',
+      'admin.error.generic': '操作未完成，请重试。',
+      'admin.error.network': '无法连接到服务器。',
+      'admin.seconds': '{n} 秒',
+      'admin.lang': 'zh',
+    },
+    en: {
+      'admin.title': 'Administration',
+      'admin.subtitle': 'Accounts, audit log and instances',
+      'admin.home': 'Open workspace',
+      'admin.logout': 'Sign out',
+      'admin.tab.users': 'Users',
+      'admin.tab.audit': 'Audit',
+      'admin.tab.instances': 'Instances',
+      'admin.tab.account': 'Account security',
+      'admin.tab.captcha': 'Human verification',
+      'admin.tab.models': 'Model access',
+      'admin.models.hint': 'Tick which model upstreams each account may use. Accounts without an explicit setting may use every upstream; users can also configure models in their own session, but upstreams that were not granted are refused by the key broker.',
+      'admin.models.available': 'Available upstreams',
+      'admin.models.all': 'All (default)',
+      'admin.models.none': 'None',
+      'admin.models.partial': '{n}',
+      'admin.models.unreachable': 'Could not read the upstream list from the key broker. Check that the broker is running and has upstreams configured.',
+      'admin.models.saved': '{user}: model access updated.',
+      'admin.models.saveFailed': 'Saving failed.',
+      'admin.models.reset': 'Reset to default (all)',
+      'admin.models.selectAll': 'Select all',
+      'admin.models.selectNone': 'Clear all',
+      'admin.models.apply': 'Save',
+      'admin.captcha.hint': 'When enabled, signing in and registering both require passing human verification first. The secret is sealed with the master key and never echoed back; leave it blank to keep the current one.',
+      'admin.captcha.provider': 'Provider',
+      'admin.captcha.siteKey': 'Site key (public value)',
+      'admin.captcha.secret': 'Secret (write-only)',
+      'admin.captcha.secretSet': 'configured (leave blank to keep it)',
+      'admin.captcha.secretMissing': 'not configured yet',
+      'admin.captcha.enabled': 'Require human verification to sign in and register',
+      'admin.captcha.save': 'Save',
+      'admin.captcha.saved': 'Saved.',
+      'admin.captcha.needSiteKey': 'Fill in the site key before enabling.',
+      'admin.captcha.needSecret': 'Fill in the secret before enabling.',
+      'admin.captcha.loadFailed': 'Could not read the human verification settings.',
+      'admin.captcha.saveFailed': 'Saving failed.',
+      'admin.captcha.active': 'Active',
+      'admin.captcha.inactive': 'Not active',
+      'admin.account.hint': 'Changes apply to the signed-in administrator immediately; changing the password or disabling two-step verification signs out every session.',
+      'admin.col.username': 'Username',
+      'admin.col.role': 'Role',
+      'admin.col.status': 'Status',
+      'admin.col.instance': 'Instance',
+      'admin.col.security': 'Security',
+      'admin.col.lastLogin': 'Last sign-in',
+      'admin.col.actions': 'Actions',
+      'admin.col.time': 'Time',
+      'admin.col.action': 'Action',
+      'admin.col.result': 'Result',
+      'admin.col.actor': 'Actor',
+      'admin.col.ip': 'Source',
+      'admin.col.busy': 'Busy',
+      'admin.col.disk': 'Disk',
+      'admin.col.retention': 'Retention',
+      'admin.settings.idle': 'Idle timeout (seconds)',
+      'admin.settings.memory': 'Memory per instance (MB)',
+      'admin.settings.save': 'Save',
+      'admin.settings.hint': 'Changes apply to newly created instances; running containers keep their current memory cap (Docker cannot change --memory on a running container). The idle timeout takes effect immediately.',
+      'admin.settings.saved': 'Runtime settings updated.',
+      'admin.settings.saveFailed': 'Saving failed: {reason}',
+      'admin.retention.forever': 'Kept forever',
+      'admin.retention.auto': 'Keep forever',
+      'admin.retention.pin': 'Pin',
+      'admin.retention.unpin': 'Unpin',
+      'admin.retention.pinned': '{name}: pinned, kept forever.',
+      'admin.retention.unpinned': '{name}: back to auto-reclaim.',
+      'admin.retention.failed': 'The operation did not complete.',
+      'admin.retention.hint': 'A pinned instance is never reclaimed for idleness, not even under memory pressure.',
+      'admin.empty.users': 'No other accounts yet.',
+      'admin.empty.audit': 'No audit entries yet.',
+      'admin.empty.instances': 'No instances yet.',
+      'admin.status.enabled': 'Enabled',
+      'admin.status.disabled': 'Disabled',
+      'admin.action.enable': 'Enable',
+      'admin.action.disable': 'Disable',
+      'admin.action.reset': 'Reset password',
+      'admin.action.delete': 'Delete',
+      'admin.reg.title': 'Registration policy',
+      'admin.reg.hint': 'When closed, nobody can self-register. An invite code only applies while registration requires one.',
+      'admin.reg.open': 'Open registration',
+      'admin.reg.openHint': 'Allow new users to create their own accounts',
+      'admin.reg.invite': 'Require an invite code',
+      'admin.reg.inviteHint': 'Registration must supply a valid invite code',
+      'admin.reg.current': 'Current invite code',
+      'admin.reg.noCode': '(no usable invite code yet)',
+      'admin.reg.saved': 'Registration policy updated.',
+      'admin.invite.rotate': 'Issue a new invite code',
+      'admin.invite.created': 'New invite code: {code} (shown once)',
+      'admin.reset.done': 'New password for {user}: {password} (shown once)',
+      'admin.delete.confirm': 'Delete {user}? Their workspace data is removed as well.',
+      'admin.delete.done': 'Deleted {user}.',
+      'admin.self': 'current account',
+      'admin.noSecurity': 'password only',
+      'admin.watermark': 'Watermark mode',
+      'admin.online': 'Online instances',
+      'admin.idleTimeout': 'Idle timeout',
+      'admin.perInstance': 'Memory per instance',
+      'admin.busy.yes': 'busy',
+      'admin.busy.no': 'idle',
+      'admin.disk.free': '{used} / {quota}',
+      'admin.disk.unlimited': '{used}',
+      'admin.error.forbidden': 'Only administrators may open the admin panel.',
+      'admin.error.generic': 'The operation did not complete. Try again.',
+      'admin.error.network': 'Cannot reach the server.',
+      'admin.seconds': '{n}s',
+      'admin.lang': 'en',
+    },
+  }
+
+  let lang = 'zh'
+  const $ = (id) => document.getElementById(id)
+  const t = (k) => I18N[lang][k] ?? k
+  const fill = (key, values) => Object.entries(values).reduce((text, [name, value]) => text.replace(`{${name}}`, String(value)), t(key))
+
+  // 语言跟随浏览器首选项；管理面板没有语言切换控件，保持与登录页同一套文案来源。
+  try {
+    if (!(navigator.language || '').toLowerCase().startsWith('zh')) lang = 'en'
+  } catch { /* 无法判断时用中文 */ }
+
+  function applyLang() {
+    document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en'
+    document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n) })
+  }
+
+  // 主题跟随登录页的选择，保持整站一致
+  const root = document.documentElement
+  try {
+    const stored = localStorage.getItem('dsh-login-theme')
+    if (stored) root.dataset.theme = stored
+    else if (window.matchMedia('(prefers-color-scheme: light)').matches) root.dataset.theme = 'light'
+  } catch { /* 无存储时保持默认 */ }
+  // theme-color 要跟页面顶部背景一致；主题用 data-theme 切换而非跟随系统，因此 JS 同步
+  function syncThemeColor() {
+    const color = root.dataset.theme === 'light' ? '#eef3fd' : '#0b0e17'
+    for (const meta of document.querySelectorAll('meta[name="theme-color"]')) meta.content = color
+  }
+  syncThemeColor()
+
+  let csrfToken = ''
+
+  async function api(path, options = {}) {
+    const response = await fetch(path, {
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}), ...(options.headers ?? {}) },
+      cache: 'no-store',
+      ...options,
+    })
+    let body = {}
+    try { body = await response.json() } catch { body = {} }
+    return { response, body }
+  }
+
+  function error(message) {
+    const el = $('alert-error')
+    el.textContent = message
+    el.classList.add('is-visible')
+  }
+  function notice(message) {
+    const el = $('alert-info')
+    el.textContent = message
+    el.classList.add('is-visible')
+  }
+  function clearAlerts() {
+    $('alert-error').classList.remove('is-visible')
+    $('alert-info').classList.remove('is-visible')
+  }
+
+  function humanSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+    const units = ['B', 'KB', 'MB', 'GB', 'TB']
+    let value = bytes
+    let unit = 0
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++ }
+    return `${value.toFixed(value < 10 && unit > 0 ? 1 : 0)} ${units[unit]}`
+  }
+
+  function formatTime(value) {
+    if (!value) return '—'
+    try { return new Date(value).toLocaleString(lang === 'zh' ? 'zh-CN' : 'en-US') } catch { return '—' }
+  }
+
+  function securityLabel(user) {
+    const parts = []
+    if (user.totpEnabled) parts.push('TOTP')
+    if (user.passkeyCount > 0) parts.push(`Passkey ×${user.passkeyCount}`)
+    return parts.length ? parts.join(' · ') : t('admin.noSecurity')
+  }
+
+  // variant: 'danger'（红描边，破坏性）/ 'primary'（实心蓝，主操作）/ 省略 = 幽灵
+  function actionButton(label, handler, variant = '') {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = variant === 'danger' ? 'mini mini--danger'
+      : variant === 'primary' ? 'mini mini--primary'
+        : 'mini'
+    button.textContent = label
+    button.addEventListener('click', handler)
+    return button
+  }
+
+  // ---- 用户 ----
+  async function loadUsers() {
+    const { response, body } = await api('/api/admin/users', { method: 'GET' })
+    if (!response.ok) {
+      error(body.code === 'forbidden' ? t('admin.error.forbidden') : t('admin.error.generic'))
+      return
+    }
+    const tbody = $('users-body')
+    tbody.textContent = ''
+    const users = body.users ?? []
+    $('users-empty').style.display = users.length ? 'none' : ''
+    for (const user of users) {
+      const row = document.createElement('tr')
+
+      const name = document.createElement('td')
+      name.textContent = user.username
+      if (user.role === 'root') {
+        const pill = document.createElement('span')
+        pill.className = 'pill pill--ok'
+        pill.style.marginLeft = '6px'
+        pill.textContent = t('admin.self')
+        name.appendChild(pill)
+      }
+      row.appendChild(name)
+
+      const role = document.createElement('td')
+      role.textContent = user.role
+      row.appendChild(role)
+
+      const status = document.createElement('td')
+      const statusPill = document.createElement('span')
+      statusPill.className = user.status === 'enabled' ? 'pill pill--ok' : 'pill pill--off'
+      statusPill.textContent = user.status === 'enabled' ? t('admin.status.enabled') : t('admin.status.disabled')
+      status.appendChild(statusPill)
+      row.appendChild(status)
+
+      const instance = document.createElement('td')
+      instance.textContent = user.instance ?? '—'
+      row.appendChild(instance)
+
+      const security = document.createElement('td')
+      security.textContent = securityLabel(user)
+      row.appendChild(security)
+
+      const lastLogin = document.createElement('td')
+      lastLogin.textContent = formatTime(user.lastLoginAt)
+      row.appendChild(lastLogin)
+
+      const actions = document.createElement('td')
+      const group = document.createElement('div')
+      group.className = 'row-actions'
+      if (user.role !== 'root') {
+        group.appendChild(actionButton(
+          user.status === 'enabled' ? t('admin.action.disable') : t('admin.action.enable'),
+          () => setStatus(user.username, user.status === 'enabled' ? 'disabled' : 'enabled'),
+          user.status === 'enabled' ? 'danger' : '',
+        ))
+        group.appendChild(actionButton(t('admin.action.reset'), () => resetPassword(user.username)))
+        group.appendChild(actionButton(t('admin.action.delete'), () => deleteUser(user.username), 'danger'))
+      }
+      actions.appendChild(group)
+      row.appendChild(actions)
+      tbody.appendChild(row)
+    }
+  }
+
+  async function setStatus(username, status) {
+    clearAlerts()
+    const { response, body } = await api('/api/admin/users/status', { method: 'POST', body: JSON.stringify({ username, status }) })
+    if (!response.ok) {
+      error(body.code === 'last_admin' ? t('admin.error.forbidden') : t('admin.error.generic'))
+      return
+    }
+    notice(`${username}: ${status === 'enabled' ? t('admin.status.enabled') : t('admin.status.disabled')}`)
+    await loadUsers()
+  }
+
+  async function resetPassword(username) {
+    clearAlerts()
+    const { response, body } = await api('/api/admin/users/password', { method: 'POST', body: JSON.stringify({ username }) })
+    if (!response.ok) { error(t('admin.error.generic')); return }
+    notice(fill('admin.reset.done', { user: username, password: body.password ?? '' }))
+    await loadUsers()
+  }
+
+  async function deleteUser(username) {
+    clearAlerts()
+    if (!window.confirm(fill('admin.delete.confirm', { user: username }))) return
+    const { response } = await api('/api/admin/users/delete', { method: 'POST', body: JSON.stringify({ username, purge: true }) })
+    if (!response.ok) { error(t('admin.error.generic')); return }
+    notice(fill('admin.delete.done', { user: username }))
+    await loadUsers()
+  }
+
+  // ---- 注册策略 ----
+  // 两个独立开关：开放注册 / 需要邀请码。切换即刻保存（无需另按保存键）——它们是
+  // 布尔状态，多一个提交步骤只会让管理员怀疑自己有没有点上。
+  // 邀请码区只在「开放注册 + 需要邀请码」时出现：其它组合下它不生效，显示出来会误导。
+  function renderRegistration(body) {
+    $('registration-open').checked = body.registrationOpen !== false
+    $('invite-required').checked = body.inviteRequired === true
+    // 关闭注册时「需要邀请码」没有意义，禁用但保留其值
+    const inviteToggle = $('invite-required')
+    const open = body.registrationOpen !== false
+    inviteToggle.disabled = !open
+    inviteToggle.closest('.check-row').style.opacity = open ? '' : '.5'
+    const showInvite = open && body.inviteRequired === true
+    $('invite-block').style.display = showInvite ? '' : 'none'
+    if (showInvite) $('invite-value').textContent = body.inviteCode || t('admin.reg.noCode')
+  }
+
+  async function loadRegistration() {
+    const { response, body } = await api('/api/admin/registration', { method: 'GET' })
+    if (!response.ok) { regNote(t('admin.error.generic'), true); return }
+    renderRegistration(body)
+  }
+
+  function regNote(text, isError) {
+    const el = $('reg-note')
+    el.textContent = text ?? ''
+    el.style.display = text ? '' : 'none'
+    el.style.color = isError ? 'var(--danger)' : 'var(--muted)'
+  }
+
+  async function saveRegistration(patch) {
+    regNote('')
+    const { response, body } = await api('/api/admin/registration', { method: 'POST', body: JSON.stringify(patch) })
+    if (!response.ok) { regNote(t('admin.error.generic'), true); return }
+    renderRegistration(body)
+    notice(t('admin.reg.saved'))
+  }
+
+  $('registration-open').addEventListener('change', (event) => {
+    void saveRegistration({ registrationOpen: event.target.checked })
+  })
+  $('invite-required').addEventListener('change', (event) => {
+    void saveRegistration({ inviteRequired: event.target.checked })
+  })
+  $('rotate-invite').addEventListener('click', async () => {
+    clearAlerts()
+    const { response, body } = await api('/api/admin/invite', { method: 'POST', body: '{}' })
+    if (!response.ok) { error(t('admin.error.generic')); return }
+    notice(fill('admin.invite.created', { code: body.inviteCode }))
+    await loadRegistration()
+  })
+
+  // ---- 审计 ----
+  async function loadAudit() {
+    const { response, body } = await api('/api/admin/audit?limit=300', { method: 'GET' })
+    if (!response.ok) { error(t('admin.error.generic')); return }
+    const tbody = $('audit-body')
+    tbody.textContent = ''
+    const entries = body.entries ?? []
+    $('audit-empty').style.display = entries.length ? 'none' : ''
+    for (const entry of entries) {
+      const row = document.createElement('tr')
+      for (const value of [formatTime(entry.at), entry.action, entry.result, entry.actorId || '—', entry.ip || '—']) {
+        const cell = document.createElement('td')
+        cell.textContent = value
+        row.appendChild(cell)
+      }
+      tbody.appendChild(row)
+    }
+  }
+
+  // ---- 实例 ----
+  async function loadInstances() {
+    const { response, body } = await api('/api/admin/instances', { method: 'GET' })
+    const summary = $('instances-summary')
+    summary.textContent = ''
+    const tbody = $('instances-body')
+    tbody.textContent = ''
+    if (!response.ok) {
+      error(body.code === 'instances_unavailable' ? t('admin.error.network') : t('admin.error.generic'))
+      return
+    }
+    const facts = [
+      [t('admin.watermark'), body.watermark ?? '—'],
+      [t('admin.online'), String(body.onlineCount ?? 0)],
+      [t('admin.idleTimeout'), fill('admin.seconds', { n: Math.round((body.idleTimeoutMs ?? 0) / 1000) })],
+      [t('admin.perInstance'), `${body.memoryMbPerInstance ?? '—'} MB`],
+    ]
+    for (const [label, value] of facts) {
+      const box = document.createElement('div')
+      const span = document.createElement('span')
+      span.textContent = label
+      const strong = document.createElement('strong')
+      strong.textContent = value
+      box.append(span, strong)
+      summary.appendChild(box)
+    }
+    // 可编辑的运行时设置：用服务端返回的当前值填输入框，并提示哪些已偏离默认。
+    if (body.settings) {
+      $('idle-timeout').value = String(body.settings.idleTimeoutSeconds ?? '')
+      $('instance-memory').value = String(body.settings.memoryMb ?? '')
+      const defaults = body.defaults ?? {}
+      const drifted = []
+      if (defaults.idleTimeoutSeconds !== undefined && body.settings.idleTimeoutSeconds !== defaults.idleTimeoutSeconds) {
+        drifted.push(`${t('admin.idleTimeout')} ${defaults.idleTimeoutSeconds}s → ${body.settings.idleTimeoutSeconds}s`)
+      }
+      if (defaults.memoryMb !== undefined && body.settings.memoryMb !== defaults.memoryMb) {
+        drifted.push(`${t('admin.perInstance')} ${defaults.memoryMb}MB → ${body.settings.memoryMb}MB`)
+      }
+      const hint = $('settings-hint')
+      hint.textContent = drifted.length
+        ? `${t('admin.settings.hint')} ${drifted.join(' · ')}`
+        : t('admin.settings.hint')
+    }
+    const instances = body.instances ?? []
+    $('instances-empty').style.display = instances.length ? 'none' : ''
+    for (const instance of instances) {
+      const row = document.createElement('tr')
+      const cells = [
+        instance.name,
+        instance.status,
+        instance.busy ? t('admin.busy.yes') : t('admin.busy.no'),
+        instance.quota && instance.quota.percent > 0
+          ? fill('admin.disk.free', { used: humanSize(instance.usedBytes), quota: humanSize(instance.quota.bytes ?? 0) })
+          : fill('admin.disk.unlimited', { used: humanSize(instance.usedBytes) }),
+      ]
+      for (const value of cells) {
+        const cell = document.createElement('td')
+        cell.textContent = value
+        row.appendChild(cell)
+      }
+
+      // 保留列：与操作列完全同一种按钮（.mini），由按钮自身的三态表达当前策略——
+      // 不再混用状态药丸（.pill 是 999px 胶囊 + 11.5px 字，属于另一套圆角与字号）。
+      // 未固化 = 幽灵按钮（点它去固化）；已固化 = 主色按钮（点它恢复自动回收）。
+      const retention = document.createElement('td')
+      const group = document.createElement('div')
+      group.className = 'row-actions'
+      const toggle = actionButton(
+        instance.pinned ? t('admin.retention.forever') : t('admin.retention.auto'),
+        () => setPinned(instance.uid, instance.name, !instance.pinned),
+        instance.pinned ? 'primary' : '',
+      )
+      toggle.title = instance.pinned ? t('admin.retention.unpin') : t('admin.retention.pin')
+      group.appendChild(toggle)
+      retention.appendChild(group)
+      row.appendChild(retention)
+      tbody.appendChild(row)
+    }
+  }
+
+  /** 固化 / 取消固化一个实例容器（永久保留，回收策略跳过）。 */
+  async function setPinned(uid, name, pinned) {
+    clearAlerts()
+    const { response } = await api('/api/admin/instances/pin', { method: 'POST', body: JSON.stringify({ uid, pinned }) })
+    if (!response.ok) { error(t('admin.retention.failed')); return }
+    notice(fill(pinned ? 'admin.retention.pinned' : 'admin.retention.unpinned', { name }))
+    await loadInstances()
+  }
+
+  // ---- 导航 ----
+  // 账户安全标签用的是与 /account、插件分区同一份实现，首次切到时挂载一次。
+  let accountMounted = false
+  function mountAccountTab() {
+    if (accountMounted) return
+    accountMounted = true
+    window.DSHAccountPanel.mount($('account-panel'), { lang })
+  }
+  // ---- 人机验证 ----
+  let captchaLoaded = false
+
+  function captchaNote(text, isError) {
+    const node = $('captcha-note')
+    node.textContent = text
+    node.style.color = isError ? '#ff8f8f' : '#7ee0a8'
+    node.style.display = text ? 'block' : 'none'
+  }
+
+  function renderCaptchaStatus(info) {
+    const box = $('captcha-status')
+    box.textContent = ''
+    const rows = [
+      [t('admin.captcha.provider'), info.provider],
+      [t('admin.captcha.siteKey'), info.siteKey || '—'],
+      [t('admin.captcha.secret'), info.secretConfigured ? t('admin.captcha.secretSet') : t('admin.captcha.secretMissing')],
+      [t('admin.captcha.active'), info.active ? t('admin.captcha.active') : t('admin.captcha.inactive')],
+    ]
+    for (const [label, value] of rows) {
+      const wrap = document.createElement('div')
+      const span = document.createElement('span')
+      span.textContent = label
+      const strong = document.createElement('strong')
+      strong.textContent = value
+      wrap.append(span, strong)
+      box.appendChild(wrap)
+    }
+  }
+
+  async function loadCaptcha() {
+    const { response, body } = await api('/api/admin/captcha')
+    if (!response.ok) {
+      captchaNote(body.code === 'not_found' ? t('admin.captcha.loadFailed') : t('admin.captcha.loadFailed'), true)
+      return
+    }
+    // 服务端给出的 provider 列表是唯一来源，前端不再维护第二份
+    const select = $('captcha-provider')
+    select.textContent = ''
+    for (const provider of body.providers) {
+      const option = document.createElement('option')
+      option.value = provider.id
+      option.textContent = provider.label
+      if (provider.id === body.provider) option.selected = true
+      select.appendChild(option)
+    }
+    $('captcha-site-key').value = body.siteKey || ''
+    $('captcha-secret').value = ''
+    $('captcha-secret').placeholder = body.secretConfigured ? '••••••••' : ''
+    $('captcha-enabled').checked = body.enabled === true
+    $('captcha-secret-state').textContent = body.secretConfigured ? t('admin.captcha.secretSet') : t('admin.captcha.secretMissing')
+    renderCaptchaStatus(body)
+    captchaLoaded = true
+  }
+
+  async function saveCaptcha() {
+    captchaNote('')
+    const payload = {
+      provider: $('captcha-provider').value,
+      siteKey: $('captcha-site-key').value.trim(),
+      enabled: $('captcha-enabled').checked,
+    }
+    // 留空 = 不修改；显式清空请用「清掉密钥」的语义（此处不提供，避免误操作）
+    const secret = $('captcha-secret').value.trim()
+    if (secret) payload.secret = secret
+    const { response, body } = await api('/api/admin/captcha', { method: 'POST', body: JSON.stringify(payload) })
+    if (!response.ok) {
+      const message = body.code === 'missing_site_key' ? t('admin.captcha.needSiteKey')
+        : body.code === 'missing_secret' ? t('admin.captcha.needSecret')
+          : t('admin.captcha.saveFailed')
+      captchaNote(message, true)
+      return
+    }
+    captchaNote(t('admin.captcha.saved'))
+    await loadCaptcha()
+  }
+
+  // ---- 运行时设置（闲置阈值 / 每实例内存）----
+  $('settings-save').addEventListener('click', async () => {
+    clearAlerts()
+    const payload = {
+      idleTimeoutSeconds: Number($('idle-timeout').value),
+      memoryMb: Number($('instance-memory').value),
+    }
+    const { response, body } = await api('/api/admin/instances/settings', { method: 'POST', body: JSON.stringify(payload) })
+    if (!response.ok) {
+      const reason = body.code === 'invalid_idle_timeout' ? t('admin.settings.idle')
+        : body.code === 'invalid_memory' ? t('admin.settings.memory')
+          : t('admin.error.generic')
+      error(fill('admin.settings.saveFailed', { reason }))
+      return
+    }
+    notice(t('admin.settings.saved'))
+    await loadInstances()
+  })
+
+$('captcha-save').addEventListener('click', () => { void saveCaptcha() })
+
+  function mountCaptchaTab() {
+    if (captchaLoaded) return
+    void loadCaptcha()
+  }
+
+  // ---- 模型开放 ----
+  let modelsLoaded = false
+
+  function modelsNote(text, isError) {
+    const node = $('models-note')
+    node.textContent = text
+    node.style.color = isError ? '#ff8f8f' : '#7ee0a8'
+    node.style.display = text ? 'block' : 'none'
+  }
+
+  async function loadModels() {
+    const { response, body } = await api('/api/admin/model-access')
+    if (!response.ok) { modelsNote(t('admin.error.generic'), true); return }
+    const tbody = $('models-body')
+    tbody.textContent = ''
+    const available = body.available ?? []
+    if (!body.brokerReachable) modelsNote(t('admin.models.unreachable'), true)
+    else modelsNote('')
+
+    const users = (body.users ?? []).filter((user) => user.role !== 'root')
+    $('models-empty').style.display = users.length ? 'none' : ''
+
+    for (const user of users) {
+      const row = document.createElement('tr')
+
+      const name = document.createElement('td')
+      name.textContent = user.username
+      row.appendChild(name)
+
+      const status = document.createElement('td')
+      const pill = document.createElement('span')
+      pill.className = user.status === 'enabled' ? 'pill pill--ok' : 'pill pill--off'
+      pill.textContent = user.status === 'enabled' ? t('admin.status.enabled') : t('admin.status.disabled')
+      status.appendChild(pill)
+      row.appendChild(status)
+
+      const access = document.createElement('td')
+      access.className = 'cell--cards'
+      // null = 未单独设置过 → 默认全部开放
+      const isDefault = user.allowedUpstreams === null
+      const granted = new Set(isDefault ? available : user.allowedUpstreams)
+      const box = document.createElement('div')
+      box.className = 'pick-grid'
+      const picks = []
+      for (const upstream of available) {
+        // 卡片式开关：点一下亮起、再点灰暗。状态用 aria-pressed 表达，读屏与视觉一致；
+        // 它是"状态"而不是"动作"，所以不用 .mini（那是按钮），而用同尺寸的 .pick。
+        const card = document.createElement('button')
+        card.type = 'button'
+        card.className = 'pick'
+        const on = granted.has(upstream)
+        card.setAttribute('aria-pressed', on ? 'true' : 'false')
+        card.textContent = upstream
+        card.addEventListener('click', () => {
+          const next = card.getAttribute('aria-pressed') !== 'true'
+          card.setAttribute('aria-pressed', next ? 'true' : 'false')
+        })
+        picks.push({ card, upstream })
+        box.appendChild(card)
+      }
+
+      // 第三列：三个按钮各占一行（全选 / 取消全选 / 保存）。
+      // 顺序按"操作从上到下由粗到细"：先全选，再取消，最后是提交。
+      const actions = document.createElement('td')
+      actions.className = 'cell--actions'
+      const column = document.createElement('div')
+      column.className = 'column-actions'
+      const setAll = (value) => {
+        for (const entry of picks) entry.card.setAttribute('aria-pressed', value ? 'true' : 'false')
+      }
+      column.appendChild(actionButton(t('admin.models.selectAll'), () => setAll(true)))
+      column.appendChild(actionButton(t('admin.models.selectNone'), () => setAll(false)))
+      column.appendChild(actionButton(t('admin.models.apply'), async () => {
+        clearAlerts()
+        const picked = picks.filter((entry) => entry.card.getAttribute('aria-pressed') === 'true').map((entry) => entry.upstream)
+        // 全选 = 恢复默认（null），这样以后新增上游会自动包含进来
+        const payload = picked.length === available.length ? { username: user.username, allowedUpstreams: null }
+          : { username: user.username, allowedUpstreams: picked }
+        const result = await api('/api/admin/model-access', { method: 'POST', body: JSON.stringify(payload) })
+        if (!result.response.ok) { modelsNote(t('admin.models.saveFailed'), true); return }
+        modelsNote(fill('admin.models.saved', { user: user.username }))
+        await loadModels()
+      }, 'primary'))
+      access.appendChild(box)
+      // column 必须挂进 actions 单元格：漏掉这一行，操作列会渲染成一个空 td，
+      // 三个按钮只存在于内存里（字符串检查发现不了，只有真正跑一遍 DOM 才看得见）。
+      actions.appendChild(column)
+      row.appendChild(access)
+      row.appendChild(actions)
+      tbody.appendChild(row)
+    }
+    modelsLoaded = true
+  }
+
+  function mountModelsTab() {
+    if (modelsLoaded) return
+    void loadModels()
+  }
+
+  const loaders = { users: loadUsers, audit: loadAudit, instances: loadInstances, account: mountAccountTab, captcha: mountCaptchaTab, models: mountModelsTab }
+  document.querySelectorAll('.tabs button').forEach((button) => {
+    button.addEventListener('click', () => {
+      clearAlerts()
+      document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('is-active', b === button))
+      const tab = button.dataset.tab
+      document.querySelectorAll('.section').forEach((section) => section.classList.toggle('is-active', section.id === `section-${tab}`))
+      loaders[tab]?.()
+    })
+  })
+
+  $('to-home').addEventListener('click', () => window.location.assign('/'))
+  $('do-logout').addEventListener('click', async () => {
+    try { await api('/api/auth/logout', { method: 'POST', body: '{}' }) } catch { /* 仍然回到登录页 */ }
+    window.location.replace('/login')
+  })
+
+  // 先取会话确认身份；非 root 由服务端拒绝，前端只负责给出提示。
+  // CSRF 令牌取自非 HttpOnly 的双提交 Cookie（服务端只保存其哈希，无法回传原文）。
+  ;(async () => {
+    const session = await api('/api/auth/session', { method: 'GET' })
+    if (!session.response.ok) { window.location.replace('/login?redirect=/admin'); return }
+    if (session.body.user?.role !== 'root') { error(t('admin.error.forbidden')); return }
+    const match = document.cookie.match(/(?:^|;\s*)dsh_auth_csrf=([^;]*)/)
+    csrfToken = match ? decodeURIComponent(match[1]) : ''
+    applyLang()
+    // 用户列表与注册策略一起加载：注册开关就在用户标签页底部，首屏要直接可见
+    await Promise.all([loadUsers(), loadRegistration()])
+  })()
+})()
+</script>
+</body>
+</html>

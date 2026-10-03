@@ -151,9 +151,19 @@ const ctx = {
 
 client.apply(ctx)
 
-// Opening the app must not talk to the network on this plugin's behalf: the
-// version card loads on mount and the remote check only on a button press.
-assert.equal(fetches.length, 0)
+// 打开工作台不得替用户发起任何远端检查：更新检查只在按钮点击时发生。
+// 唯一允许的开屏请求是一次同源能力探测（/api/auth/status），账户分区据此决定
+// 是否注册导航项——不探测的话，basic/local/trusted-proxy 这些没有账户体系的
+// 部署会留下一个点了没反应的入口。
+const openPaths = fetches.map((entry) => entry.path)
+assert.deepEqual(
+  openPaths.some((path) => /\/update(\/latest)?(\?|$)/.test(path)),
+  false,
+  `开屏不得发起更新检查，实际请求：${openPaths.join(', ')}`,
+)
+assert.deepEqual(openPaths, ['/api/auth/status'], '开屏只允许一次同源能力探测')
+assert.equal(fetches[0].options?.credentials, 'same-origin', '能力探测必须带同源凭据，否则多用户模式下拿不到真实状态')
+assert.equal(fetches[0].options?.cache, 'no-store', '能力探测不得命中缓存，否则登录/登出后导航项不刷新')
 assert.deepEqual(dictionaries.map(({ namespace, language }) => [namespace, language]), [
   ['dsh-docker-control', 'zh'],
   ['dsh-docker-control', 'en'],

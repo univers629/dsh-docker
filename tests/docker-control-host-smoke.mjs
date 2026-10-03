@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
+import { createRequire, default as Module } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 
 const originalDshHome = process.env.DSH_HOME
 const originalDshAppDir = process.env.DSH_APP_DIR
@@ -23,6 +23,17 @@ await writeFile(join(testHome, 'request'), `
 const { writeFileSync } = require('node:fs')
 writeFileSync(${JSON.stringify(join(testHome, 'restart-requested'))}, process.argv.slice(2).join(' '))
 `)
+
+// settings.yaml 的保存路径需要 YAML 解析器。生产里插件用 createRequire 相对自身解析，
+// 拿到的是它自己声明的依赖或 DSH 向上提供的 yaml；而测试从仓库加载插件，这条路径不
+// 存在，所以先把 bin/node_modules（bin/package.json 的 devDependencies，已被 .gitignore
+// 忽略）接进解析路径。解析器仍然缺席时另有 docker-control-config-no-yaml-smoke 专门
+// 验证"拒绝保存"这条契约，本测试则假定环境已按 bin/package.json 装好依赖。
+const yamlRoot = process.env.DSH_TEST_YAML_ROOT
+  ?? new URL('../bin/node_modules', import.meta.url).pathname.replace(/^\/(.:)/, '$1')
+process.env.NODE_PATH = [process.env.NODE_PATH, yamlRoot].filter(Boolean).join(delimiter)
+Module._initPaths()
+
 const { apply, inject, name } = await import(`../dsh-home/docker-control/lib/index.js?test=${Date.now()}`)
 
 try {

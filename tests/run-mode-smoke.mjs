@@ -172,7 +172,15 @@ assert.match(files.dockerfile, /DSH_UPDATE_STATE=\/data\/dsh\/update/)
 assert.match(files.dockerfile, /DSH_NGINX_CONFIG=\/usr\/local\/share\/dsh\/nginx\.conf/)
 const runtimeDockerfile = files.dockerfile.slice(files.dockerfile.indexOf('FROM ' + '$' + '{DEBIAN_IMAGE} AS runtime'))
 assert.match(runtimeDockerfile, /RUN --mount=type=cache,target=\/var\/cache\/apt,sharing=locked/)
-assert.match(runtimeDockerfile, /apt-get update/)
+// apt 调用必须带重试与超时：部分网络下 Debian 源返回 500 或截断响应而不是超时，
+// 不带 -o Acquire::Retries 的写法会让构建偶发失败，且失败点看起来与网络无关。
+assert.match(runtimeDockerfile, /apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=60 update/)
+assert.equal(
+  (runtimeDockerfile.match(/apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=60 update/g) ?? []).length,
+  2,
+  '镜像源分支与默认分支都要先 update 再 install：换源那条路径同样要有重试，'
+  + '否则一旦设了 APT_MIRROR，加固就只覆盖了另一半分支。',
+)
 assert.match(runtimeDockerfile, /^\s+make \\$/m)
 assert.match(runtimeDockerfile, /^\s+gcc \\$/m)
 assert.match(runtimeDockerfile, /^\s+g\+\+ \\$/m)
@@ -471,13 +479,17 @@ const batchSubcommands = new Set(
 )
 // default 是 .bat 被双击（无参数）时的入口，dsh.sh 用 ${1:-start} 表达同一件事。
 batchSubcommands.delete('default')
+// 两个 CLI 的子命令集合必须一致：Windows 用户少一个 keys / egress / users 就等于拿不到
+// 对应的运维能力，而这两个脚本是唯一的运维入口。以前 .bat 缺多用户三件套，这里靠豁免
+// 清单放行；豁免清空意味着实现已追平。
 assert.deepEqual(
   [...shellSubcommands].sort(),
   [...batchSubcommands].sort(),
   'dsh.sh 与 dsh.bat 的子命令集合必须一致',
 )
-for (const subcommand of ['start', 'stop', 'restart', 'logs', 'status', 'update', 'verify', 'keys', 'egress', 'remove']) {
+for (const subcommand of ['start', 'stop', 'restart', 'logs', 'status', 'update', 'verify', 'keys', 'egress', 'users', 'start-user', 'stop-user']) {
   assert.ok(shellSubcommands.has(subcommand), `dsh.sh must implement ${subcommand}`)
+  assert.ok(batchSubcommands.has(subcommand), `dsh.bat must implement ${subcommand}`)
 }
 
 assert.match(files.installPs1, /compose build dsh/)

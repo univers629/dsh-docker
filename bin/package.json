@@ -1,0 +1,15 @@
+{
+  "name": "dsh-docker-bin",
+  "private": true,
+  "type": "module",
+  "description": "dsh-docker 内置服务的依赖清单。绝大多数服务只用 Node 内置模块；dsh-auth 需要 @simplewebauthn/server 做 Passkey 校验（与 KPanel 用 go-webauthn 同构），以及 qrcode 把 otpauth 地址渲染成二维码（TOTP 的扫描入口）。密码学与二维码编码都交给成熟库，服务本体只写策略。devDependencies 只在测试里用：jsdom/jsqr 校验二维码与 DOM，yaml 用来跑 docker-control 插件的设置保存路径（生产里该插件从自身 dependencies 解析到 yaml）。",
+  "dependencies": {
+    "@simplewebauthn/server": "^13.1.1",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.1",
+    "jsqr": "^1.4.0",
+    "yaml": "2.9.0"
+  }
+}

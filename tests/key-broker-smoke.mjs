@@ -13,11 +13,13 @@ import {
   STRIPPED_REQUEST_HEADERS,
   assertMethod,
   collectSecrets,
+  createStreamRedactor,
   emptyUsageState,
   isBlockedHost,
   isPathAllowed,
   normalizeUpstreamPath,
   parseBrokerConfig,
+  redactHeaders,
   redactSecrets,
   registerUsage,
   resolveRoute,
@@ -134,6 +136,81 @@ const echoed = `{"error":"invalid key ${TEST_KEY}"}`
 assert.equal(redactSecrets(echoed, collectSecrets(validConfig)).includes(TEST_KEY), false)
 assert.match(redactSecrets(echoed, collectSecrets(validConfig)), /redacted/)
 
+// 响应头同样要脱敏：上游把收到的凭据回显在某个头里并非不可能，而成功分支的响应体
+// 走流式直通（不能缓冲），头是这一侧唯一还能就地处理的地方。
+const echoSecrets = collectSecrets(validConfig)
+const echoHeaders = {
+  'x-echoed-key': TEST_KEY,
+  'x-multi': [`first ${TEST_KEY}`, 'clean'],
+  'content-length': 42,
+  'x-note': 'no secret here',
+}
+const safeHeaders = redactHeaders(echoHeaders, echoSecrets)
+assert.equal(JSON.stringify(safeHeaders).includes(TEST_KEY), false, '响应头里的密钥必须被抹掉')
+assert.equal(safeHeaders['x-echoed-key'], '***redacted***')
+assert.deepEqual(safeHeaders['x-multi'], ['first ***redacted***', 'clean'], '同名多值头逐个脱敏')
+assert.equal(safeHeaders['content-length'], 42, '非字符串值原样保留')
+assert.equal(safeHeaders['x-note'], 'no secret here', '不含密钥的头不受影响')
+assert.equal(echoHeaders['x-echoed-key'], TEST_KEY, '不得就地改动入参')
+assert.deepEqual(redactHeaders(undefined, echoSecrets), {}, '空头集合安全返回空对象')
+
+// 流式脱敏：成功分支的响应体不缓冲，但密钥跨块出现也必须命中。
+// 场景 1：密钥被分块边界切开；场景 2：多字节字符被边界截断后再拼回（不得产出替代符）；
+// 场景 3：结尾的密钥由 flush 交还；场景 4：无密钥时字节原样通过。
+const KEY = 'sk-stream-test-0123456789abcdef'
+const collect = (parts) => {
+  const redactor = createStreamRedactor([KEY])
+  const out = []
+  for (const part of parts) {
+    const clean = redactor.push(Buffer.isBuffer(part) ? part : Buffer.from(part, 'utf8'))
+    if (clean) out.push(clean)
+  }
+  const tail = redactor.flush()
+  if (tail) out.push(tail)
+  return Buffer.concat(out).toString('utf8')
+}
+const splitAt = (text, index) => [text.slice(0, index), text.slice(index)]
+
+// 1) 密钥正好骑在边界上：两个分块各持一半。
+{
+  const full = `answer before ${KEY} answer after`
+  const [left, right] = splitAt(full, 'answer before '.length + 10)
+  const rebuilt = collect([left, right])
+  assert.equal(rebuilt.includes(KEY), false, '跨块出现的密钥必须被抹掉')
+  assert.match(rebuilt, /\*\*\*redacted\*\*\*/)
+  assert.match(rebuilt, /answer before .*answer after/, '密钥前后的正文必须原样保留')
+}
+// 2) 多字节字符（中文 3 字节）被截断：边界两侧各自半个字符，拼回后不得产出替换符。
+{
+  const full = `结果：成功${KEY}完成`
+  const bytes = Buffer.from(full, 'utf8')
+  // 在“功”字的中间切开。
+  const cut = Buffer.from('结果：成功', 'utf8').length - 1
+  const rebuilt = collect([bytes.subarray(0, cut), bytes.subarray(cut)])
+  assert.equal(rebuilt.includes(KEY), false, '多字节边界后的密钥必须被抹掉')
+  assert.ok(!rebuilt.includes('\uFFFD'), `不得产出替换符：${JSON.stringify(rebuilt)}`)
+  assert.match(rebuilt, /^结果：成功\*\*\*redacted\*\*\*完成$/)
+}
+// 3) 密钥出现在流的最后：flush 必须交还。
+{
+  const rebuilt = collect([`head ${KEY}`])
+  assert.equal(rebuilt.includes(KEY), false, '结尾的密钥也要被抹掉')
+  assert.equal(rebuilt, 'head ***redacted***')
+}
+// 4) 干净流：逐字节喂入，正文必须原样到达（脱敏器不得吞掉或改写字节）。
+{
+  const text = 'just a normal streaming answer 普通回答 123'
+  const rebuilt = collect(text.split(''))
+  assert.equal(rebuilt, text, '无密钥的流必须逐字节原样通过')
+}
+// 5) 空密钥集合：等价于直通。
+{
+  const redactor = createStreamRedactor([])
+  const clean = redactor.push(Buffer.from('abc'))
+  assert.equal(clean?.toString('utf8'), 'abc', '无密钥时不应扣住任何字节')
+  assert.equal(redactor.flush(), null, '无密钥时 flush 不应再产出字节')
+}
+
 // --- 配额与限速 ---
 const limited = validConfig.upstreams.get('gemini')
 let state = emptyUsageState()
@@ -160,10 +237,23 @@ assert.ok(STRIPPED_REQUEST_HEADERS.includes('authorization'))
 assert.ok(STRIPPED_REQUEST_HEADERS.includes('x-api-key'))
 
 // --- 端到端：起真实代理进程，验证放行/拒绝与“密钥绝不出现在任何响应或日志里” ---
+// 授权功能加入后，每个 /u/ 调用都要凭实例令牌识别调用者（默认拒绝）：没有授权表时
+// 一律 401。这里给测试令牌发放 probe 上游的授权，与真实部署里 dsh-auth 写出的
+// broker-grants.json 同一形状（tokenDigest 由仓库自身的 brokerTokenDigest 计算）。
+import { brokerTokenDigest } from '../bin/dsh-broker-grants.mjs'
+
+const INSTANCE_TOKEN = 'test-instance-token-0123456789'
 const brokerPath = fileURLToPath(new URL('../bin/dsh-key-broker.mjs', import.meta.url))
 const sandbox = await mkdtemp(join(tmpdir(), 'dsh-broker-smoke-'))
 const configPath = join(sandbox, 'keys.json')
+const grantsPath = join(sandbox, 'grants.json')
 const port = 20000 + Math.floor(Math.random() * 20000)
+await writeFile(grantsPath, JSON.stringify({
+  version: 1,
+  users: {
+    100000: { tokenDigest: brokerTokenDigest(INSTANCE_TOKEN), upstreams: ['probe'] },
+  },
+}))
 await writeFile(configPath, JSON.stringify({
   version: 1,
   upstreams: [
@@ -179,7 +269,13 @@ await writeFile(configPath, JSON.stringify({
 }))
 
 const child = spawn(process.execPath, [brokerPath], {
-  env: { ...process.env, DSH_BROKER_CONFIG: configPath, DSH_BROKER_PORT: String(port), DSH_BROKER_BIND: '127.0.0.1' },
+  env: {
+    ...process.env,
+    DSH_BROKER_CONFIG: configPath,
+    DSH_BROKER_GRANTS: grantsPath,
+    DSH_BROKER_PORT: String(port),
+    DSH_BROKER_BIND: '127.0.0.1',
+  },
   stdio: ['ignore', 'pipe', 'pipe'],
 })
 let brokerLog = ''
@@ -246,7 +342,11 @@ try {
   // 关键是响应体里既没有我们的密钥，也没有调用方的伪造凭据）。
   const upstreamFailure = await fetch(`${base}/u/probe/v1/chat/completions`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer attacker-supplied' },
+    headers: {
+      'content-type': 'application/json',
+      authorization: 'Bearer attacker-supplied',
+      'x-dsh-instance-token': INSTANCE_TOKEN,
+    },
     body: JSON.stringify({ model: 'probe', messages: [] }),
   })
   assert.equal(upstreamFailure.status, 502)
@@ -254,9 +354,23 @@ try {
   assert.equal(failureBody.includes(TEST_KEY), false)
   assert.equal(failureBody.includes('attacker-supplied'), false)
 
+  // 未持令牌的调用必须被拒：授权功能默认拒绝一切未知调用者。
+  const noToken = await fetch(`${base}/u/probe/v1/chat/completions`, { method: 'POST', body: '{}' })
+  assert.equal(noToken.status, 401, 'caller without instance token is unknown')
+  const badToken = await fetch(`${base}/u/probe/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'x-dsh-instance-token': `${INSTANCE_TOKEN}-wrong` },
+    body: '{}',
+  })
+  assert.equal(badToken.status, 401, 'wrong instance token is unknown')
+
   // 第二次仍在配额内，第三次触发每分钟上限。
-  await fetch(`${base}/u/probe/v1/chat/completions`, { method: 'POST', body: '{}' }).then((r) => r.text())
-  const throttledResponse = await fetch(`${base}/u/probe/v1/chat/completions`, { method: 'POST', body: '{}' })
+  await fetch(`${base}/u/probe/v1/chat/completions`, {
+    method: 'POST', headers: { 'x-dsh-instance-token': INSTANCE_TOKEN }, body: '{}',
+  }).then((r) => r.text())
+  const throttledResponse = await fetch(`${base}/u/probe/v1/chat/completions`, {
+    method: 'POST', headers: { 'x-dsh-instance-token': INSTANCE_TOKEN }, body: '{}',
+  })
   assert.equal(throttledResponse.status, 429)
 
   // 声明的 content-length 超过上限时，代理必须在建立上游连接之前就拒绝。
@@ -264,7 +378,7 @@ try {
   const oversizeStatus = await rawRequestStatus(
     port,
     'POST /u/probe/v1/chat/completions HTTP/1.1',
-    [`Content-Length: ${64 * 1024 * 1024}`],
+    [`Content-Length: ${64 * 1024 * 1024}`, `X-DSH-Instance-Token: ${INSTANCE_TOKEN}`],
     '',
   )
   assert.ok([413, 429].includes(oversizeStatus), `unexpected oversize status ${oversizeStatus}`)

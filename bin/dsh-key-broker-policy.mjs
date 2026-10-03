@@ -54,6 +54,8 @@ export const STRIPPED_REQUEST_HEADERS = Object.freeze([
   'x-api-key',
   'x-goog-api-key',
   'x-auth-token',
+  // 实例身份令牌：代理用它识别调用者，绝不能透传给上游（上游不需要、也不该看到它）
+  'x-dsh-instance-token',
   'cookie',
   'set-cookie',
   'host',
@@ -289,6 +291,100 @@ export function redactSecrets(text, secrets) {
   return output
 }
 
+/**
+ * 对整份响应头做脱敏（返回新对象，不改入参）。
+ *
+ * 响应体走流式直通，因此成功响应体不能就地脱敏；但响应头是小对象、不涉及缓冲，两个
+ * 分支都能过一遍。上游把收到的凭据回显在某个头里并非不可能，而"密钥只出现在发往上游
+ * 的请求里"是这条链路的硬约束，所以头这一侧不留缺口。
+ *
+ * 值为数组的头（同名多次出现）逐个脱敏；非字符串值（数字等）原样返回——它们不承载密钥。
+ * @param {Record<string, string|string[]|number|undefined>} headers 原始响应头。
+ * @param {string[]} secrets 需要抹掉的密钥集合。
+ * @returns {Record<string, string|string[]|number|undefined>} 脱敏后的副本。
+ */
+export function redactHeaders(headers, secrets) {
+  const output = {}
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    if (Array.isArray(value)) output[name] = value.map((entry) => redactSecrets(entry, secrets))
+    else output[name] = redactSecrets(value, secrets)
+  }
+  return output
+}
+
+/**
+ * 流式响应体的增量脱敏器。
+ *
+ * 成功响应不能缓冲（长回答会吃满内存），但"密钥只出现在发往上游的请求里"是硬约束，
+ * 所以体这一侧用增量扫描：每个分块保留「最长密钥长度」字节的尾巴与下一个分块拼接后再
+ * 扫描，密钥跨块出现也能命中。多字节 UTF-8 序列被截在分块边界时同样靠这个尾巴拼回，
+ * 不会产出替代字符。
+ *
+ * 内存占用与响应体大小无关，只与最长密钥长度有关。flush() 在上游结束时交还全部剩余
+ * 字节，因此结尾处的密钥也不会被扣住。返回 null 表示"没有可输出的字节"——调用方
+ * 跳过写盘即可。
+ */
+export function createStreamRedactor(secrets) {
+  const active = [...secrets ?? []].filter((s) => typeof s === 'string' && s.length > 0)
+  // 切分要扣住的字节数是「最长密钥的字节数」：切分点是"已确认安全/未确认"的边界，
+  // 未确认段必须能容纳一个完整的密钥，否则密钥正好骑在切分点上时两半都命中不了。
+  const holdBytes = active.length > 0 ? Math.max(...active.map((s) => Buffer.byteLength(s, 'utf8'))) : 0
+  let pending = Buffer.alloc(0)
+
+  const push = (text) => {
+    let output = text
+    for (const secret of active) output = output.split(secret).join('***redacted***')
+    return output
+  }
+
+  return {
+    /** 处理一个分块，返回本段可安全写出的字节（可能为 null）。 */
+    push(chunk) {
+      if (!chunk || chunk.length === 0) return null
+      // 没有密钥就没有需要扣住的内容：直接透传。
+      if (holdBytes === 0) return chunk
+      const combined = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk
+      if (holdBytes > 0 && combined.length > holdBytes) {
+        // 先按窗口初选切分点，再把切分点挪到任何"骑在切分点上"的密钥之前：
+        // 密钥的一部分在初选正文里、另一部分在扣留段里时，两段都命中不了完整密钥，
+        // 必须等下一段拼齐后一次替换。判定用密钥的字节级后缀/前缀重叠，与正文的
+        // 内容无关（正文里出现普通字母不该把切分点无限前移）。
+        let emitLength = combined.length - holdBytes
+        if (emitLength > 0) {
+          const latin = combined.toString('latin1')
+          for (const secret of active) {
+            const bytes = Buffer.from(secret, 'utf8').toString('latin1')
+            // 密钥起点落在 [emit-(L-1), emit-1] 区间 ⇒ 它跨过切分点。
+            const first = emitLength - (bytes.length - 1)
+            const from = Math.max(0, first)
+            const hit = latin.slice(from, emitLength + bytes.length - 1).indexOf(bytes)
+            if (hit === -1) continue
+            const start = from + hit
+            if (start < emitLength && start + bytes.length > emitLength) {
+              emitLength = start
+            }
+          }
+        }
+        emitLength = Math.max(0, emitLength)
+        const text = combined.subarray(0, emitLength).toString('utf8')
+        pending = Buffer.from(combined.subarray(emitLength))
+        const cleaned = push(text)
+        return cleaned.length > 0 ? Buffer.from(cleaned, 'utf8') : null
+      }
+      // 还不够长到可以安全发出：整段先扣住，等 flush 或更大的分块。
+      pending = combined
+      return null
+    },
+    /** 上游结束：交还全部剩余字节（最后一段不再需要保留尾巴）。 */
+    flush() {
+      if (pending.length === 0) return null
+      const cleaned = push(pending.toString('utf8'))
+      pending = Buffer.alloc(0)
+      return cleaned.length > 0 ? Buffer.from(cleaned, 'utf8') : null
+    },
+  }
+}
+
 function decodeOnce(value) {
   try {
     return decodeURIComponent(value)
@@ -315,6 +411,13 @@ export function normalizeUpstreamPath(rawPath) {
     }
     if (decoded.includes('\\') || decoded.includes('\0') || /[\r\n]/.test(decoded)) {
       throw new BrokerPolicyError(400, '上游路径含有不允许的字符')
+    }
+
+    // 一个路径段解码后绝不应再含分隔符：出现 '/' 只可能是把穿越编码进了段里
+    // （如 ..%2fadmin 解码为 ../admin）。校验看的是解码值、转发用的是原始值，
+    // 上游还会再解码一次——不在这里拦下，前缀白名单看到的就是另一个路径。
+    if (decoded.includes('/')) {
+      throw new BrokerPolicyError(400, '上游路径段解码后含有分隔符')
     }
     normalized.push(segment)
   }

@@ -1,0 +1,103 @@
+# 单管理员模式的认证叠加层。用法：
+#
+#   docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d
+#
+# 它只做一件事：给「一套凭据、不开放注册」的部署配上认证网关与七层入口。
+#
+# 为什么必须有它：password 模式的含义是「容器内的 Nginx 不做认证」，认证由网关承担。
+# 如果只把 DSH_ACCESS_MODE 设成 password 而不部署这一层，容器内不认证、外面也没有认证，
+# 等于完全开放。因此访问模式为 password 时，这个文件必须一起叠加。
+
+services:
+  dsh:
+    # 入口由 dsh-authgate 承担，本体不再直接对外。
+    ports: !override []
+    environment:
+      # 容器内不做认证；认证在网关侧完成。
+      DSH_ACCESS_MODE: "password"
+    networks:
+      default:
+      dsh-private:
+      dsh-internal:
+
+  dsh-auth:
+    image: "${DSH_IMAGE:-dsh:local}"
+    container_name: dsh-auth
+    hostname: dsh-auth
+    # 认证网关不含用户数据、不跑 Agent、不挂 docker.sock；非 root、只读根文件系统。
+    user: "1000:1000"
+    restart: unless-stopped
+    entrypoint: ["node", "/usr/local/lib/dsh/dsh-auth.mjs"]
+    networks:
+      - dsh-private
+    environment:
+      DSH_AUTH_LISTEN: "0.0.0.0:8091"
+      DSH_AUTH_STATE: "/data/auth/state.json"
+      DSH_AUTH_TOTP_KEY: "/data/auth/totp.key"
+      DSH_AUTH_WEB_DIR: "/usr/local/lib/dsh/dsh-auth-web"
+      # 单管理员：不开放注册
+      DSH_MULTI_USER: "off"
+      DSH_REGISTER_GATE: "open"
+      # 入口后面就是工作台，登录后直接进去
+      DSH_AUTH_WORKSPACE: "on"
+      DSH_AUTH_PUBLIC_ORIGIN: "${DSH_PUBLIC_ORIGIN:-}"
+      DSH_ADMIN_INSTANCE_NAME: "dsh"
+      DSH_AUTH_SESSION_TTL_SECONDS: "${DSH_SESSION_TTL_SECONDS:-604800}"
+      DSH_AUTH_IDLE_TTL_SECONDS: "${DSH_SESSION_IDLE_TTL_SECONDS:-86400}"
+      # 入口↔网关共享密钥：设置后 verify 端点要求调用者携带同一个值。
+      DSH_AUTH_INGRESS_TOKEN: "${DSH_AUTH_INGRESS_TOKEN:-}"
+    volumes:
+      - ./data/auth:/data/auth
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8091/api/auth/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  dsh-authgate:
+    # 与多用户入口争用同一个宿主端口，因此只在该 profile 激活时启动。
+    profiles: ["authgate"]
+    image: "${DSH_IMAGE:-dsh:local}"
+    container_name: dsh-authgate
+    hostname: dsh-authgate
+    user: "0:0"
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # 配置里已声明 daemon off，不能再从命令行重复传入。
+        # 入口↔网关共享密钥：渲染进运行时 include（配置本体不落密钥）。
+        mkdir -p /tmp/dsh-nginx
+        printf 'set $$dsh_ingress_token "%s";\n' "${DSH_AUTH_INGRESS_TOKEN:-}" > /tmp/dsh-nginx/ingress-token.conf
+        exec nginx -c /usr/local/share/dsh/nginx-authgate.conf
+    environment:
+      DSH_AUTH_INGRESS_TOKEN: "${DSH_AUTH_INGRESS_TOKEN:-}"
+    ports:
+      - "${DSH_BIND_HOST:-127.0.0.1}:${DSH_HTTP_PORT:-3080}:3080"
+    networks:
+      - dsh-private
+      - dsh-internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/healthz').then(r=>process.exit(r.status===204?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

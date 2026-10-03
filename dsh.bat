@@ -60,13 +60,19 @@ if /i "%ACTION%"=="verify" goto :verify
 if /i "%ACTION%"=="keys" goto :keys
 if /i "%ACTION%"=="key-panel" goto :key_panel
 if /i "%ACTION%"=="egress" goto :egress
+if /i "%ACTION%"=="users" goto :users
+if /i "%ACTION%"=="start-user" goto :start_user
+if /i "%ACTION%"=="stop-user" goto :stop_user
 if /i "%ACTION%"=="remove" goto :remove
 if /i "%ACTION%"=="down" goto :remove
 
-echo 用法: %~nx0 [start^|update^|stop^|restart^|logs [服务]^|status^|shell^|root-shell^|verify^|keys^|key-panel^|egress^|remove]
+echo 用法: %~nx0 [start^|update^|stop^|restart^|logs [服务]^|status^|shell^|root-shell^|verify^|keys^|key-panel^|egress^|users^|start-user ^<用户名^>^|stop-user ^<用户名^>^|remove]
 echo   keys      显示模型密钥代理（dsh-key-broker）的上游与用量，不显示密钥
 echo   key-panel 显示模型密钥管理面板（dsh-key-admin）的地址与访问令牌
 echo   egress    显示出站白名单代理（dsh-egress）的白名单规模与放行/拒绝计数
+echo   users     列出多用户模式下的账户实例（在线/停止、忙碌、磁盘用量）
+echo   start-user 手动拉起某个账户的实例（正常情况下由登录自动触发）
+echo   stop-user 手动停止某个账户的实例（释放内存，数据保留）
 exit /b 1
 
 rem --- Compose 叠加文件与旁路容器 ---
@@ -110,14 +116,56 @@ if /i "%ENV_VALUE%"=="on" (
     echo [警告] .env 里 DSH_KEY_ADMIN=on，但目录里没有 docker-compose.keys-admin.yml，已按未启用处理。
   )
 )
+rem 认证网关：password 模式与多用户模式都必需（与 dsh.sh / install.sh 同一规则）。
+rem 多用户时入口由 multiuser 叠加层的 dsh-ingress 提供，因此不激活 authgate profile。
+call :read_env DSH_MULTI_USER
+set "MULTI_USER_ENV=%ENV_VALUE%"
+call :read_env DSH_ACCESS_MODE
+set "ACCESS_MODE_ENV=%ENV_VALUE%"
+set "AUTH_ENABLED="
+if /i "%ACCESS_MODE_ENV%"=="password" set "AUTH_ENABLED=1"
+if /i "%MULTI_USER_ENV%"=="on" set "AUTH_ENABLED=1"
+if "%AUTH_ENABLED%"=="1" (
+  if exist "docker-compose.auth.yml" (
+    if /i "%MULTI_USER_ENV%"=="on" (
+      set "COMPOSE_FILES=%COMPOSE_FILES% -f docker-compose.auth.yml"
+      set "SIDECARS=%SIDECARS% dsh-auth dsh-instances dsh-ingress"
+    ) else (
+      set "COMPOSE_FILES=%COMPOSE_FILES% --profile authgate -f docker-compose.auth.yml"
+      set "SIDECARS=%SIDECARS% dsh-auth dsh-authgate"
+    )
+  ) else (
+    echo [警告] .env 需要认证网关（DSH_ACCESS_MODE=password 或 DSH_MULTI_USER=on），但目录里没有 docker-compose.auth.yml，已按未启用处理。
+    set "AUTH_ENABLED="
+  )
+)
+rem basic 模式的 htpasswd 单文件挂载：与安装器同一规则，只在文件存在时叠加。
+if /i "%ACCESS_MODE_ENV%"=="basic" (
+  if exist "data\auth\htpasswd" if exist "docker-compose.basic-auth.yml" (
+    set "COMPOSE_FILES=%COMPOSE_FILES% -f docker-compose.basic-auth.yml"
+  )
+)
+rem 多用户叠加层建立在认证层之上：认证层缺席时明确回报并跳过。
+if /i "%MULTI_USER_ENV%"=="on" (
+  if "%AUTH_ENABLED%"=="1" (
+    if exist "docker-compose.multiuser.yml" (
+      set "COMPOSE_FILES=%COMPOSE_FILES% --profile multiuser -f docker-compose.multiuser.yml"
+    ) else (
+      echo [警告] .env 里 DSH_MULTI_USER=on，但目录里没有 docker-compose.multiuser.yml，已按单用户处理。
+    )
+  ) else if exist "docker-compose.multiuser.yml" (
+    echo [警告] .env 里 DSH_MULTI_USER=on，但认证网关未启用，已按单用户处理——多用户必须由网关解析身份。
+  )
+)
 call :read_env DSH_EGRESS_MODE
-if /i "%ENV_VALUE%"=="allowlist" (
+set "EGRESS_MODE_ENV=%ENV_VALUE%"
+if /i not "%EGRESS_MODE_ENV%"=="open" if not "%EGRESS_MODE_ENV%"=="" (
   if exist "docker-compose.isolated.yml" (
     set "COMPOSE_FILES=%COMPOSE_FILES% -f docker-compose.isolated.yml"
     set "SIDECARS=%SIDECARS% dsh-egress dsh-ingress"
     set "EGRESS_ENABLED=1"
   ) else (
-    echo [警告] .env 里 DSH_EGRESS_MODE=allowlist，但目录里没有 docker-compose.isolated.yml，已按 open 处理。
+    echo [警告] .env 里 DSH_EGRESS_MODE=%EGRESS_MODE_ENV%，但目录里没有 docker-compose.isolated.yml，已按 open 处理。
   )
 )
 exit /b 0
@@ -319,14 +367,132 @@ echo 说明：allowlist 模式下 dsh 容器只挂 internal 网络，出网只�
 echo       白名单外的域名会被直接拒绝。被拒的请求见 %~nx0 logs dsh-egress。
 exit /b 0
 
+rem --- 多用户实例运维（与 dsh.sh 的 users / start-user / stop-user 对应） ---
+rem
+rem 调用链与 dsh.sh 相同：读 data/auth/instances.token，把请求转给 dsh-instances
+rem 容器里的编排 API。dsh-instances 不发布端口，因此必须在容器内发请求。
+
+:require_multiuser
+call :read_env DSH_MULTI_USER
+if /i not "%ENV_VALUE%"=="on" (
+  echo 该部署未开启多用户模式：在 .env 里设置 DSH_MULTI_USER=on 并重跑安装器后才有实例可管理。
+  exit /b 1
+)
+docker container inspect dsh-instances >nul 2>nul
+if errorlevel 1 (
+  echo [错误] 未发现 dsh-instances 容器：该部署不是多用户模式。
+  exit /b 1
+)
+set "MU_STATE="
+for /f "delims=" %%i in ('docker inspect --format "{{.State.Status}}" dsh-instances 2^>nul') do set "MU_STATE=%%i"
+if /i not "%MU_STATE%"=="running" (
+  echo [错误] dsh-instances 当前未运行，请先运行 %~nx0 start。
+  exit /b 1
+)
+if not exist "data\auth\instances.token" (
+  echo [错误] 读不到 data\auth\instances.token（认证网关尚未创建它）。
+  exit /b 1
+)
+exit /b 0
+
+rem 用法: call :multiuser_request <路径> [JSON 体]
+rem 结果打到 stdout；非 2xx 时输出错误并返回 1。
+rem token/body 经 docker exec -e 传入容器内的 node：cmd 的命令行转义会把引号吃掉，
+rem 而环境变量是逐字传递的。
+:multiuser_request
+set "MU_PATH=%~1"
+set "MU_BODY=%~2"
+set "MU_TOKEN="
+for /f "usebackq delims=" %%i in ("data\auth\instances.token") do set "MU_TOKEN=%%i"
+if "%MU_TOKEN%"=="" (
+  echo [错误] data\auth\instances.token 是空的。
+  exit /b 1
+)
+set "MU_METHOD=GET"
+if not "%MU_BODY%"=="" set "MU_METHOD=POST"
+set "MU_NODE_CODE=const [path,body,token,method]=process.argv.slice(1);const headers={authorization:'Bearer '+token};if(body){headers['content-type']='application/json'};fetch('http://127.0.0.1:8092'+path,{method,headers,body:body||undefined}).then(async r=>{const text=await r.text();console.log(text.trim());if(!r.ok){process.exitCode=1}}).catch(e=>{console.error(e.message);process.exitCode=1})"
+docker exec -e MU_TOKEN="%MU_TOKEN%" dsh-instances node -e "%MU_NODE_CODE%" "%MU_PATH%" "%MU_BODY%" "%MU_TOKEN%" "%MU_METHOD%"
+exit /b %errorlevel%
+
+:users
+call :require_multiuser
+if errorlevel 1 exit /b 1
+echo ==^> 多用户实例（来自实例编排服务）：
+call :multiuser_request /instances
+exit /b %errorlevel%
+
+rem 用法: call :resolve_user_uid <用户名> → UID_FOR
+:resolve_user_uid
+set "UID_FOR="
+set "MU_TOKEN="
+for /f "usebackq delims=" %%i in ("data\auth\instances.token") do set "MU_TOKEN=%%i"
+rem 在容器内解析 JSON：宿主侧没有 jq，cmd 也解析不了。
+set "MU_FIND_CODE=const [username,token]=process.argv.slice(1);fetch('http://127.0.0.1:8092/instances',{headers:{authorization:'Bearer '+token}}).then(r=>r.json()).then(d=>{const hit=(d.instances||[]).find(i=>i.username===username);if(!hit){console.error('not found');process.exit(3)}process.stdout.write(String(hit.uid))}).catch(()=>process.exit(1))"
+docker exec -e MU_TOKEN="%MU_TOKEN%" dsh-instances node -e "%MU_FIND_CODE%" "%~1" "%MU_TOKEN%" > "%TEMP%\dsh-uid.txt" 2>nul
+if errorlevel 1 (
+  del "%TEMP%\dsh-uid.txt" >nul 2>nul
+  echo [错误] 找不到账户 %~1 的实例；先用 %~nx0 users 看看现有实例。
+  exit /b 1
+)
+set /p UID_FOR=<"%TEMP%\dsh-uid.txt"
+del "%TEMP%\dsh-uid.txt" >nul 2>nul
+if "%UID_FOR%"=="" (
+  echo [错误] 解析账户 %~1 的 uid 失败。
+  exit /b 1
+)
+exit /b 0
+
+:start_user
+if "%~2"=="" (
+  echo 用法: %~nx0 start-user ^<用户名^>
+  exit /b 1
+)
+call :require_multiuser
+if errorlevel 1 exit /b 1
+call :resolve_user_uid "%~2"
+if errorlevel 1 exit /b 1
+echo ==^> 启动 %~2（uid %UID_FOR%）...
+call :multiuser_request /instances/ensure "{\"uid\":%UID_FOR%,\"username\":\"%~2\"}"
+exit /b %errorlevel%
+
+:stop_user
+if "%~2"=="" (
+  echo 用法: %~nx0 stop-user ^<用户名^>
+  exit /b 1
+)
+call :require_multiuser
+if errorlevel 1 exit /b 1
+call :resolve_user_uid "%~2"
+if errorlevel 1 exit /b 1
+echo ==^> 停止 %~2（uid %UID_FOR%）...
+call :multiuser_request /instances/stop "{\"uid\":%UID_FOR%}"
+exit /b %errorlevel%
+
 :status
 docker compose %COMPOSE_FILES% ps
 echo.
 echo ==^> 旁路容器：
+call :read_env DSH_MULTI_USER
+set "MULTI_USER_ENABLED="
+if /i "%ENV_VALUE%"=="on" set "MULTI_USER_ENABLED=1"
+call :read_env DSH_ACCESS_MODE
+set "AUTH_ENABLED="
+if /i "%ENV_VALUE%"=="password" set "AUTH_ENABLED=1"
 call :report_sidecar dsh-key-broker "模型密钥代理" "%BROKER_ENABLED%" "DSH_MODEL_BROKER=on"
 call :report_sidecar dsh-key-admin "密钥管理面板" "%KEY_ADMIN_ENABLED%" "DSH_KEY_ADMIN=on"
+call :report_sidecar dsh-auth "认证网关" "%AUTH_ENABLED%" "DSH_ACCESS_MODE=password 或 DSH_MULTI_USER=on"
+call :report_sidecar dsh-instances "实例编排服务" "%MULTI_USER_ENABLED%" "DSH_MULTI_USER=on"
 call :report_sidecar dsh-egress "出站白名单代理" "%EGRESS_ENABLED%" "DSH_EGRESS_MODE=allowlist"
-call :report_sidecar dsh-ingress "宿主 3080 入口" "%EGRESS_ENABLED%" "DSH_EGRESS_MODE=allowlist"
+rem 入口容器二选一：单管理员是 dsh-authgate，多用户是 dsh-ingress（出站隔离也用它）。
+rem 两个都列会让人以为两套入口可以并存，而它们发布的是同一个宿主端口。
+if not "%MULTI_USER_ENABLED%"=="1" (
+  call :report_sidecar dsh-authgate "宿主入口（单管理员）" "%AUTH_ENABLED%" "DSH_ACCESS_MODE=password"
+)
+if "%MULTI_USER_ENABLED%"=="1" (
+  call :report_sidecar dsh-ingress "宿主入口（七层/出站）" "1" "DSH_MULTI_USER=on 或 DSH_EGRESS_MODE!=open"
+) else if "%EGRESS_ENABLED%"=="1" (
+  call :report_sidecar dsh-ingress "宿主入口（出站）" "%EGRESS_ENABLED%" "DSH_EGRESS_MODE=allowlist"
+)
 exit /b 0
 
 rem 探针前置检查：容器不存在或没运行时给一句能照着做的话，而不是让 docker exec 抛

@@ -8,6 +8,29 @@ const origin = new URL(url).origin
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+// 这个测试验证的是浏览器里的真实行为，需要一个暴露 CDP 端点的真实浏览器（默认
+// 127.0.0.1:19222）。没有浏览器时它测不到本仓库的任何代码，因此明确跳过而不是
+// 抛错——但跳过必须可见，且可以用 DSH_CDP_REQUIRED=1 把跳过变回失败，供"必须带
+// 浏览器才算通过"的流水线使用。
+async function cdpReachable() {
+  try {
+    const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`, { signal: AbortSignal.timeout(2000) })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
+if (!(await cdpReachable())) {
+  const reason = `127.0.0.1:${cdpPort} 上没有可用的 CDP 端点`
+  if (process.env.DSH_CDP_REQUIRED === '1') {
+    console.error(`browser cdp smoke: 要求浏览器但${reason}（DSH_CDP_REQUIRED=1）`)
+    process.exit(1)
+  }
+  console.log(`browser cdp smoke: skipped（${reason}；需要真实浏览器，设 DSH_CDP_REQUIRED=1 可把跳过变成失败）`)
+  process.exit(0)
+}
+
 async function newPage(targetUrl) {
   const response = await fetch(`http://127.0.0.1:${cdpPort}/json/new?${encodeURIComponent(targetUrl)}`, { method: 'PUT' })
   if (!response.ok) throw new Error(`CDP new page failed: HTTP ${response.status}`)

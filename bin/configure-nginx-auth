@@ -20,11 +20,13 @@ case "${DSH_ACCESS_MODE:-local}" in
       printf 'auth_basic_user_file %s;\n' "$runtime_auth_file"
     } > "$output"
     ;;
-  local|trusted-proxy|'')
+  local|trusted-proxy|password|'')
+    # password 模式：认证由独立的 dsh-auth 网关在七层入口完成，容器内的 Nginx 不做
+    # 任何认证（否则会出现第二道无人能通过的锁）。与 local 一样只关掉 Basic Auth。
     printf '%s\n' 'auth_basic off;' > "$output"
     ;;
   *)
-    echo "[dsh] invalid DSH_ACCESS_MODE=${DSH_ACCESS_MODE}; expected local, trusted-proxy, or basic" >&2
+    echo "[dsh] invalid DSH_ACCESS_MODE=${DSH_ACCESS_MODE}; expected local, trusted-proxy, password, or basic" >&2
     exit 64
     ;;
 esac

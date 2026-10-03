@@ -311,6 +311,67 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
       dshInfoFailed: '读取 DSH 版本失败',
       diskUsageTabTitle: '磁盘占用',
       diskUsageTabDesc: '按方块面积查看各处占用，只有标为可清理的能删',
+      accountNavTitle: '账户',
+      accountTitle: '账户安全',
+      accountHint: '在这里管理自己的登录凭据。修改密码会立即注销全部登录，需要用新密码重新登录。',
+      accountUsername: '账户',
+      accountRole: '角色',
+      accountSingleUser: '单管理员',
+      accountLoading: '正在读取账户状态…',
+      accountFailed: '操作未完成',
+      accountCurrentPassword: '当前密码',
+      accountNewPassword: '新密码',
+      accountConfirmPassword: '确认新密码',
+      accountChangePassword: '修改密码',
+      accountPasswordTitle: '登录密码',
+      accountPasswordHint: '至少 12 位，且同时包含字母和数字。',
+      accountPasswordRequired: '请填写当前密码与新密码。',
+      accountPasswordMismatch: '两次输入的新密码不一致。',
+      accountPasswordWrong: '当前密码不正确。',
+      accountPasswordWeak: '密码至少 12 位，且同时包含字母和数字。',
+      accountPasswordUnchanged: '新密码不能与当前密码相同。',
+      accountTotpTitle: '两步验证（TOTP）',
+      accountTotpHint: '用验证器应用生成动态验证码。开启时会一次性给出恢复码，请离线保存。',
+      accountTotpState: '当前状态',
+      accountTotpOn: '已开启',
+      accountTotpOff: '未开启',
+      accountTotpStart: '开始开启',
+      accountTotpSecret: '密钥',
+      accountTotpUri: 'otpauth 地址',
+      accountTotpCode: '验证器当前显示的 6 位验证码',
+      accountTotpConfirm: '确认并开启',
+      accountTotpDisable: '关闭两步验证',
+      accountTotpEnabled: '两步验证已开启。恢复码只显示这一次，请立即保存。',
+      accountCodeWrong: '验证码不正确。',
+      accountCodeOrRecovery: '验证码或恢复码',
+      accountRecoveryLeft: '剩余恢复码 {n} 个',
+      accountRecoveryOnce: '恢复码只显示这一次，请立即保存到离线位置：',
+      accountPasskeyTitle: '通行密钥（Passkey）',
+      accountPasskeyHint: '用设备指纹、面容或系统 PIN 登录，可抵抗钓鱼。',
+      accountPasskeyUnavailable: '当前部署未启用通行密钥（需要固定 HTTPS 域名）。',
+      accountPasskeyEmpty: '还没有添加通行密钥。',
+      accountPasskeyName: '给这个通行密钥起个名字',
+      accountPasskeyNameRequired: '请先给它起个名字。',
+      accountPasskeyAdd: '添加通行密钥',
+      accountPasskeyAdded: '通行密钥已添加。',
+      accountPasskeyRemoved: '通行密钥已删除。',
+      accountPasskeyFailed: '通行密钥操作未完成。',
+      accountPasskeyCancelled: '已取消通行密钥验证。',
+      accountPasskeyAddedAt: '添加于 {time}',
+      accountPasskeyLastUsed: '最近使用 {time}',
+      accountPasskeyNeverUsed: '尚未使用',
+      accountDelete: '删除',
+      accountDeleteNeedsPassword: '删除时需要验证当前密码',
+      accountSessionsTitle: '登录会话',
+      accountSessionsHint: '这些是仍然有效的登录。发现不认识的来源就吊销它。',
+      accountSessionCurrent: '当前会话',
+      accountSessionRevoke: '吊销',
+      accountSessionRevoked: '已吊销该会话。',
+      accountSessionsRevokeOthers: '退出其他所有设备',
+      accountSessionsRevoked: '已退出其他设备。',
+      accountAdminTitle: '用户管理',
+      accountAdminHint: '停用账户、重置口令、轮换邀请码与查看审计。管理他人账户的界面刻意留在认证网关（容器之外），因此这里只提供入口。',
+      accountAdminOpen: '打开管理面板',
     }
 
     const en = {
@@ -376,6 +437,67 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
       dshInfoFailed: 'Could not read DSH version',
       diskUsageTabTitle: 'Disk usage',
       diskUsageTabDesc: 'Treemap of disk usage; only items marked cleanable can be removed',
+      accountNavTitle: 'Account',
+      accountTitle: 'Account security',
+      accountHint: 'Manage your own sign-in credentials here. Changing the password signs out every session.',
+      accountUsername: 'Account',
+      accountRole: 'Role',
+      accountSingleUser: 'single administrator',
+      accountLoading: 'Reading account state…',
+      accountFailed: 'The operation did not complete',
+      accountCurrentPassword: 'Current password',
+      accountNewPassword: 'New password',
+      accountConfirmPassword: 'Confirm new password',
+      accountChangePassword: 'Change password',
+      accountPasswordTitle: 'Sign-in password',
+      accountPasswordHint: 'At least 12 characters with both letters and digits.',
+      accountPasswordRequired: 'Enter the current and the new password.',
+      accountPasswordMismatch: 'The two new passwords do not match.',
+      accountPasswordWrong: 'The current password is incorrect.',
+      accountPasswordWeak: 'Use at least 12 characters with both letters and digits.',
+      accountPasswordUnchanged: 'The new password must differ from the current one.',
+      accountTotpTitle: 'Two-step verification (TOTP)',
+      accountTotpHint: 'Generate codes with an authenticator app. Enabling it shows one-time recovery codes; store them offline.',
+      accountTotpState: 'Status',
+      accountTotpOn: 'enabled',
+      accountTotpOff: 'not enabled',
+      accountTotpStart: 'Set up',
+      accountTotpSecret: 'Secret',
+      accountTotpUri: 'otpauth URI',
+      accountTotpCode: 'The 6-digit code your authenticator shows',
+      accountTotpConfirm: 'Confirm and enable',
+      accountTotpDisable: 'Disable two-step verification',
+      accountTotpEnabled: 'Two-step verification is on. Recovery codes are shown once — save them now.',
+      accountCodeWrong: 'That code is not valid.',
+      accountCodeOrRecovery: 'Code or recovery code',
+      accountRecoveryLeft: '{n} recovery codes left',
+      accountRecoveryOnce: 'Recovery codes are shown once. Save them somewhere offline now:',
+      accountPasskeyTitle: 'Passkeys',
+      accountPasskeyHint: 'Sign in with a device PIN, fingerprint or face; resistant to phishing.',
+      accountPasskeyUnavailable: 'Passkeys are not enabled on this deployment (a fixed HTTPS domain is required).',
+      accountPasskeyEmpty: 'No passkeys yet.',
+      accountPasskeyName: 'Name this passkey',
+      accountPasskeyNameRequired: 'Give it a name first.',
+      accountPasskeyAdd: 'Add a passkey',
+      accountPasskeyAdded: 'Passkey added.',
+      accountPasskeyRemoved: 'Passkey deleted.',
+      accountPasskeyFailed: 'The passkey operation did not complete.',
+      accountPasskeyCancelled: 'Passkey verification was cancelled.',
+      accountPasskeyAddedAt: 'added {time}',
+      accountPasskeyLastUsed: 'last used {time}',
+      accountPasskeyNeverUsed: 'never used',
+      accountDelete: 'Delete',
+      accountDeleteNeedsPassword: 'Deleting requires your current password',
+      accountSessionsTitle: 'Sessions',
+      accountSessionsHint: 'These sign-ins are still valid. Revoke any you do not recognise.',
+      accountSessionCurrent: 'current session',
+      accountSessionRevoke: 'Revoke',
+      accountSessionRevoked: 'Session revoked.',
+      accountSessionsRevokeOthers: 'Sign out other devices',
+      accountSessionsRevoked: 'Signed out the other devices.',
+      accountAdminTitle: 'User management',
+      accountAdminHint: 'Disable accounts, reset passwords, rotate the invite code and read the audit log. Managing other accounts deliberately stays in the gateway, outside this container, so only a link is offered here.',
+      accountAdminOpen: 'Open the admin panel',
     }
 
     function fallbackText(key) {
@@ -1892,6 +2014,97 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
       return h(RestartActionBoundary, null, h(DiskUsagePanel))
     }
 
+    // --- Account management --------------------------------------------------
+    // 账户界面本身不在这里：它是容器外 dsh-auth 提供的 /account-panel.js，
+    // 由下面这个分区在运行时加载并挂载。
+    //
+    // 为什么不把它写成插件自己的组件：插件的客户端产物位于容器内、属主是 dsh，
+    // Agent 以同一身份运行因而可以改写它。让渲染凭据输入的代码从容器外的网关取回，
+    // 至少把「这段代码由谁提供」放回了受保护的一侧；容器内只剩一个宿主元素。
+    //
+    // 管理员账户的安全设置不在这里：多用户模式下它属于管理面板（同样在容器外），
+    // 因此这里对 root 只给一个入口。
+    const ACCOUNT_PANEL_PATH = '/account-panel.js'
+    let accountPanelLoading = null
+
+    /** 加载共享账户面板脚本（幂等）。 */
+    function loadAccountPanel() {
+      if (window.DSHAccountPanel) return Promise.resolve()
+      if (accountPanelLoading) return accountPanelLoading
+      accountPanelLoading = new Promise((resolve, reject) => {
+        const script = document.createElement('script')
+        script.src = ACCOUNT_PANEL_PATH
+        script.async = true
+        script.addEventListener('load', () => resolve())
+        script.addEventListener('error', () => {
+          accountPanelLoading = null
+          reject(new Error('cannot load ' + ACCOUNT_PANEL_PATH))
+        })
+        document.head.appendChild(script)
+      })
+      return accountPanelLoading
+    }
+
+    function probeAuthGateway() {
+      return fetch('/api/auth/status', { cache: 'no-store', credentials: 'same-origin' })
+        .then(response => (response.ok ? response.json() : null))
+        .then(body => (body && body.ok === true ? body : null))
+        .catch(() => null)
+    }
+
+    function requestSession() {
+      return fetch('/api/auth/session', { cache: 'no-store', credentials: 'same-origin' })
+        .then(response => (response.ok ? response.json() : null))
+        .catch(() => null)
+    }
+
+    function AccountSection({ t }) {
+      const host = React.useRef(null)
+      const [mode, setMode] = React.useState('loading')   // loading | panel | admin | unavailable
+      const [failure, setFailure] = React.useState(null)
+
+      React.useEffect(() => {
+        let cancelled = false
+        Promise.all([requestSession(), probeAuthGateway()]).then(([session, status]) => {
+          if (cancelled) return
+          if (status === null || session === null) {
+            setMode('unavailable')
+            return
+          }
+          // 多用户模式下管理员管的是别人，安全设置随管理面板走，这里只给入口。
+          if (status.multiUser === true && session.user && session.user.role === 'root') {
+            setMode('admin')
+            return
+          }
+          setMode('panel')
+          return loadAccountPanel()
+            .then(() => {
+              if (cancelled || !host.current || !window.DSHAccountPanel) return
+              return window.DSHAccountPanel.mount(host.current, {})
+            })
+            .catch(cause => { if (!cancelled) setFailure(describeError(cause)) })
+        })
+        return () => { cancelled = true }
+      }, [])
+
+      if (mode === 'unavailable') return null
+      if (mode === 'admin') {
+        return h('div', { className: 'dsh-account-admin' }, [
+          h('p', { key: 'hint' }, translate(t, 'accountAdminHint')),
+          h(Button, { key: 'open', variant: 'outline', size: 'sm', onClick: () => window.open('/admin', '_blank', 'noopener') },
+            translate(t, 'accountAdminOpen')),
+        ])
+      }
+      if (failure) {
+        return h('p', { className: 'dsh-account-admin' }, `${translate(t, 'accountFailed')}: ${failure}`)
+      }
+      return h('div', { ref: host, className: 'dsh-account-host' })
+    }
+
+    function SafeAccountSection(props) {
+      return h(RestartActionBoundary, null, h(AccountSection, props))
+    }
+
     function apply(ctx) {
       const fail = (phase, error) => {
         console.error(`[dsh-docker-control] ${phase} failed:`, error)
@@ -1939,6 +2152,23 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
           label: () => fallbackText('navTitle'),
           locale: NS,
         }, SafeDshEnvironmentSection))
+
+        // 账户分区：只在真的有认证网关时才注册（basic/local/trusted-proxy 没有账户体系）。
+        // 探测失败就不注册，避免留一个点了没反应的导航项。
+        ctx.effect(() => {
+          let disposed = false
+          probeAuthGateway().then(status => {
+            if (disposed || status === null) return
+            ctx.slots.inject('settings.section', () => ctx.slots.register({
+              name: 'settings.section',
+              id: 'dsh-account',
+              order: 70,
+              label: () => fallbackText('accountNavTitle'),
+              locale: NS,
+            }, SafeAccountSection))
+          })
+          return () => { disposed = true }
+        })
 
         // Always mounted, painted only by the phone layout: the drawer hides
         // the shell's rail, and with it the shell's own expand button.

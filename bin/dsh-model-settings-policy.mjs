@@ -211,7 +211,8 @@ export function normalizeModelIds(models) {
  * @param request.models 用户填的模型清单：id 字符串，或 { id, input, reasoningEfforts } 记录
  * @param request.reasoningEfforts 整条上游的默认档位（老配置的形状；模型自己声明了就以自己那份为准）
  * @param request.brokerBase 密钥代理的 base（http://dsh-key-broker:8080）
- * @param request.catalog 目录快照：{ [id]: { api, models: [id] } }
+ * @param request.catalog 目录快照
+ * @param request.extraHeaders 每条生成路由都要带的请求头（例如实例身份令牌）：{ [id]: { api, models: [id] } }
  * @param request.sync 模型清单是不是"以这次给的为准"（面板保存时是；安装器不问模型清单，
  *   所以它保持"只在缺失时写"的老口径，免得把用户在 WebUI 里改过的清单冲掉）
  * @returns 可写入时返回 ok:true 与字段计划（models 是 id 列表，modelEntries 是每条模型
@@ -258,7 +259,10 @@ export function planProvider(request) {
   // baseURL / apiKeyEnv 由密钥代理的部署形态决定，用户在 WebUI 里改它们只会让
   // 请求绕开代理或找不到密钥，所以这两项每次都写成当前部署的值；其余字段属于
   // 用户，只在缺失时补。
-  const always = { baseURL, apiKeyEnv }
+  //
+  // extraHeaders 同理：它是部署事实（例如实例身份令牌），必须每次覆盖——否则用户
+  // 误删之后就再也发不出被代理认可的请求，而现象只是「模型突然都用不了」。
+  const always = { baseURL, apiKeyEnv, ...(request.extraHeaders ? { headers: { ...request.extraHeaders } } : {}) }
   const whenMissing = {}
 
   if (catalogEntry) {
@@ -355,6 +359,7 @@ export function planSeed(request) {
       sync: upstream.sync === true,
       brokerBase: request.brokerBase,
       catalog: request.catalog,
+      extraHeaders: request.extraHeaders,
     })
     if (!plan.ok) {
       skipped.push({ name: plan.name, reason: plan.reason })

@@ -1,0 +1,184 @@
+# 多用户模式叠加层。用法：
+#
+#   docker compose -f docker-compose.yml -f docker-compose.multiuser.yml up -d
+#
+# 它做三件事：
+#   1. 停用 dsh 服务自己发布 3080，改由七层入口 dsh-ingress 承担（认证 + 按身份路由）；
+#   2. 新增 dsh-auth（认证网关）与 dsh-instances（实例编排，唯一持有 docker.sock）；
+#   3. 把原 dsh 容器作为管理员工作台，在网络里别名 dsh-admin，与 root 账户对应。
+#
+# 用户实例由 dsh-instances 按需创建，不在此文件中静态声明，也不发布任何宿主端口。
+
+services:
+  dsh:
+    # 管理员工作台：不再直接对外，入口统一走 dsh-ingress。
+    ports: !override []
+    networks:
+      default:
+      dsh-private:
+        aliases:
+          - dsh-admin
+      dsh-internal:
+    environment:
+      # password 模式：认证由 dsh-auth 网关在七层入口完成，容器内 nginx 不做认证。
+      DSH_ACCESS_MODE: "password"
+      DSH_ADMIN_INSTANCE_NAME: "dsh-admin"
+
+  # 增量覆盖 docker-compose.auth.yml 里的认证网关：多用户模式需要它同时接入控制面
+  # 网络（用于调用实例编排），并声明自己是多用户部署。完整定义留在 auth 层，避免
+  # 同一个服务在两处各写一份、字段悄悄分叉。
+  dsh-auth:
+    networks:
+      - dsh-private
+      - dsh-mgmt
+      # 读密钥代理的上游清单（管理界面的「模型开放」要列出可选上游）。
+      # 只读它的 /status，不接触密钥。
+      - dsh-internal
+    environment:
+      DSH_MULTI_USER: "on"
+      DSH_REGISTER_GATE: "${DSH_REGISTER_GATE:-open}"
+      DSH_AUTH_WORKSPACE: "on"
+      DSH_INSTANCES_URL: "http://dsh-instances:8092"
+      DSH_INSTANCES_TOKEN_FILE: "/data/auth/instances.token"
+      DSH_AUTH_MAX_REGISTRATIONS_PER_IP: "${DSH_MAX_REGISTRATIONS_PER_IP:-5}"
+      # 密钥代理地址：管理界面据此列出可开放的上游，并写入授权表供代理读取
+      DSH_BROKER_URL: "${DSH_MODEL_BROKER_BASE:-http://dsh-key-broker:8080}"
+      DSH_BROKER_GRANTS_FILE: "/data/auth/broker-grants.json"
+      DSH_BROKER_KEYS_FILE: "/data/broker/keys.json"
+      DSH_BROKER_TOKENS_FILE: "/data/auth/broker-tokens.json"
+      # 入口↔网关共享密钥：与 dsh-ingress 同值（auth 层的 dsh-auth 已带同一变量的默认）。
+      DSH_AUTH_INGRESS_TOKEN: "${DSH_AUTH_INGRESS_TOKEN:-}"
+
+  # 增量覆盖 docker-compose.keys.yml 里的密钥代理：多用户模式下它还要接入实例
+  # 网络——每个用户实例的模型请求都指向 http://dsh-key-broker:8080（代理按实例
+  # 令牌识别调用者并只放行被开放的上游）。真实密钥仍然只在代理容器里被使用。
+  dsh-key-broker:
+    networks:
+      - dsh-instances-net
+
+  dsh-instances:
+    # 只有多用户模式才有实例编排与七层入口。
+    profiles: ["multiuser"]
+    image: "${DSH_IMAGE:-dsh:local}"
+    container_name: dsh-instances
+    hostname: dsh-instances
+    # 唯一持有 docker.sock 的组件，因此必须以 root 运行（创建容器、chown 用户数据树）。
+    # 它不含用户数据、不跑 Agent，且只在 dsh-mgmt 内网接受带令牌的调用。
+    user: "0:0"
+    restart: unless-stopped
+    entrypoint: ["node", "/usr/local/lib/dsh/dsh-instances.mjs"]
+    networks:
+      - dsh-mgmt
+    environment:
+      DSH_INSTANCES_LISTEN: "0.0.0.0:8092"
+      # 自身容器名：编排服务 inspect 自己的挂载表，把容器内的 /data/users 映射回宿主
+      # 路径——docker run -v 的 source 是由守护进程在宿主上解析的。
+      DSH_INSTANCES_SELF_NAME: "dsh-instances"
+      # 自动推导失败时的兜底：data/users 在宿主上的绝对路径。
+      DSH_HOST_USERS_DIR: "${DSH_HOST_USERS_DIR:-}"
+      # 实例数据后端：bind（宿主目录，适合 Linux）或 volume（Docker 卷）。
+      # Windows/macOS 的绑定挂载无法表达文件属主，镜像入口对齐属主时会失败，必须用 volume。
+      DSH_INSTANCE_STORAGE: "${DSH_INSTANCE_STORAGE:-bind}"
+      # 模型上游授权表与实例令牌：由 dsh-auth 写、编排服务读
+      DSH_BROKER_GRANTS_FILE: "/data/auth/broker-grants.json"
+      DSH_BROKER_TOKENS_FILE: "/data/auth/broker-tokens.json"
+      DSH_BROKER_URL: "${DSH_MODEL_BROKER_BASE:-http://dsh-key-broker:8080}"
+      DSH_BROKER_PLACEHOLDER_KEY: "${DSH_BROKER_PLACEHOLDER_KEY:-dsh-broker-placeholder}"
+      DSH_INSTANCES_STATE: "/data/auth/instances.json"
+      DSH_INSTANCES_TOKEN_FILE: "/data/auth/instances.token"
+      DSH_USERS_DIR: "/data/users"
+      DSH_INSTANCE_IMAGE: "${DSH_IMAGE:-dsh:local}"
+      # 实例网络：专用的 dsh-instances-net（见文件末尾该网络的声明），不再与
+      # dsh-private（管理员工作台 + 认证网关所在）共用。审计实测：共用时任一用户
+      # 容器都能按名解析 dsh-admin / dsh-auth 并直连 3080/8091，实例内 nginx 在
+      # password 模式下不做认证，跨租户读写因此成立。
+      DSH_INSTANCE_NETWORK: "${DSH_INSTANCE_NETWORK:-dsh-instances-net}"
+      DSH_INSTANCE_MEMORY_MB: "${DSH_INSTANCE_MEMORY_MB:-200}"
+      DSH_IDLE_TIMEOUT_SECONDS: "${DSH_IDLE_TIMEOUT_SECONDS:-1800}"
+      DSH_USER_DISK_QUOTA_BYTES: "${DSH_USER_DISK_QUOTA_BYTES:-5368709120}"
+      DSH_INSTANCES_SWEEP_SECONDS: "${DSH_INSTANCES_SWEEP_SECONDS:-30}"
+    volumes:
+      # 只挂 docker.sock 这一条宿主控制通道；用户数据目录以读写挂入以便 chown 与清理。
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/users:/data/users
+      - ./data/auth:/data/auth
+      # 代理的密钥配置：只读其中「上游名与模型清单」，用来填实例的模型路由。
+      # 真实密钥仍只在代理容器里被使用。
+      - ./data/broker:/data/broker:ro
+      # 授权表与令牌明文由 dsh-auth 写在同一目录；编排服务读它们来决定每个实例
+      # 能拿到哪些模型上游。这里已经是 data/auth 的挂载，无需额外卷。
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8092/healthz').then(r=>process.exit(r.status===204?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  dsh-ingress:
+    # 与 dsh-authgate 争用同一个宿主端口，靠 profile 二选一。
+    profiles: ["multiuser"]
+    image: "${DSH_IMAGE:-dsh:local}"
+    container_name: dsh-ingress
+    hostname: dsh-ingress
+    # 七层入口：认证交给 dsh-auth，按会话身份把请求转发到对应用户实例。
+    user: "0:0"
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # 配置里已经写了 daemon off，不能再从命令行重复传入（nginx 会报 duplicate directive）。
+        # 入口↔网关共享密钥：渲染进运行时 include（配置本体不落密钥），verify 子请求带上它。
+        mkdir -p /tmp/dsh-nginx
+        printf 'set $$dsh_ingress_token "%s";\n' "${DSH_AUTH_INGRESS_TOKEN:-}" > /tmp/dsh-nginx/ingress-token.conf
+        exec nginx -c /usr/local/share/dsh/nginx-multiuser.conf
+    environment:
+      DSH_AUTH_INGRESS_TOKEN: "${DSH_AUTH_INGRESS_TOKEN:-}"
+    ports:
+      - "${DSH_BIND_HOST:-127.0.0.1}:${DSH_HTTP_PORT:-3080}:3080"
+    networks:
+      # dsh-private：到认证网关（auth_request）与管理员工作台（dsh-admin 别名）。
+      # dsh-instances-net：到各用户实例（proxy_pass http://$dsh_instance:3080）。
+      # dsh-internal：保持与密钥代理等内部组件的既有连通性。
+      - dsh-private
+      - dsh-internal
+      - dsh-instances-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/healthz').then(r=>process.exit(r.status===204?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  # 控制面网络：只有认证网关与实例编排之间通信，用户实例不在其中。
+  dsh-mgmt:
+    name: "${DSH_MGMT_NETWORK:-dsh-mgmt}"
+    internal: true
+  # 用户实例专属网络：成员只有用户实例、七层入口与密钥代理。
+  #
+  # 为什么必须与管理员工作台/认证网关分开：实例内 nginx 在 password 模式下不做
+  # 认证（认证全在入口侧），Docker 的容器间通信又默认放行——共用一张网络时，
+  # 任一用户容器都能按名解析 dsh-admin / dsh-auth 并直连 3080/8091。审计实测：
+  # 从普通用户的实例对管理员的 settings.yaml 读写在无凭据的情况下成功。
+  #
+  # 这张网络只作为「模板与兜底」存在：编排服务会为每个实例另建一张专属网络，
+  # 把入口与密钥代理接进去，而**不把其它实例接进去**。实测确认：不同网络之间
+  # 默认隔离（连按 IP 直连也被阻断），而多归属的入口能同时到达所有实例。
+  #
+  # 不能改用 enable_icc=false 来达到同样目的：它会阻断同一网桥上的**所有**容器对，
+  # 包括入口→实例这条必需路径，结果是全站不可用（已实测）。
+  # 不设 internal: true：open 出站模式下实例需要直接出网（隔离模式经 dsh-egress）。
+  dsh-instances-net:
+    name: "${DSH_INSTANCE_NETWORK:-dsh-instances-net}"

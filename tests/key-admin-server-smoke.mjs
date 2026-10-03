@@ -19,6 +19,7 @@ const work = mkdtempSync(join(tmpdir(), 'dsh-key-admin-'))
 const configPath = join(work, 'keys.json')
 const tokenPath = join(work, 'admin.token')
 const seedPayloadPath = join(work, 'seed-payload.json')
+const seedArgvPath = join(work, 'seed-argv.json')
 const egressPolicyPath = join(work, 'egress-policy.json')
 const seedScript = join(work, 'stub-seed.mjs')
 const dshHome = join(work, 'dsh')
@@ -29,14 +30,27 @@ const port = 19300 + Math.floor(Math.random() * 400)
 mkdirSync(dshHome, { recursive: true })
 writeFileSync(tokenPath, token + '\n', { mode: 0o600 })
 // seed 的替身：把收到的载荷原样落盘，让测试能断言"密钥没进来"。
+// 新契约（TOCTOU 修复后）：面板进程自己读写目标文件，子进程只做纯变换——
+// 不传 --home，子进程绝不再按路径名打开任何东西；它读 stdin 里的 settingsText/
+// credentialsText，回传 JSON 结果（与 bin/seed-dsh-model-settings.mjs 的无 --home
+// 模式同一形状）。替身还把 argv 落盘，供断言「没有 --home」。
 writeFileSync(seedScript, [
   "import { writeFileSync } from 'node:fs'",
   "import process from 'node:process'",
   "const chunks = []",
   "process.stdin.on('data', (chunk) => chunks.push(chunk))",
   "process.stdin.on('end', () => {",
-  "  writeFileSync(process.env.STUB_SEED_OUT, Buffer.concat(chunks).toString('utf8'))",
-  "  process.stdout.write('    - stub：已写入 ' + process.argv.slice(2).join(' ') + '\\n')",
+  "  const text = Buffer.concat(chunks).toString('utf8')",
+  "  writeFileSync(process.env.STUB_SEED_OUT, text)",
+  "  writeFileSync(process.env.STUB_ARGV_OUT, JSON.stringify(process.argv.slice(2)))",
+  "  const payload = JSON.parse(text || '{}')",
+  "  process.stdout.write(JSON.stringify({",
+  "    written: [{ name: 'stub', source: 'catalog', provider: 'stub', models: [], api: '' }],",
+  "    removed: [], reclaimedRefs: [], defaultModel: null, skipped: [],",
+  "    validationFailure: '',",
+  "    settingsText: payload.settingsText ?? '',",
+  "    credentialsText: payload.credentialsText ?? '',",
+  "  }))",
   "})",
 ].join('\n'))
 
@@ -55,6 +69,7 @@ const server = spawn(process.execPath, [join(root, 'bin/dsh-key-admin.mjs')], {
     // 部署形态给 blocklist：面板要照这个给默认策略，保存时也不该提示「当前是 open」。
     DSH_EGRESS_MODE: 'blocklist',
     STUB_SEED_OUT: seedPayloadPath,
+    STUB_ARGV_OUT: seedArgvPath,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 })
@@ -174,7 +189,8 @@ try {
   assert.equal(saved.status, 200, saved.text)
   assert.equal(saved.payload.name, 'deepseek')
   assert.equal(saved.payload.seed.failed, false, saved.text)
-  assert.match(saved.payload.seed.output, /stub：已写入 --home/)
+  // 摘要由面板进程根据回传的 JSON 组装（不再透传子进程 stdout）。
+  assert.match(saved.payload.seed.output, /stub：/, 'panel renders the seed summary from the returned JSON')
   assert.equal(saved.text.includes(realKey), false, '响应里不能出现密钥')
 
   const document = JSON.parse(readFileSync(configPath, 'utf8'))
@@ -210,6 +226,14 @@ try {
   }])
   assert.equal(seedPayload.placeholder, 'dsh-broker-placeholder')
   assert.equal(seedPayload.brokerBase, 'http://dsh-key-broker:8080')
+  // 新契约：面板进程自己读目标文件，把文本放进载荷；子进程不按路径名打开任何东西。
+  assert.ok(typeof seedPayload.settingsText === 'string', '载荷要带 settingsText（面板自己读的）')
+  assert.ok(typeof seedPayload.credentialsText === 'string', '载荷要带 credentialsText（面板自己读的）')
+  // TOCTOU 修复的核心断言：子进程绝不拿到 --home（否则它会按路径名重开目标，
+  // 守卫与读取之间就存在被符号链接赢掉的窗口）。
+  const seedArgv = JSON.parse(readFileSync(seedArgvPath, 'utf8'))
+  assert.equal(seedArgv.includes('--home'), false, 'seed 子进程不得再收到 --home')
+  assert.deepEqual(seedArgv, [], 'seed 子进程不应有任何额外参数')
 
   // 页面重新拉状态时只看到指纹，看不到密钥。
   const listed = await call('/api/state')

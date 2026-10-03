@@ -55,7 +55,12 @@ delete_project
 `
 
 try {
-  const result = spawnSync(bash, ['-c', harness, 'dsh-delete-smoke', bashPath(project), bashPath(dockerLog), bashPath(sandbox)], {
+  // 用脚本文件而不是 -c 传 harness：这个字符串约 8KB 且含中文与引号密集的
+  // case 分支，经 Windows 的命令行编码传递会被破坏（表现为 line N: unexpected
+  // EOF while looking for matching quote——新旧被测代码同样失败，文件方式则完全正常）。
+  const harnessFile = join(sandbox, 'dsh-delete-smoke.sh')
+  await writeFile(harnessFile, harness, 'utf8')
+  const result = spawnSync(bash, [bashPath(harnessFile), bashPath(project), bashPath(dockerLog), bashPath(sandbox)], {
     cwd: sandbox,
     encoding: 'utf8',
   })
@@ -108,7 +113,9 @@ for (const relative of [...keepPaths, ...gonePaths]) {
 }
 
 try {
-  const result = spawnSync(bash, ['-c', harness, 'dsh-delete-smoke', bashPath(keepProject), bashPath(keepLog), bashPath(keepSandbox)], {
+  const harnessFile = join(keepSandbox, 'dsh-delete-keep-smoke.sh')
+  await writeFile(harnessFile, harness, 'utf8')
+  const result = spawnSync(bash, [bashPath(harnessFile), bashPath(keepProject), bashPath(keepLog), bashPath(keepSandbox)], {
     cwd: keepSandbox,
     encoding: 'utf8',
     env: { ...process.env, DSH_DELETE_KEEP: '1' },

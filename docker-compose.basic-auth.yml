@@ -1,0 +1,14 @@
+# 只在 DSH_ACCESS_MODE=basic 时叠加（由 install.sh / install.ps1 / dsh.sh 按访问模式加入）。
+#
+# 容器内唯一的消费者是 bin/configure-nginx-auth：它只读 /opt/dsh-auth/htpasswd。
+# 早期版本把整个 ./data/auth 目录挂了进来，那会把 state.json（全部 Argon2id 哈希与
+# 会话摘要）、totp.key（AES-GCM 主密钥）、instances.token 和明文的每用户 broker 令牌
+# 一并暴露给容器内的 Agent——它与 DSH 同 uid（1000），0600 形同虚设；审计实测用主
+# 密钥解出了全部账户的 TOTP 密钥。改成只挂那一个文件，且只在需要它的 basic 模式挂。
+#
+# 前置条件：叠加此文件前 data/auth/htpasswd 必须已存在（basic 模式的安装流程总会
+# 先写好它）；对不存在的文件做 bind 挂载会让 Docker 在宿主上造出一个目录。
+services:
+  dsh:
+    volumes:
+      - ./data/auth/htpasswd:/opt/dsh-auth/htpasswd:ro

@@ -258,6 +258,61 @@ curl -k -i -H "Host: <你的域名>" https://<源站IP>/
 
 若继续保留 trusted-proxy，请在**宿主机网络层**把 443 限制为只接受外层入口的来源地址（例如 Cloudflare 官方网段），不要依赖面板里的扩展 Nginx 配置 —— 那类配置需要 reload 才生效，且硬编码网段会因对方扩容而误伤正常用户。
 
+## 多用户模式
+
+多用户模式（`DSH_MULTI_USER=on`，见 `docs/auth-design.md`）改变了入口与信任边界，这里单独说明。
+
+### 拓扑
+
+```mermaid
+flowchart TB
+    browser["浏览器"] --> ingress["dsh-ingress（七层入口，唯一发布宿主端口）"]
+    ingress -->|"auth_request"| auth["dsh-auth（认证网关）"]
+    ingress -->|"按 X-DSH-Instance 路由"| u1["用户实例 dsh-u1"]
+    ingress -->|"按 X-DSH-Instance 路由"| admin["管理员工作台 dsh-admin"]
+    auth -->|"Bearer 令牌，仅 dsh-mgmt 内网"| instances["dsh-instances（唯一持有 docker.sock）"]
+    instances -->|"创建 / 启停用户实例"| u1
+    u1 --> broker["dsh-key-broker（真实模型密钥）"]
+    admin --> broker
+```
+
+### 与单管理员模式的差别
+
+- **认证在入口侧**：容器内 Nginx 关闭 Basic Auth（`DSH_ACCESS_MODE=password`），所有到达实例的请求都已由网关判定过身份。用户实例不发布任何宿主端口，只能从入口进入。
+- **每账户一个容器**：会话、文件与进程按账户隔离，用户之间不存在共享卷。这是「文件属主隔离」能真正生效的前提——权限跟着进程身份走，而每个实例只有自己的身份。
+- **实例网络隔离**：用户实例在专用的 `dsh-instances-net` 上（成员只有用户实例、七层入口与密钥代理），与管理员工作台（`dsh-admin`）、认证网关所在的 `dsh-private` 物理隔离。实例内 nginx 在 password 模式下不做认证，隔离靠的是网络边界而不是每实例的凭据——共用一张网络时审计实测普通用户容器可对管理员工作台读写在无凭据的情况下成立。
+- **控制面网络**：`dsh-mgmt` 是 `internal: true` 的网络，只承载认证网关与实例编排之间的调用，用户实例不在其中，因此容器内进程无法直接调用编排接口。
+
+### docker.sock 例外
+
+`dsh-instances` 必须持有 `/var/run/docker.sock` 才能创建与启停实例。持有它等于具备容器 root 等价能力，因此按以下四条收敛：
+
+1. 该容器不含用户数据、不跑 Agent、不挂载任何 `data/users` 以外的敏感目录（它需要 `data/users` 来做 chown 与清理）。
+2. 它只在 `dsh-mgmt` 内网监听，且每个请求都要求 `Bearer` 令牌（令牌是 0600 文件，只有它与 `dsh-auth` 能读）。
+3. 接口只接受实例模板相关操作（ensure / state / touch / stop / delete），不接受任意命令、镜像或路径参数；被创建的容器规格由策略层固定（`cap_drop ALL`、非 root、200MB、只读根、无 socket）。
+4. 用户实例一律不带 socket，因此容器内的 Agent 拿不到这条提权路径。
+
+**这条例外的风险是真实的**：谁能向 `dsh-instances` 发请求，谁就能让宿主创建容器。令牌泄露或该服务被攻破等同于宿主机被攻破；这也正是把它与用户实例彻底隔离在不同网络的原因。
+
+### 自检
+
+```sh
+# 1. 用户实例不得发布宿主端口（应只看到入口一个映射）
+docker ps --format '{{.Names}}\t{{.Ports}}'
+
+# 2. 用户实例内不得存在 docker socket
+docker exec dsh-u1 ls -l /var/run/docker.sock   # 期望：No such file or directory
+
+# 3. 编排接口必须要求令牌
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8092/instances   # 期望：401
+
+# 4. 编排接口不得从用户实例内可达
+docker exec dsh-u1 node -e "fetch('http://dsh-instances:8092/healthz').then(r=>console.log(r.status)).catch(e=>console.log('unreachable'))"
+
+# 5. 匿名访问必须被挡在登录页
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' http://127.0.0.1:3080/   # 期望：302 .../login?redirect=/
+```
+
 ## 已知限制
 
 - **trusted-proxy 模式没有应用层锁**：认证完全依赖外层，直连源站即绕过。自检方法见上一节。
@@ -266,6 +321,9 @@ curl -k -i -H "Host: <你的域名>" https://<源站IP>/
 - **卸载保护是按包名的白名单**：只覆盖启动链依赖的包，名单外的包被卸载仍可能导致功能不可用。级联绕过依靠执行前的 `apt -s` 模拟拦截，模拟与真实执行之间理论上存在时间差。
 - **密钥代理不保护额度与数据**：只保证密钥字面值不出容器，被注入的 Agent 仍可消耗额度并把数据发往上游，只能用限速与配额压低上限。
 - **密钥代理不对客户端做认证**：能连上 `dsh-internal` 的进程都能通过它发请求。
+- **多用户模式下 `dsh-instances` 持有 docker socket**：它是这一模式的固有代价，收敛措施与残余风险见上一节「docker.sock 例外」。该服务被攻破或令牌泄露等同于宿主机被攻破。
+- **多用户模式不做应用内隔离**：每个账户有自己的容器与会话，但没有「同一实例内的多租户」这回事；所有账户的实例镜像与配置来自同一份模板，账户之间唯一的信任边界是容器边界。
+- **多用户模式没有自助找回**：没有邮箱验证通道，忘记口令只能靠通行密钥或管理员在管理面板重置。
 - **出站白名单只按域名判定**：已包含 DNS 解析结果校验，但代理不做 TLS 中间人，放行域名下的任意路径都可访问；例如放行 `github.com` 也就放行了向它上传内容的接口。
 - **出站黑名单是启发式清单**：只降低顺手起一条公网隧道的概率，自建域名的 frp 或自己的 VPS 挡不住；真正的出站边界只有 `allowlist`。
 - **真正的第一道防线是不把不可信内容交给 Agent**：以上各层只缩小注入成功后的后果。

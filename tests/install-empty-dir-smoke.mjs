@@ -35,6 +35,7 @@ if [ "$1" = clone ]; then
   mkdir -p "$3/bin"
   printf '%s\\n' '// seed stub' > "$3/bin/seed-dsh-model-settings.mjs"
   printf '%s\\n' 'services: {}' > "$3/docker-compose.isolated.yml"
+  printf '%s\\n' 'services: {}' > "$3/docker-compose.basic-auth.yml"
   exit 0
 fi
 exit 0

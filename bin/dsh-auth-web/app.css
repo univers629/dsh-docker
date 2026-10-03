@@ -1,0 +1,480 @@
+  :root {
+    color-scheme: dark;
+    --brand: #4d6bfe;
+    --brand-strong: #3964fe;
+    --brand-bright: #679efe;
+    --brand-soft: rgba(77, 107, 254, 0.16);
+    --text: #eef2ff;
+    --text-soft: #b8c0d4;
+    --muted: #8b93a7;
+    --border: rgba(255, 255, 255, 0.10);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --surface: rgba(20, 24, 38, 0.55);
+    --surface-2: rgba(255, 255, 255, 0.045);
+    --danger: #ff6b7a;
+    --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+    --radius-lg: 22px;
+    --font: "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    /* ===== 控件尺寸 token：输入框、下拉、按钮共用一套，不允许各自为政 =====
+       曾经有三套（app.css 的 13/15/15px、账户面板自带的 9/11/12.5px、设置项裸继承
+       16px），同一个管理面板里出现三种输入框高度与圆角。所有输入类控件统一引用这里。 */
+    --control-height: 44px;
+    --control-radius: 12px;
+    --control-font: 14.5px;
+    --control-pad-x: 14px;
+    /* 行内小按钮（.mini）的尺寸：表格行操作与保存按钮共用。
+       默认保持紧凑（表格里每行三个按钮，做高会把行撑开）；与输入框同排时用
+       .mini--field 提升到 --control-height，使一行里的矩形高度一致。 */
+    --mini-height: 30px;
+    --mini-radius: 8px;
+    /* 字段容器：标签与输入框之间的间距、标签字号 */
+    --field-gap: 8px;
+    --field-label: 13px;
+  }
+
+  /* 浅色模式：同一套布局与材质，只换配色 */
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --brand: #3964fe;
+    --brand-strong: #2f55e8;
+    --brand-bright: #3964fe;
+    --brand-soft: rgba(57, 100, 254, 0.12);
+    --text: #172554;
+    --text-soft: #46557a;
+    --muted: #6b7a99;
+    --border: rgba(23, 37, 84, 0.12);
+    --border-strong: rgba(23, 37, 84, 0.20);
+    --surface: rgba(255, 255, 255, 0.72);
+    --surface-2: rgba(23, 37, 84, 0.04);
+    --danger: #d92d43;
+    --shadow: 0 20px 50px rgba(23, 37, 84, 0.16);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  html {
+    /* 点按灰/蓝闪是最响的"这是网页"信号；关掉后每个可点元素自己给 :active 按压态 */
+    -webkit-tap-highlight-color: transparent;
+    /* 横向文字膨胀会打乱版式 */
+    -webkit-text-size-adjust: 100%;
+    /* app 形态不要下拉刷新与整页橡皮筋 */
+    overscroll-behavior-y: none;
+  }
+  body {
+    margin: 0;
+    font-family: var(--font);
+    color: var(--text);
+    background: #0b0e17;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    transition: background .3s var(--ease-out), color .3s var(--ease-out);
+  }
+
+  /* ===== 移动平台基线 ===== */
+  /* 控件不做文本选择、不要长按呼出菜单；正文（表格数据、错误信息）保持可复制 */
+  button, a, [role="button"], .tabs button, .mini, .seg button, .icon-btn, .pill, .captcha-slot label {
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+  /* iOS 在输入字号 <16px 时聚焦会整页放大且不回弹——16px 是唯一正解，不要 maximum-scale */
+  @media (pointer: coarse) {
+    input, textarea, select { font-size: 16px; }
+  }
+  /* 悬停只属于精确指针：触屏点按会留下卡死的 :hover 态 */
+  @media (hover: hover) and (pointer: fine) {
+    .seg button:hover { color: var(--text); }
+    .icon-btn:hover { border-color: var(--border-strong); background: var(--brand-soft); }
+    .gh-link:hover { color: var(--text); border-color: var(--border-strong); background: var(--brand-soft); }
+    .button--primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 14px 34px rgba(57, 100, 254, 0.42); }
+    .button--secondary:hover:not(:disabled) { background: var(--brand-soft); border-color: var(--border-strong); }
+    .button--link:hover { text-decoration: underline; }
+    .input-action:hover { color: var(--text); background: var(--surface-2); }
+    .mini:hover { color: var(--text); border-color: color-mix(in srgb, var(--brand) 45%, transparent); }
+  }
+  /* 所有输入类型的按压反馈：立即、短暂、ease-out */
+  .button:active:not(:disabled) { transform: scale(0.98); }
+  .mini:active, .seg button:active, .icon-btn:active { transform: scale(0.96); }
+  .button, .mini, .seg button, .icon-btn { transition: transform 100ms var(--ease-out), box-shadow .2s, background .2s, opacity .2s, border-color .2s, color .2s; }
+
+  /* ===== 行内按钮与裸控件的统一契约 =====
+     .mini 是管理面板里唯一的行内按钮（表格操作、保存、固化切换），尺寸由 token 决定；
+     裸 input/select/textarea（不包 .input-wrap 的地方）也走同一套控件尺寸，
+     避免"包了的和没包的长得不一样"。 */
+  .mini {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-height: var(--mini-height); padding: 0 12px;
+    border-radius: var(--mini-radius); white-space: nowrap;
+  }
+  /* 与输入框同排的按钮（表单保存）：高度对齐 --control-height，
+     否则一行里输入框 44px、按钮 30px，底部不齐、视觉断裂。 */
+  .mini--field {
+    min-height: var(--control-height);
+    border-radius: var(--control-radius);
+    padding: 0 20px;
+    font-size: var(--control-font);
+  }
+  input:not([type="checkbox"]):not([type="radio"]), select, textarea {
+    height: var(--control-height);
+    padding: 0 var(--control-pad-x);
+    font-size: var(--control-font);
+    border-radius: var(--control-radius);
+  }
+  textarea { height: auto; min-height: var(--control-height); padding-top: 10px; padding-bottom: 10px; }
+  :root[data-theme="light"] body { background: #eef3fd; }
+
+  /* ===== 整页统一背景层（铺满视口，登录窗体与品牌内容都浮在同一层上） ===== */
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    background:
+      radial-gradient(1200px 900px at 6% -12%, rgba(57, 100, 254, 0.26), transparent 60%),
+      radial-gradient(1000px 760px at 108% 112%, rgba(77, 107, 254, 0.16), transparent 58%),
+      linear-gradient(180deg, #0b0e17 0%, #0e1526 55%, #0b0e17 100%);
+    transition: background .3s var(--ease-out);
+  }
+  :root[data-theme="light"] .backdrop {
+    background:
+      radial-gradient(1100px 820px at 4% -14%, rgba(57, 100, 254, 0.16), transparent 62%),
+      radial-gradient(900px 700px at 110% 114%, rgba(103, 158, 254, 0.14), transparent 58%),
+      linear-gradient(180deg, #f7faff 0%, #e9f0fd 55%, #f2f6ff 100%);
+  }
+  .backdrop canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .orb {
+    position: absolute;
+    border-radius: 50%;
+    pointer-events: none;
+    border: 1px solid rgba(120, 150, 255, 0.10);
+  }
+  :root[data-theme="light"] .orb { border-color: rgba(57, 100, 254, 0.12); }
+  .orb--a { top: 18%; right: -170px; width: 470px; height: 470px; }
+  .orb--b { top: 34%; right: -60px; width: 230px; height: 230px; border-color: rgba(120, 150, 255, 0.16); }
+  .orb--c {
+    bottom: -160px; left: -140px; width: 420px; height: 420px; border: 0;
+    background: radial-gradient(circle, rgba(77, 107, 254, 0.20), transparent 70%);
+    filter: blur(8px);
+  }
+
+  /* ===== 页面骨架：顶栏 + 内容（品牌在左、登录窗体靠右）===== */
+  .shell { position: relative; z-index: 1; display: flex; min-height: 100vh; flex-direction: column; }
+  /* 登录页是首屏：svh 保证任何视口状态下内容都不被裁掉 */
+  @supports (min-height: 100svh) { .shell { min-height: 100svh; } }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: clamp(20px, 3vw, 32px) clamp(24px, 5vw, 64px);
+  }
+  .topbar__controls { display: flex; align-items: center; gap: 10px; }
+  .seg {
+    display: flex; gap: 4px; padding: 4px;
+    border: 1px solid var(--border); border-radius: 999px;
+    background: var(--surface-2); backdrop-filter: blur(12px);
+  }
+  .seg button {
+    border: 0; padding: 7px 15px; border-radius: 999px; background: transparent;
+    color: var(--muted); font-family: inherit; font-size: 13px; cursor: pointer;
+    transition: color .2s, background .2s;
+  }
+  .seg button.is-active { color: var(--text); background: var(--brand-soft); }
+  .icon-btn {
+    display: grid; place-items: center; width: 40px; height: 40px;
+    border: 1px solid var(--border); border-radius: 999px;
+    color: var(--text); background: var(--surface-2);
+    backdrop-filter: blur(12px); cursor: pointer;
+    transition: background .2s, border-color .2s, color .2s;
+  }
+
+  /* ===== 主内容：同一背景上，品牌说明在左、登录窗体靠右 ===== */
+  .stage {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(340px, 0.92fr) minmax(420px, 1.08fr);
+    align-items: center;
+    gap: clamp(28px, 4vw, 64px);
+    padding: clamp(24px, 4vw, 56px) clamp(24px, 5vw, 64px) clamp(32px, 6vh, 72px);
+  }
+  /* 左栏：大图标 + 两三行官方文字，克制不堆装饰 */
+  .hero { max-width: 520px; margin-left: clamp(8px, 5vw, 96px); }
+  .hero__logo { display: flex; align-items: center; gap: 16px; margin-bottom: 32px; }
+  .hero__mark { width: 58px; height: 58px; flex: 0 0 auto; }
+  .hero__word { font-size: 40px; font-weight: 700; letter-spacing: -.6px; line-height: 1; color: var(--text); }
+  .hero__word em { font-style: normal; font-weight: 300; color: var(--text-soft); }
+  .hero__lead { margin: 0 0 14px; font-size: 23px; font-weight: 600; letter-spacing: -.2px; color: var(--text); }
+  .hero__text { margin: 0 0 9px; max-width: 440px; color: var(--muted); font-size: 13px; line-height: 1.85; }
+  .hero__text:last-child { margin-bottom: 0; }
+  .hero li svg { flex: 0 0 auto; color: var(--brand); }
+
+  /* 登录窗体：靠右浮在整页背景上，自身没有整块底色 */
+  .auth-card {
+    justify-self: center;
+    width: min(100%, 440px);
+    padding: 34px 32px 28px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    backdrop-filter: blur(22px) saturate(140%);
+    box-shadow: var(--shadow);
+    transition: background .3s var(--ease-out), border-color .3s var(--ease-out), box-shadow .3s var(--ease-out);
+  }
+  .auth-card__heading { display: flex; align-items: center; gap: 14px; margin-bottom: 24px; }
+  .auth-card__icon {
+    display: grid; width: 48px; height: 48px; flex: 0 0 auto; place-items: center;
+    color: var(--brand); background: var(--brand-soft); border-radius: 14px;
+    border: 1px solid var(--brand-soft);
+  }
+  .auth-card__icon .mark { width: 26px; height: 26px; }
+  .auth-card__heading h2 { margin: 0; font-size: 22px; font-weight: 600; }
+  .auth-card__heading small { display: block; margin-top: 3px; color: var(--muted); font-size: 12.5px; }
+
+  .form-stack { display: grid; gap: 16px; }
+  .field { display: grid; gap: var(--field-gap); }
+  .field > span.label { font-size: var(--field-label); font-weight: 500; color: var(--text-soft); }
+  .input-wrap { position: relative; display: flex; align-items: center; }
+  .input-wrap input {
+    width: 100%; height: var(--control-height); padding: 0 var(--control-pad-x);
+    color: var(--text); font-family: inherit; font-size: var(--control-font);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--control-radius); outline: none;
+    transition: border-color .18s, box-shadow .18s, background .18s;
+  }
+  .input-wrap input::placeholder { color: var(--muted); }
+  /* 键盘可达性：mouse 用户不受影响（:focus-visible 只在键盘导航时触发） */
+  :focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+  .input-wrap input:focus-visible { outline: none; /* 已有 box-shadow 焦点环 */ }
+  .input-wrap input:focus {
+    border-color: var(--brand);
+    box-shadow: 0 0 0 4px var(--brand-soft);
+  }
+  .input-wrap input.otp {
+    font-family: var(--font-mono); font-size: 20px; letter-spacing: .5em;
+    text-align: center; text-transform: uppercase;
+  }
+
+  /* ===== 自定义 select：与输入框同一材质与圆角，去掉系统外观 ===== */
+  .select-wrap { position: relative; display: flex; align-items: center; }
+  .select-wrap select {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 100%; height: var(--control-height); padding: 0 42px 0 var(--control-pad-x);
+    color: var(--text); font-family: inherit; font-size: var(--control-font);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--control-radius); outline: none;
+    cursor: pointer;
+    transition: border-color .18s, box-shadow .18s, background .18s;
+  }
+  .select-wrap select:focus {
+    border-color: var(--brand);
+    box-shadow: 0 0 0 4px var(--brand-soft);
+  }
+  .select-wrap select:focus-visible { outline: none; }
+  /* 自绘下拉箭头：与占位文字同色，不可点（pointer-events 让点击穿透到 select） */
+  .select-wrap::after {
+    content: "";
+    position: absolute; right: 16px;
+    width: 9px; height: 9px;
+    border-right: 1.5px solid var(--muted);
+    border-bottom: 1.5px solid var(--muted);
+    transform: rotate(45deg) translateY(-2px);
+    pointer-events: none;
+  }
+  /* 下拉选项列表（原生弹层）跟随主题：Windows/Chrome 会读 color-scheme */
+  .select-wrap select option { background: var(--surface); color: var(--text); }
+
+  /* ===== 开关（Apple 风格 toggle）：checkbox 的载体 ===== */
+  .toggle { position: relative; display: inline-flex; flex: 0 0 auto; width: 44px; height: 26px; cursor: pointer; }
+  .toggle input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .toggle__track {
+    position: absolute; inset: 0;
+    border-radius: 999px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    transition: background 200ms var(--ease-out), border-color 200ms var(--ease-out);
+  }
+  .toggle__thumb {
+    position: absolute; top: 3px; left: 3px;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    transition: transform 200ms var(--ease-out);
+  }
+  .toggle input:checked ~ .toggle__track { background: var(--brand); border-color: var(--brand); }
+  .toggle input:checked ~ .toggle__thumb { transform: translateX(18px); }
+  .toggle input:focus-visible ~ .toggle__track { outline: 2px solid var(--brand); outline-offset: 2px; }
+  .toggle:active .toggle__thumb { width: 24px; }
+  .toggle:active input:checked ~ .toggle__thumb { transform: translateX(14px); }
+
+  /* ===== 复选框：自绘对勾，与开关同一语言 ===== */
+  .check { position: relative; display: inline-flex; flex: 0 0 auto; width: 19px; height: 19px; cursor: pointer; }
+  .check input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .check__box {
+    position: absolute; inset: 0;
+    border-radius: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-strong);
+    transition: background 150ms var(--ease-out), border-color 150ms var(--ease-out);
+  }
+  .check__box::after {
+    content: "";
+    position: absolute; left: 6px; top: 2.5px;
+    width: 5px; height: 9px;
+    border-right: 2px solid #fff;
+    border-bottom: 2px solid #fff;
+    transform: rotate(45deg) scale(0);
+    transition: transform 150ms var(--ease-out);
+  }
+  .check input:checked ~ .check__box { background: var(--brand); border-color: var(--brand); }
+  .check input:checked ~ .check__box::after { transform: rotate(45deg) scale(1); }
+  .check input:focus-visible ~ .check__box { outline: 2px solid var(--brand); outline-offset: 2px; }
+  .check:active .check__box { transform: scale(0.92); }
+
+  /* ===== 复选行：控件与文字同一行、垂直居中、有按压反馈 ===== */
+  .check-row {
+    display: inline-flex; align-items: center; gap: 9px;
+    cursor: pointer;
+    font-size: 13.5px; color: var(--text-soft);
+    padding: 5px 8px; margin: -5px -8px;
+    border-radius: 8px;
+    transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
+  }
+  .check-row:hover { color: var(--text); }
+  .check-row:active { background: var(--surface-2); }
+  @media (hover: hover) and (pointer: fine) {
+    .check-row:hover { background: var(--surface-2); }
+  }
+
+  /* ===== 复选框网格（模型开放等一排勾选项）===== */
+  .check-grid { display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: center; }
+
+  /* ===== 可选卡片（模型开放：点一下亮起、再点灰暗）=====
+     与 .mini 同尺寸语言（12px 字、8px 圆角），但它是"状态"而非"动作"：
+     选中=实心可读，未选中=降透明度。用 aria-pressed 表达状态，读屏与视觉一致。 */
+  .pick-grid { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  /* 卡片列必须能换行：表格单元格默认 nowrap 会让这一列撑到 max-content，
+     把后面的操作列整个推到横向滚动区外面（用户以为按钮不存在）。 */
+  .cell--cards { white-space: normal; min-width: 0; }
+  .cell--cards .pick-grid { max-width: 460px; }
+  /* 按钮列紧贴内容，不被卡片列挤压 */
+  .cell--actions { width: 1%; white-space: nowrap; vertical-align: top; }
+  .pick {
+    font: inherit; font-size: 12px; cursor: pointer;
+    padding: 5px 11px; border-radius: 8px;
+    border: 1px solid var(--border-strong);
+    background: var(--brand-soft); color: var(--text);
+    transition: background 150ms var(--ease-out), border-color 150ms var(--ease-out),
+                color 150ms var(--ease-out), transform 100ms var(--ease-out), opacity 150ms var(--ease-out);
+  }
+  /* 未选中：灰暗但仍可读——不做成看不见的幽灵，否则用户不知道那儿有东西 */
+  .pick[aria-pressed="false"] {
+    background: transparent;
+    border-color: var(--border);
+    color: var(--muted);
+    opacity: .62;
+  }
+  .pick:active { transform: scale(0.96); }
+  @media (hover: hover) and (pointer: fine) {
+    .pick:hover { border-color: color-mix(in srgb, var(--brand) 50%, transparent); opacity: 1; }
+  }
+  /* 最后一列的竖排按钮：每行一个，右侧对齐，与卡片列同高 */
+  .column-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+  .column-actions .mini { width: 100%; text-align: center; }
+  .input-action {
+    position: absolute; right: 8px; display: grid; place-items: center;
+    width: 34px; height: 34px; border: 0; border-radius: 9px;
+    color: var(--muted); background: transparent; cursor: pointer;
+  }
+
+  .button { display: flex; align-items: center; justify-content: center; gap: 9px; border-radius: 14px; cursor: pointer; }
+  .button--primary {
+    height: 50px; border: 0; color: #fff;
+    font-family: inherit; font-size: 15.5px; font-weight: 600;
+    background: linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%);
+    box-shadow: 0 10px 28px rgba(57, 100, 254, 0.32);
+  }
+  .button--primary:disabled { opacity: .6; cursor: default; }
+  .button--secondary {
+    height: 46px; color: var(--text); font-family: inherit; font-size: 14.5px;
+    background: var(--surface-2); border: 1px solid var(--border-strong);
+  }
+  .button--link {
+    border: 0; padding: 6px 2px; background: transparent; color: var(--brand-bright);
+    font-family: inherit; font-size: 13px; cursor: pointer;
+  }
+
+  .auth-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; }
+  .muted-text { font-size: 12.5px; color: var(--muted); }
+  .waking { display: flex; gap: 12px; align-items: flex-start; padding: 4px 0 2px; }
+  .waking strong { display: block; font-size: 14px; margin-bottom: 3px; }
+  .waking small { display: block; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+  .waking .spinner { border-color: color-mix(in srgb, var(--brand) 30%, transparent); border-top-color: var(--brand); flex: 0 0 auto; margin-top: 2px; }
+
+  .inline-alert { display: none; gap: 8px; align-items: flex-start; padding: 11px 13px; border-radius: 11px; font-size: 13px; line-height: 1.55; margin-bottom: 14px; }
+  .inline-alert.is-visible { display: flex; }
+  .inline-alert--danger { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); }
+  .inline-alert--info { color: var(--text-soft); background: var(--brand-soft); border: 1px solid color-mix(in srgb, var(--brand) 26%, transparent); }
+
+  .auth-card__security {
+    margin: 20px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.7;
+    /* 只有一行安全说明，居中收在卡片下沿 */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+  .auth-card__security-note { display: inline-flex; align-items: center; gap: 5px; }
+  .auth-card__security svg { flex: 0 0 auto; }
+
+  /* ===== 页脚：GitHub 徽标链接 ===== */
+  .foot {
+    position: relative;
+    z-index: 1;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+    padding: 0 clamp(24px, 5vw, 64px) clamp(20px, 3vw, 32px);
+    color: var(--muted); font-size: 12.5px;
+  }
+  .gh-link {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 13px 7px 11px;
+    border: 1px solid var(--border); border-radius: 999px;
+    color: var(--text-soft); text-decoration: none;
+    background: var(--surface-2); backdrop-filter: blur(10px);
+    transition: border-color .2s, color .2s, background .2s;
+  }
+  .gh-link svg { flex: 0 0 auto; }
+
+  .spinner { width: 17px; height: 17px; border-radius: 50%; border: 2px solid rgba(255,255,255,.35); border-top-color: #fff; animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 900px) {
+    .stage { grid-template-columns: 1fr; gap: 32px; }
+    .hero { max-width: none; margin-left: 0; }
+    .hero__mark { width: 44px; height: 44px; }
+    .hero__word { font-size: 30px; }
+    .hero__lead { font-size: 20px; }
+    .auth-card { width: 100%; justify-self: stretch; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .backdrop canvas { display: none; }
+    * { animation: none !important; transition: none !important; }
+  }
+
+/* 人机验证控件：三家服务都往容器里塞一个 iframe，这里只负责留白与说明文字 */
+.captcha-slot { display: flex; flex-direction: column; gap: 8px; }
+.captcha-slot__hint { font-size: 12px; color: var(--muted); line-height: 1.6; }
+.captcha-slot iframe { border-radius: 8px; }

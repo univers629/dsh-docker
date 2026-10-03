@@ -26,9 +26,15 @@ services:
       DSH_BROKER_PORT: "8080"
       DSH_BROKER_BIND: "0.0.0.0"
       DSH_BROKER_MAX_CONCURRENT: "${DSH_BROKER_MAX_CONCURRENT:-64}"
+      # 每用户上游授权：未列出的上游对普通用户一律拒绝。
+      # 文件缺失时 broker 视为「没有任何授权」，因此本功能默认就是关闭的。
+      DSH_BROKER_GRANTS: "/etc/dsh-grants/broker-grants.json"
       NODE_OPTIONS: "--max-old-space-size=192"
     volumes:
       - ./data/broker:/etc/dsh-broker:ro
+      # 每用户上游授权表（dsh-auth 写、本服务读）。只读挂载：broker 只消费它，
+      # 不修改。挂载点是 data/auth 而不是整个 data，尽量少给。
+      - ./data/auth:/etc/dsh-grants:ro
     networks:
       # default 提供出网（要能连模型上游），dsh-internal 让 DSH 容器在隔离模式下
       # 仍然能访问它。这个服务不发布任何宿主端口。

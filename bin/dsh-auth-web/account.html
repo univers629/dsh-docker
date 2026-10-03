@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0e17" />
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#eef3fd" />
+<title>账户安全 · DeepSeek Harness</title>
+<link rel="stylesheet" href="/app.css" />
+<style>
+  .account-shell { position: relative; z-index: 2; max-width: 720px; margin: 0 auto; padding: 28px 24px 64px; }
+  .account-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+  .account-head__title { display: flex; align-items: center; gap: 12px; font-size: 18px; font-weight: 600; }
+  .account-head__title small { display: block; font-size: 12.5px; color: var(--muted); font-weight: 400; margin-top: 3px; }
+</style>
+</head>
+<body>
+<div class="backdrop"><canvas class="stars"></canvas><div class="orb orb--a"></div><div class="orb orb--b"></div></div>
+
+<div class="account-shell">
+  <div class="account-head">
+    <div class="account-head__title">
+      <span class="auth-card__icon" aria-hidden="true">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 4 5.2v6.1c0 4.6 3.2 8.9 8 10.7 4.8-1.8 8-6.1 8-10.7V5.2L12 2Zm0 4.6a2.6 2.6 0 1 1 0 5.2 2.6 2.6 0 0 1 0-5.2Zm0 12c-1.8 0-3.4-.9-4.3-2.3.6-1.2 2.3-1.9 4.3-1.9s3.7.7 4.3 1.9A5.2 5.2 0 0 1 12 18.6Z"/></svg>
+      </span>
+      <div>
+        <span data-i18n="title">账户安全</span>
+        <small data-i18n="subtitle">密码、两步验证、通行密钥与登录会话</small>
+      </div>
+    </div>
+    <div class="auth-actions" style="margin:0;gap:10px">
+      <button class="button--link" type="button" id="to-workspace" data-i18n="workspace">进入工作台</button>
+      <button class="button--link" type="button" id="do-logout" data-i18n="logout">退出登录</button>
+    </div>
+  </div>
+
+  <!-- 面板内容由 /account-panel.js 渲染：与 /admin 的标签页、插件的设置分区是同一份实现 -->
+  <div id="account-panel"></div>
+</div>
+
+<script src="/backdrop.js"></script>
+<script src="/account-panel.js"></script>
+<script>
+(() => {
+  const I18N = {
+    zh: { title: '账户安全', subtitle: '密码、两步验证、通行密钥与登录会话', workspace: '进入工作台', logout: '退出登录' },
+    en: { title: 'Account security', subtitle: 'Password, two-step verification, passkeys and sessions', workspace: 'Open workspace', logout: 'Sign out' },
+  }
+  const lang = String(navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en'
+  const t = (key) => I18N[lang][key] ?? key
+  document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en'
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n) })
+
+  const root = document.documentElement
+  try {
+    const stored = localStorage.getItem('dsh-login-theme')
+    if (stored) root.dataset.theme = stored
+    else if (window.matchMedia('(prefers-color-scheme: light)').matches) root.dataset.theme = 'light'
+  } catch { /* 保持默认 */ }
+
+  document.getElementById('to-workspace').addEventListener('click', () => window.location.assign('/'))
+  document.getElementById('do-logout').addEventListener('click', async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' })
+    } catch { /* 仍然回到登录页 */ }
+    window.location.replace('/login')
+  })
+
+  window.DSHAccountPanel.mount(document.getElementById('account-panel'), { lang })
+})()
+</script>
+</body>
+</html>

@@ -14,7 +14,9 @@ services:
     ports:
       # Keep the public entry behind the authenticated reverse proxy. Docker
       # must not publish the privileged loopback bridge on every interface.
-      - "${DSH_BIND_HOST:-127.0.0.1}:3080:3080"
+      # The host port is configurable so a second stack can run alongside an
+      # existing deployment on the same machine.
+      - "${DSH_BIND_HOST:-127.0.0.1}:${DSH_HTTP_PORT:-3080}:3080"
     networks:
       - default
       - dsh-private
@@ -52,7 +54,11 @@ services:
       - ./data/agents:/data/agents
       - ./data/mcp:/data/mcp
       - ./data/home:/data/home
-      - ./data/auth:/opt/dsh-auth:ro
+      # 注意：这里绝不挂 ./data/auth。那个目录里有 state.json（全部口令哈希与会话
+      # 摘要）、totp.key（AES-GCM 主密钥）、instances.token 与明文的 broker 令牌，
+      # 而容器内的 Agent 与 DSH 同 uid（1000），0600 拦不住它（审计实测：用主密钥
+      # 解出了全部账户的 TOTP 密钥）。basic 模式需要的唯一一份文件（htpasswd）由
+      # docker-compose.basic-auth.yml 按需单独挂载。
       # root 口令哈希挂在 /root 下（0700 root:root）：非 root 的 dsh 账户既进不去
       # 这个目录也读不到哈希，只能通过带失败锁定的特权代理校验密码。
       - ./data/secret:/root/dsh-secret:ro

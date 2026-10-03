@@ -2,13 +2,15 @@ param(
     [Alias('Action')]
     [ValidateSet('','install','configure','upgrade','update','model-key','key-panel','start','stop','restart','logs','status','delete')]
     [string]$DshAction,
-    [ValidateSet('','local','trusted-proxy','basic')]
+    [ValidateSet('','local','trusted-proxy','basic','password')]
     [string]$Access = '',
     [string]$BindHost = '',
     [string]$TrustedHosts = '',
     [string]$Network = '',
     [switch]$NetworkExternal,
     [switch]$NetworkInternal,
+    [switch]$MultiUser,
+    [switch]$NoMultiUser,
     [switch]$NonInteractive,
     [string]$RootPassword = '',
     [switch]$NoRootPassword,
@@ -1121,7 +1123,7 @@ function Remove-DshProject {
                 # 密钥代理与出站隔离的叠加文件同样要带上，否则 down 看不到 dsh-key-broker /
                 # dsh-egress / dsh-ingress 这几个服务，它们会连着 dsh-internal 网络一起留下来。
                 # 老部署目录里没有这两个文件，所以必须逐个判断存在性。
-                foreach ($overlay in @('docker-compose.keys.yml','docker-compose.keys-admin.yml','docker-compose.isolated.yml')) {
+                foreach ($overlay in @('docker-compose.keys.yml','docker-compose.keys-admin.yml','docker-compose.isolated.yml','docker-compose.auth.yml','docker-compose.multiuser.yml','docker-compose.basic-auth.yml')) {
                     if (Test-Path -LiteralPath (Join-Path $resolvedDir $overlay) -PathType Leaf) { $composeArgs += @('-f',$overlay) }
                 }
                 & docker compose @composeArgs down --volumes --remove-orphans | Out-Host
@@ -1534,6 +1536,22 @@ if ($networkName -eq 'dsh-private' -and $networkExternalValue -eq 'true' -and -n
 }
 $imageSource = if ($ImageSource) { $ImageSource } else { Get-ComposeEnvValue $envFile 'DSH_IMAGE_SOURCE' 'prebuilt' }
 if ($imageSource -notin @('prebuilt','build')) { $imageSource = 'prebuilt' }
+# 多用户开关：命令行优先，其次既有 .env。多用户把访问方式固定为 password——认证只能
+# 有一个来源，而多用户的实例路由正依赖网关解析身份（与 install.sh 的 configure_user_mode
+# 同一规则）。两条命令行开关都给了时以 -MultiUser 为准并报错提示，避免静默二义。
+$multiUser = if ($MultiUser) {
+    'on'
+} elseif ($NoMultiUser) {
+    'off'
+} else {
+    Get-ComposeEnvValue $envFile 'DSH_MULTI_USER' 'off'
+}
+if ($multiUser -notin @('on','off')) { $multiUser = 'off' }
+if ($multiUser -eq 'on' -and $accessMode -ne 'password') {
+    if ($Access -and $Access -ne 'password') { throw '多用户模式需要 -Access password：实例路由依赖认证网关解析身份，两者不能分开选。' }
+    Write-Host '==> 多用户模式需要内置认证网关承担认证，访问保护方式已改为 password。'
+    $accessMode = 'password'
+}
 $basicUser = $env:DSH_BASIC_AUTH_USER
 $basicPassword = $env:DSH_BASIC_AUTH_PASSWORD
 $writeBasicAuth = $false
@@ -1568,8 +1586,12 @@ if ($DshAction -in @('install','configure')) {
         if ($imageRef -eq $DefaultLocalImage) { $imageRef = $DefaultPrebuiltImage }
     }
     if ($interactive -and -not $Access) {
-        $accessDefault = switch ($accessMode) { 'trusted-proxy' {'2'}; 'basic' {'3'}; default {'1'} }
-        $accessMode = switch (Ask "访问保护：1=本机/SSH  2=已有 Access/面板  3=内置 Basic Auth" $accessDefault) { '2' {'trusted-proxy'}; '3' {'basic'}; default {'local'} }
+        $accessDefault = switch ($accessMode) { 'trusted-proxy' {'2'}; 'basic' {'3'}; 'password' {'4'}; default {'1'} }
+        $accessMode = switch (Ask "访问保护：1=本机/SSH  2=已有 Access/面板  3=内置 Basic Auth  4=内置认证网关（支持多用户）" $accessDefault) { '2' {'trusted-proxy'}; '3' {'basic'}; '4' {'password'}; default {'local'} }
+    }
+    if ($interactive -and -not $MultiUser -and -not $NoMultiUser -and $accessMode -eq 'password') {
+        $multiDefault = if ((Get-ComposeEnvValue $envFile 'DSH_MULTI_USER' 'off') -eq 'on') { '1' } else { '2' }
+        $multiUser = switch (Ask "多用户：1=开启（每账户独立容器，密码登录）  2=关闭（单管理员）" $multiDefault) { '1' {'on'}; default {'off'} }
     }
     if (-not $AckTrustedProxy -and $accessMode -eq 'trusted-proxy') {
         Write-Host ''
@@ -1773,6 +1795,34 @@ if ($DshAction -in @('install','configure')) {
     # 叠加顺序是契约的一部分，不能按别的顺序拼：keys.yml 先把 dsh-key-broker 放进
     # dsh-internal，isolated.yml 才能把 dsh 收进那张没有网关的网络而不切断模型请求。
     $composeFileArgs = @('-f','docker-compose.yml')
+    # 认证网关：password 模式与多用户模式都必需。入口容器二选一，靠 profile 区分：
+    # 单管理员用 dsh-authgate，多用户用 multiuser 叠加层里的 dsh-ingress——两者发布
+    # 同一个宿主端口，同时激活会让第二个入口绑定失败（与 install.sh 同一规则）。
+    if ($accessMode -eq 'password' -or $multiUser -eq 'on') {
+        if (-not (Test-Path -LiteralPath 'docker-compose.auth.yml' -PathType Leaf)) {
+            throw '需要 docker-compose.auth.yml 才能使用 password 访问模式或多用户模式，但工程目录里没有它。请更新工程源码，或改用 basic / trusted-proxy 模式。'
+        }
+        if ($multiUser -eq 'on') {
+            $composeFileArgs += @('-f','docker-compose.auth.yml')
+        } else {
+            $composeFileArgs += @('--profile','authgate','-f','docker-compose.auth.yml')
+        }
+    }
+    # basic 模式只把 htpasswd 这一个文件挂进容器（基础 compose 不再整目录挂 data/auth，
+    # 那会把认证数据库暴露给容器内的 Agent）。htpasswd 在 up 之前就已写好。
+    if ($accessMode -eq 'basic') {
+        if (-not (Test-Path -LiteralPath 'docker-compose.basic-auth.yml' -PathType Leaf)) {
+            throw '需要 docker-compose.basic-auth.yml 才能使用 basic 访问模式，但工程目录里没有它。请更新工程源码，或改用 local / trusted-proxy 模式。'
+        }
+        $composeFileArgs += @('-f','docker-compose.basic-auth.yml')
+    }
+    # 多用户叠加层建立在认证层之上：它同时改变入口与网络拓扑。
+    if ($multiUser -eq 'on') {
+        if (-not (Test-Path -LiteralPath 'docker-compose.multiuser.yml' -PathType Leaf)) {
+            throw '需要 docker-compose.multiuser.yml 才能启用多用户模式，但工程目录里没有它。请更新工程源码。'
+        }
+        $composeFileArgs += @('--profile','multiuser','-f','docker-compose.multiuser.yml')
+    }
     if ($modelBroker -eq 'on') {
         if (-not (Test-Path -LiteralPath 'docker-compose.keys.yml' -PathType Leaf)) {
             throw '需要 docker-compose.keys.yml 才能启用模型密钥代理，但工程目录里没有它。请更新工程源码，或用 -NoModelBroker 关闭密钥代理。'
@@ -1820,8 +1870,24 @@ function Get-DshComposeFileArgs {
             $fileArgs += @('-f','docker-compose.keys-admin.yml')
         }
     }
+    # 认证网关与多用户叠加层也要带上，否则 restart/stop 看不到 dsh-auth / dsh-instances /
+    # dsh-ingress，密码与多用户部署会被起成一套没有入口的容器。入口容器二选一，靠 profile
+    # 区分（单管理员 authgate 由调用方按需带 --profile，多用户在这里一并带上）。
+    $multiUser = (Get-ComposeEnvValue $EnvPath 'DSH_MULTI_USER' 'off') -eq 'on'
+    $accessModeForFiles = Get-ComposeEnvValue $EnvPath 'DSH_ACCESS_MODE' 'local'
+    if (($accessModeForFiles -eq 'password' -or $multiUser) -and (Test-Path -LiteralPath 'docker-compose.auth.yml' -PathType Leaf)) {
+        if (-not $multiUser) { $fileArgs += @('--profile','authgate') }
+        $fileArgs += @('-f','docker-compose.auth.yml')
+    }
+    if ($multiUser -and (Test-Path -LiteralPath 'docker-compose.multiuser.yml' -PathType Leaf)) {
+        $fileArgs += @('--profile','multiuser','-f','docker-compose.multiuser.yml')
+    }
     if ((Get-ComposeEnvValue $EnvPath 'DSH_EGRESS_MODE' 'open') -ne 'open' -and (Test-Path -LiteralPath 'docker-compose.isolated.yml' -PathType Leaf)) {
         $fileArgs += @('-f','docker-compose.isolated.yml')
+    }
+    # basic 模式的 htpasswd 单文件挂载（见 docker-compose.basic-auth.yml 的注释）。
+    if ($accessModeForFiles -eq 'basic' -and (Test-Path -LiteralPath 'data\auth\htpasswd' -PathType Leaf) -and (Test-Path -LiteralPath 'docker-compose.basic-auth.yml' -PathType Leaf)) {
+        $fileArgs += @('-f','docker-compose.basic-auth.yml')
     }
     return $fileArgs
 }
@@ -2059,7 +2125,8 @@ switch ($DshAction) {
             Set-ComposeEnvValue $pendingEnvFile 'DSH_KEY_ADMIN_HOST_PORT' $KeyAdminPortValue
             Set-ComposeEnvValue $pendingEnvFile 'DSH_EGRESS_MODE' $egressMode
             Set-ComposeEnvValue $pendingEnvFile 'DSH_EGRESS_ALLOWED_HOSTS' $egressAllowed
-            $composeKeys = @('DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL','DSH_IMAGE','DSH_IMAGE_SOURCE','DSH_MODEL_BROKER','DSH_MODEL_BROKER_BASE','DSH_KEY_ADMIN','DSH_KEY_ADMIN_BIND_HOST','DSH_KEY_ADMIN_HOST_PORT','DSH_EGRESS_MODE','DSH_EGRESS_ALLOWED_HOSTS')
+            Set-ComposeEnvValue $pendingEnvFile 'DSH_MULTI_USER' $multiUser
+            $composeKeys = @('DSH_ACCESS_MODE','DSH_BIND_HOST','DSH_TRUSTED_HOSTS','DSH_DOCKER_NETWORK','DSH_DOCKER_NETWORK_EXTERNAL','DSH_IMAGE','DSH_IMAGE_SOURCE','DSH_MODEL_BROKER','DSH_MODEL_BROKER_BASE','DSH_KEY_ADMIN','DSH_KEY_ADMIN_BIND_HOST','DSH_KEY_ADMIN_HOST_PORT','DSH_EGRESS_MODE','DSH_EGRESS_ALLOWED_HOSTS','DSH_MULTI_USER')
             $composeExitCode = Invoke-ComposeWithEnvFile -Path $pendingEnvFile -Arguments @('up','-d','--no-build','--force-recreate') -EnvironmentKeys $composeKeys -FileArguments $composeFileArgs
             if ($composeExitCode -ne 0) { throw 'DSH 容器启动失败，原配置未被覆盖。' }
             Move-Item -LiteralPath $pendingEnvFile -Destination $envFile -Force

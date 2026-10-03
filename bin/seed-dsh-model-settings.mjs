@@ -188,6 +188,8 @@ async function runSeed(payload) {
     upstreams: payload.upstreams ?? [],
     brokerBase: payload.brokerBase ?? '',
     placeholder: payload.placeholder ?? '',
+    // 部署要求的额外请求头（例如实例身份令牌）：代理据此识别调用者
+    extraHeaders: payload.extraHeaders && typeof payload.extraHeaders === 'object' ? payload.extraHeaders : undefined,
     catalog,
     existing: {
       // 传整份 profile（不只是名字）：判断某条同名 pi-ai 路由是不是安装器自己写的

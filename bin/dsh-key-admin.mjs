@@ -241,37 +241,113 @@ function writeDocument(document) {
 }
 
 /**
- * 写 DSH 配置之前先确认那两个文件是普通文件。
+ * 用 O_NOFOLLOW 打开 seed 目标并读出文本；文件不存在返回空串。
  *
- * 这不是洁癖：data/dsh 是 dsh 容器可写的目录，而这个容器里跑的是一个可以执行任意
+ * 这不是洁癖：data/dsh 是 dsh 容器可写的目录，而这个容器里跑着一个可以执行任意
  * 命令的 Agent。它要是把 settings.yaml 换成一个指向 /etc/dsh-broker/keys.json 的
- * 符号链接，seed 脚本"读旧配置再合并写回"这一步就会把密钥文件的内容读出来、写进
- * 一个 dsh 容器能读的文件里——密钥代理直接白搭。所以见到不是普通文件就拒绝动手。
+ * 符号链接，"读旧配置再合并写回"就会把密钥文件的内容读出来、写进一个 dsh 容器能
+ * 读的文件里——密钥代理直接白搭。
+ *
+ * 之所以不再用「先 lstat 再让子进程按路径名重开」的旧方案：检查与使用之间隔着一次
+ * 完整的进程启动，Agent 在窗口内把普通文件换成符号链接就能赢（审计实测首次即成功）。
+ * 现在由面板进程自己打开：O_NOFOLLOW 让符号链接在 open 时就报 ELOOP，fstat 校验的
+ * 就是实际读到的那个 inode，检查与使用绑定在同一个文件描述符上，不再有窗口。
+ * @param {string} file 目标路径。
+ * @returns {string} 文件文本（ENOENT 时为空串）。
  */
-function assertSeedTargetsSane() {
-  for (const name of ['settings.yaml', '.credentials.yaml']) {
-    const file = path.join(DSH_HOME, name)
-    let stats
+function readSeedTarget(file) {
+  // 首选 O_NOFOLLOW：符号链接在 open 时报 ELOOP，检查与读取绑定在同一描述符上。
+  // 个别平台（win32）没有这个常量，退回「lstat 校验 + open 后比对 dev/ino」：
+  // 若 lstat 与 open 之间被换成链接，两边的 inode 对不上，同样拒绝。
+  const noFollow = fs.constants.O_NOFOLLOW
+  let before = null
+  if (noFollow === undefined) {
     try {
-      stats = fs.lstatSync(file)
+      before = fs.lstatSync(file)
     } catch (error) {
-      if (error.code === 'ENOENT') continue
+      if (error.code === 'ENOENT') return ''
       throw new AdminInputError('看不了 ' + file + '：' + error.message, 500)
     }
-    if (!stats.isFile()) {
+    if (!before.isFile()) {
       throw new AdminInputError(
-        file + ' 不是普通文件（符号链接或目录）。面板不会顺着它写下去：'
-        + '容器内的进程可以用这种链接把密钥文件的内容诱导进一个自己能读的文件。'
-        + '请在宿主上检查这个路径，删掉之后重试。',
+        file + ' 不是普通文件（符号链接或目录）。面板不会顺着它读下去：'
+          + '容器内的进程可以用这种链接把密钥文件的内容诱导进一个自己能读的文件。'
+          + '请在宿主上检查这个路径，删掉之后重试。',
         500,
       )
     }
   }
+  let descriptor
+  try {
+    descriptor = fs.openSync(file, fs.constants.O_RDONLY | (noFollow ?? 0))
+  } catch (error) {
+    if (error.code === 'ENOENT') return ''
+    if (error.code === 'ELOOP') {
+      throw new AdminInputError(
+        file + ' 是符号链接。面板不会顺着它读下去：容器内的进程可以用这种链接把'
+          + '密钥文件的内容诱导进一个自己能读的文件。请在宿主上检查这个路径，删掉之后重试。',
+        500,
+      )
+    }
+    throw new AdminInputError('打不开 ' + file + '：' + error.message, 500)
+  }
+  try {
+    const stats = fs.fstatSync(descriptor)
+    if (!stats.isFile()) {
+      throw new AdminInputError(file + ' 不是普通文件，面板拒绝读写它。', 500)
+    }
+    if (before !== null && (stats.dev !== before.dev || stats.ino !== before.ino)) {
+      throw new AdminInputError(file + ' 在打开的一瞬间变了（可能是符号链接），面板放弃读取。', 500)
+    }
+    return fs.readFileSync(descriptor, 'utf8')
+  } finally {
+    fs.closeSync(descriptor)
+  }
+}
+
+/**
+ * 写回 seed 结果。临时文件以 O_CREAT|O_EXCL 创建（不跟随已存在的链接），rename
+ * 只替换目标本身、绝不顺着符号链接写；目标当前若是链接或目录则拒绝动手。
+ * @param {string} file 目标路径。
+ * @param {string} text 要写入的文本。
+ * @param {number} mode 目标文件权限。
+ */
+function writeSeedTarget(file, text, mode) {
+  let stats
+  try {
+    stats = fs.lstatSync(file)
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw new AdminInputError('看不了 ' + file + '：' + error.message, 500)
+    stats = null
+  }
+  if (stats && !stats.isFile()) {
+    throw new AdminInputError(
+      file + ' 在写入前变成了符号链接或目录，面板放弃这次写回（防的是把内容顺着链接写出去）。'
+        + '请在宿主上检查这个路径。',
+      500,
+    )
+  }
+  const temporary = file + '.dsh-panel.' + process.pid + '.tmp'
+  const descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, mode)
+  try {
+    fs.writeFileSync(descriptor, text, 'utf8')
+    fs.fsyncSync(descriptor)
+  } finally {
+    fs.closeSync(descriptor)
+  }
+  // rename 到目标：若目标在检查之后又被换成符号链接，rename 替换的是链接本身，
+  // 写入的仍然只有我们刚从 O_NOFOLLOW 描述符读出的内容——密钥内容从不经过这条路径。
+  fs.renameSync(temporary, file)
 }
 
 /**
  * 把 keys.json 里的非秘密事实写进 DSH 自己的配置（settings.yaml / .credentials.yaml）。
- * 复用安装器那个脚本，不重写一份：格式契约只该有一个实现。密钥不进载荷。
+ * 复用安装器那个脚本做纯变换，不重写一份：格式契约只该有一个实现。密钥不进载荷。
+ *
+ * 面板进程自己读两份目标文件（readSeedTarget，O_NOFOLLOW），把文本放进 stdin 载荷、
+ * 不传 --home，子进程只做合并并回传 JSON，最后由面板进程写回（writeSeedTarget）。
+ * 子进程从不再按路径名打开任何东西，因此不存在「检查的 inode 与打开的 inode 不同」
+ * 的窗口。
  */
 function spawnSeed(document) {
   if (!fs.existsSync(SEED_SCRIPT)) {
@@ -283,16 +359,25 @@ function spawnSeed(document) {
       error: '找不到 ' + SEED_SCRIPT + '，这次只改了密钥配置，没有写 DSH 侧的模型设置。',
     })
   }
+  const settingsFile = path.join(DSH_HOME, 'settings.yaml')
+  const credentialsFile = path.join(DSH_HOME, '.credentials.yaml')
   // 这一步失败不该把"保存密钥"也一起判失败：密钥已经写进 keys.json 了，把原因
   // 当成 seed 的错误回给页面，比丢一个 500 更有用。
+  let settingsText
+  let credentialsText
   try {
-    assertSeedTargetsSane()
+    settingsText = readSeedTarget(settingsFile)
+    credentialsText = readSeedTarget(credentialsFile)
   } catch (error) {
     return Promise.resolve({ skipped: true, failed: true, output: '', warnings: '', error: error.message })
   }
-  const payload = JSON.stringify(seedPayload(document, BROKER_BASE, PLACEHOLDER))
+  const payload = JSON.stringify({
+    ...seedPayload(document, BROKER_BASE, PLACEHOLDER),
+    settingsText,
+    credentialsText,
+  })
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [SEED_SCRIPT, '--home', DSH_HOME], {
+    const child = spawn(process.execPath, [SEED_SCRIPT], {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -307,17 +392,65 @@ function spawnSeed(document) {
     child.stderr.on('data', (chunk) => {
       stderr += chunk
     })
-    const finish = (failed, error) => {
+    const finish = (failed, error, output = stdout, warnings = stderr.trim()) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       // stderr 即使退出码为 0 也要带回去：seed 脚本把"这个上游没写进 DSH 配置"
       // （例如自建网关一个模型 id 都没填）当成警告，退出码仍然是 0。只看 failed
       // 的话，页面会显示"已保存"而 DSH 那边根本没多出这条供应商。
-      resolve({ skipped: false, failed, output: stdout, warnings: stderr.trim(), error })
+      resolve({ skipped: false, failed, output, warnings, error })
     }
     child.on('error', (error) => finish(true, error.message))
-    child.on('close', (code) => finish(code !== 0, code === 0 ? '' : (stderr.trim() || ('seed 退出码 ' + code))))
+    child.on('close', (code) => {
+      if (code !== 0) {
+        finish(true, stderr.trim() || ('seed 退出码 ' + code))
+        return
+      }
+      // 子进程只做纯变换：把回传的新文本由面板进程自己写回目标。
+      try {
+        const result = JSON.parse(stdout.length > 0 ? stdout : '{}')
+        if (typeof result.validationFailure === 'string' && result.validationFailure.length > 0) {
+          finish(true, 'DSH 拒绝了这份模型配置，没有写入任何文件：' + result.validationFailure)
+          return
+        }
+        const summary = []
+        for (const entry of result.written ?? []) {
+          const models = Array.isArray(entry.models) ? entry.models : []
+          const list = entry.source !== 'declared' && models.length > 3
+            ? models.slice(0, 3).join('、') + ' 等 ' + models.length + ' 个'
+            : models.join('、')
+          const kind = entry.source === 'native'
+            ? 'DSH 自带的 ' + entry.provider + ' 供应商（不会多出一行）'
+            : entry.source === 'catalog' ? 'DSH 内置目录路由' : '自定义路由（' + entry.api + '）'
+          summary.push('    - ' + entry.name + '：' + kind + '，模型 ' + (list.length > 0 ? list : '（目录提供）'))
+        }
+        for (const removed of result.removed ?? []) summary.push('    已删除旧版安装器留下的重复配置：' + removed)
+        for (const ref of result.reclaimedRefs ?? []) {
+          summary.push('    ' + ref + ' 原本存的不是占位串（像是一把真实密钥），已换回占位串')
+          summary.push('      那把密钥进过 dsh 容器，Agent 能读到，建议到上游控制台轮换。')
+        }
+        if (result.defaultModel) {
+          summary.push('    默认模型：' + result.defaultModel.provider + ' / ' + result.defaultModel.model)
+        }
+        const warn = []
+        for (const entry of result.skipped ?? []) {
+          warn.push('[警告] 上游 ' + entry.name + ' 没有写进 DSH 配置：' + entry.reason)
+        }
+        if (typeof result.settingsText === 'string' && result.settingsText !== settingsText) {
+          writeSeedTarget(settingsFile, result.settingsText, 0o644)
+        }
+        if (typeof result.credentialsText === 'string' && result.credentialsText !== credentialsText) {
+          writeSeedTarget(credentialsFile, result.credentialsText, 0o600)
+        }
+        // 子进程不再落盘（没有 --home），面板显示的摘要由这里的组装代替它原先的 stdout。
+        const text = summary.length > 0 ? summary.join('\n') + '\n' : ''
+        const warningText = (stderr.trim() + (stderr.trim() && warn.length > 0 ? '\n' : '') + warn.join('\n')).trim()
+        finish(false, '', text, warningText)
+      } catch (error) {
+        finish(true, error instanceof Error ? error.message : String(error))
+      }
+    })
     child.stdin.end(payload)
   })
 }
@@ -348,15 +481,18 @@ async function scrubCredentials() {
   const file = path.join(DSH_HOME, '.credentials.yaml')
   let stats
   try {
-    stats = fs.statSync(file)
+    // lstat 而不是 stat：符号链接不该触发一轮 seed（readSeedTarget 会因 ELOOP 拒绝，
+    // 巡检日志里只会多一条失败；这里直接视为「没动过」更安静）。
+    stats = fs.lstatSync(file)
   } catch {
     return
   }
+  if (!stats.isFile()) return
   // 文件没动过就不必再跑一遍 seed（它每次都要起一个 node 进程）。
   if (stats.mtimeMs === scrubbedMtimeMs) return
   const seed = await runSeed(readDocument(readConfigText()))
   try {
-    scrubbedMtimeMs = fs.statSync(file).mtimeMs
+    scrubbedMtimeMs = fs.lstatSync(file).mtimeMs
   } catch {
     scrubbedMtimeMs = -1
   }

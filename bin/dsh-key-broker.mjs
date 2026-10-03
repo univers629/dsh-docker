@@ -18,6 +18,7 @@ import http from 'node:http'
 import https from 'node:https'
 import process from 'node:process'
 
+import { callerTokenFromHeaders, identifyCaller, isUpstreamAllowed, parseGrants } from './dsh-broker-grants.mjs'
 import { createGuardedLookup } from './dsh-egress-policy.mjs'
 import {
   BrokerConfigError,
@@ -26,8 +27,10 @@ import {
   STRIPPED_REQUEST_HEADERS,
   assertMethod,
   collectSecrets,
+  createStreamRedactor,
   emptyUsageState,
   parseBrokerConfig,
+  redactHeaders,
   redactSecrets,
   registerUsage,
   resolveRoute,
@@ -35,6 +38,9 @@ import {
 } from './dsh-key-broker-policy.mjs'
 
 const CONFIG_PATH = process.env.DSH_BROKER_CONFIG ?? '/etc/dsh-broker/keys.json'
+// 每用户上游授权表。与密钥配置分开：密钥由 key-admin 管，授权由 dsh-auth 管，
+// 两者的生命周期和写入者都不同。缺文件表示「没有任何授权」——默认拒绝。
+const GRANTS_PATH = process.env.DSH_BROKER_GRANTS ?? '/etc/dsh-broker/grants.json'
 const PORT = Number(process.env.DSH_BROKER_PORT ?? 8080)
 const BIND = process.env.DSH_BROKER_BIND ?? '0.0.0.0'
 const RELOAD_INTERVAL_MS = Number(process.env.DSH_BROKER_RELOAD_MS ?? 5000)
@@ -49,6 +55,8 @@ const ERROR_BODY_LIMIT = 64 * 1024
 let config = null
 let secrets = []
 let configStamp = ''
+let grants = parseGrants('')
+let grantsStamp = ''
 const usage = new Map()
 let inFlight = 0
 let totalAllowed = 0
@@ -63,6 +71,36 @@ function log(event) {
 
 function stampOf(stats) {
   return `${stats.size}:${stats.mtimeMs}`
+}
+
+/**
+ * 读取每用户授权表。与密钥配置一样按 mtime 热重载；文件缺失即「没有授权」，
+ * 而不是「不限」——默认拒绝是这个功能的立足点。
+ */
+function loadGrants() {
+  let stats
+  try {
+    stats = fs.statSync(GRANTS_PATH)
+  } catch {
+    // 文件不存在：清空授权（而不是沿用上一次的内容），否则删掉授权表不会生效
+    if (grantsStamp !== '') {
+      grants = parseGrants('')
+      grantsStamp = ''
+      log({ event: 'grants-cleared', reason: 'missing' })
+    }
+    return
+  }
+  const stamp = stampOf(stats)
+  if (stamp === grantsStamp) return
+  try {
+    grants = parseGrants(fs.readFileSync(GRANTS_PATH, 'utf8'))
+    grantsStamp = stamp
+    log({ event: 'grants-loaded', users: grants.users.size })
+  } catch (error) {
+    // 写坏了授权表不该让代理崩：保留旧表并报错。宁可沿用旧授权，也不要因为
+    // 一次写坏就放行所有人——这个方向的错误是安全侧。
+    log({ event: 'grants-error', message: error.message })
+  }
 }
 
 function loadConfig({ initial = false } = {}) {
@@ -196,6 +234,9 @@ function forward(request, response, route) {
         if (name.toLowerCase() === 'set-cookie') continue
         responseHeaders[name] = value
       }
+      // 响应头两个分支都过一遍脱敏：头是小对象、不涉及缓冲，而"密钥只出现在发往上游的
+      // 请求里"是硬约束——上游把收到的凭据回显在某个头里并非不可能。
+      const safeHeaders = redactHeaders(responseHeaders, secrets)
 
       if (status >= 400) {
         // 失败响应体先缓冲再回：部分上游会在错误信息里回显收到的密钥。
@@ -208,8 +249,8 @@ function forward(request, response, route) {
         upstreamResponse.on('end', () => {
           const raw = Buffer.concat(chunks).toString('utf8')
           const clean = Buffer.from(redactSecrets(raw, secrets), 'utf8')
-          delete responseHeaders['content-length']
-          response.writeHead(status, { ...responseHeaders, 'content-length': clean.length })
+          delete safeHeaders['content-length']
+          response.writeHead(status, { ...safeHeaders, 'content-length': clean.length })
           response.end(clean)
           finish('allow', status, clean.length)
         })
@@ -221,13 +262,31 @@ function forward(request, response, route) {
         return
       }
 
-      response.writeHead(status, responseHeaders)
+      // 成功响应体保持流式：不缓冲整个响应（长回答会吃满内存），但用增量脱敏器
+      // 逐块扫描——密钥跨块出现也能命中，内存占用只与「最长密钥长度」有关而与
+      // 响应体大小无关。上游把收到的凭据回显在成功响应里并非不可能（如 echo 型
+      // 调试端点），而"密钥只出现在发往上游的请求里"是硬约束。
+      response.writeHead(status, safeHeaders)
+      const redactor = createStreamRedactor(secrets)
       let bytes = 0
       upstreamResponse.on('data', (chunk) => {
         bytes += chunk.length
+        const clean = redactor.push(chunk)
+        if (clean && !response.write(clean)) {
+          // 客户端消费慢于上游时暂停读入，避免内存被拉大。
+          upstreamResponse.pause()
+          response.once('drain', () => upstreamResponse.resume())
+        }
       })
-      upstreamResponse.pipe(response)
-      upstreamResponse.on('end', () => finish('allow', status, bytes))
+      upstreamResponse.on('end', () => {
+        const tail = redactor.flush()
+        if (tail) {
+          bytes += tail.length
+          response.write(tail)
+        }
+        response.end()
+        finish('allow', status, bytes)
+      })
       upstreamResponse.on('error', () => {
         response.destroy()
         finish('allow', status, bytes)
@@ -319,6 +378,28 @@ const server = http.createServer((request, response) => {
     return
   }
 
+  // 调用者识别与上游授权。放在用量判定之前：越权请求不该占用配额计数。
+  //
+  // 未携带令牌、令牌认不出、或该用户没有被开放这个上游 → 一律拒绝。
+  // 这是「管理员开放模型」真正生效的地方：用户即使在 settings.yaml 里手写别的
+  // 上游名，也会在这里被挡下。
+  loadGrants()
+  const caller = identifyCaller(grants, callerTokenFromHeaders(request.headers))
+  if (!caller) {
+    totalDenied += 1
+    log({ event: 'deny', reason: 'unknown-caller', upstreamName: route.upstream.name, path: route.upstreamPath, method })
+    deny(response, 401, '缺少或无法识别实例令牌：模型请求必须携带有效的实例身份', { upstream: route.upstream.name })
+    request.resume()
+    return
+  }
+  if (!isUpstreamAllowed(caller, route.upstream.name)) {
+    totalDenied += 1
+    log({ event: 'deny', reason: 'upstream-not-granted', uid: caller.uid, upstreamName: route.upstream.name, path: route.upstreamPath, method })
+    deny(response, 403, `该账户没有被开放上游 ${route.upstream.name}`, { upstream: route.upstream.name })
+    request.resume()
+    return
+  }
+
   const decision = usageDecision(usageFor(route.upstream.name), route.upstream, Date.now())
   if (!decision.allowed) {
     deny(response, decision.status, decision.reason, {
@@ -331,6 +412,7 @@ const server = http.createServer((request, response) => {
   }
 
   usage.set(route.upstream.name, registerUsage(usageFor(route.upstream.name), Date.now(), 'allow'))
+  // 放行也记 uid：出问题时能回答「是谁在用这个上游」
   inFlight += 1
   forward(request, response, route)
 })
@@ -347,6 +429,7 @@ function shutdown(signal) {
 
 try {
   loadConfig({ initial: true })
+loadGrants()
 } catch (error) {
   process.stderr.write(`[dsh-key-broker] ${error.message}\n`)
   process.exit(78)

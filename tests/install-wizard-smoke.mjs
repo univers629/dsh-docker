@@ -66,7 +66,12 @@ for (const readme of [readmeZh, readmeEn]) {
     'README must state the host sizing guidance before the install command',
   )
 }
-assert.match(compose, /\.\/data\/auth:\/opt\/dsh-auth:ro/)
+// 认证数据库绝不整目录挂进 Agent 容器（审计实测：Agent 同 uid 可读 state.json
+// 与 totp.key，用主密钥解出全部账户的 TOTP 密钥）。basic 模式只经叠加层挂单个
+// htpasswd 文件；其余模式一个文件都不挂。
+  assert.doesNotMatch(compose, /\.\/data\/auth:\/opt\/dsh-auth:ro/, 'data/auth 目录不得整目录挂载')
+  const basicAuthOverlay = await read('docker-compose.basic-auth.yml')
+  assert.match(basicAuthOverlay, /\.\/data\/auth\/htpasswd:\/opt\/dsh-auth\/htpasswd:ro/, 'basic 模式只挂 htpasswd 单文件')
 // The healthcheck must fail when DSH dies, so it probes DSH's own loopback
 // listener next to the unconditional Nginx 204.
 for (const [label, source] of [['compose', compose], ['Dockerfile', dockerfile]]) {
@@ -593,6 +598,8 @@ const prepareProject = async (name) => {
   await cp(join(repoRoot, 'docker-compose.yml'), join(directory, 'docker-compose.yml'))
   await cp(join(repoRoot, 'docker-compose.keys.yml'), join(directory, 'docker-compose.keys.yml'))
   await cp(join(repoRoot, 'docker-compose.isolated.yml'), join(directory, 'docker-compose.isolated.yml'))
+  // basic 模式需要 htpasswd 单文件叠加层（向导会用 --access basic 走一遍）。
+  await cp(join(repoRoot, 'docker-compose.basic-auth.yml'), join(directory, 'docker-compose.basic-auth.yml'))
   await writeFile(join(directory, 'dsh.sh'), '#!/bin/sh\nexit 0\n')
   await chmod(join(directory, 'dsh.sh'), 0o755)
   return directory

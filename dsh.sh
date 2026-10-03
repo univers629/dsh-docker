@@ -45,24 +45,48 @@ env_value() {
 
 # --- Compose 叠加文件与旁路容器 ---
 #
-# 密钥代理和出站代理都是独立容器，各自定义在一个叠加文件里，开关写在 .env：
-#   DSH_MODEL_BROKER=on        → 叠加 docker-compose.keys.yml（dsh-key-broker）
-#   DSH_KEY_ADMIN=on           → 叠加 docker-compose.keys-admin.yml（dsh-key-admin）
-#   DSH_EGRESS_MODE=allowlist  → 叠加 docker-compose.isolated.yml（dsh-egress + dsh-ingress）
-# 顺序不能反：isolated 里的 !reset / !override 要作用在前面两个文件合并出来的结果上。
+# 顺序是契约，与安装器 set_compose_args 一致：
+#   base → keys → keys-admin → auth → basic → multiuser → isolated
+# isolated 必须最后：它的 !reset / !override 要作用在前面合并出来的结果上。
 #
-# 叠加文件不存在时只警告并按未启用处理：老部署目录里没有这两个文件，而 docker compose
+#   DSH_MODEL_BROKER=on       → docker-compose.keys.yml（dsh-key-broker）
+#   DSH_KEY_ADMIN=on          → docker-compose.keys-admin.yml（dsh-key-admin）
+#   DSH_ACCESS_MODE=password  → docker-compose.auth.yml（dsh-auth）
+#   DSH_MULTI_USER=on         → docker-compose.multiuser.yml（dsh-instances + 七层入口）
+#   DSH_ACCESS_MODE=basic     → docker-compose.basic-auth.yml（只挂 htpasswd 单文件）
+#   DSH_EGRESS_MODE=allowlist|blocklist → docker-compose.isolated.yml（dsh-egress）
+#
+# 入口容器二选一，靠 profile 区分：单管理员用 dsh-authgate，多用户用 multiuser 叠加层里的
+# dsh-ingress。两者发布同一个宿主端口，同时激活会让第二个入口绑定失败——这也是这台 CLI
+# 之前与安装器分叉的地方：它只认密钥与出站叠加层，对密码/多用户部署重启会起出一套没有
+# 入口的容器。
+#
+# 叠加文件不存在时只警告并按未启用处理：老部署目录里没有这些文件，而 docker compose
 # 遇到缺失的 -f 会直接失败退出——那样连 stop / logs / status 这些只读操作都会一起废掉。
 COMPOSE_ARGS=(-f docker-compose.yml)
 SIDECAR_SERVICES=()
 BROKER_ENABLED=false
 KEY_ADMIN_ENABLED=false
+AUTH_ENABLED=false
+MULTI_USER_ENABLED=false
 EGRESS_ENABLED=false
+
+# 旁路容器去重：isolated 与 multiuser 都会带 dsh-ingress，重复的服务名会让 up 的参数
+# 列表里出现同一项。
+add_sidecars() {
+  local service
+  for service in "$@"; do
+    case " ${SIDECAR_SERVICES[*]-} " in
+      *" $service "*) ;;
+      *) SIDECAR_SERVICES+=("$service") ;;
+    esac
+  done
+}
 
 if [ "$(env_value DSH_MODEL_BROKER off)" = on ]; then
   if [ -f docker-compose.keys.yml ]; then
     COMPOSE_ARGS+=(-f docker-compose.keys.yml)
-    SIDECAR_SERVICES+=(dsh-key-broker)
+    add_sidecars dsh-key-broker
     BROKER_ENABLED=true
   else
     echo "[警告] .env 里 DSH_MODEL_BROKER=on，但目录里没有 docker-compose.keys.yml，已按未启用处理。" >&2
@@ -75,19 +99,64 @@ if [ "$(env_value DSH_KEY_ADMIN off)" = on ]; then
     echo "[警告] .env 里 DSH_KEY_ADMIN=on，但密钥代理没启用，面板已按未启用处理。" >&2
   elif [ -f docker-compose.keys-admin.yml ]; then
     COMPOSE_ARGS+=(-f docker-compose.keys-admin.yml)
-    SIDECAR_SERVICES+=(dsh-key-admin)
+    add_sidecars dsh-key-admin
     KEY_ADMIN_ENABLED=true
   else
     echo "[警告] .env 里 DSH_KEY_ADMIN=on，但目录里没有 docker-compose.keys-admin.yml，已按未启用处理。" >&2
   fi
 fi
-if [ "$(env_value DSH_EGRESS_MODE open)" = allowlist ]; then
+
+ACCESS_MODE="$(env_value DSH_ACCESS_MODE local)"
+MULTI_USER="$(env_value DSH_MULTI_USER off)"
+
+# 认证网关：password 模式与多用户模式都必需。多用户时入口由 multiuser 叠加层提供，
+# 因此不激活 authgate profile、也不把 dsh-authgate 当旁路容器。
+if [ "$ACCESS_MODE" = password ] || [ "$MULTI_USER" = on ]; then
+  if [ -f docker-compose.auth.yml ]; then
+    if [ "$MULTI_USER" = on ]; then
+      COMPOSE_ARGS+=(-f docker-compose.auth.yml)
+      add_sidecars dsh-auth
+    else
+      COMPOSE_ARGS+=(--profile authgate -f docker-compose.auth.yml)
+      add_sidecars dsh-auth dsh-authgate
+    fi
+    AUTH_ENABLED=true
+  else
+    echo "[警告] .env 需要认证网关（DSH_ACCESS_MODE=password 或 DSH_MULTI_USER=on），但目录里没有 docker-compose.auth.yml，已按未启用处理——那等于容器内不认证、外面也没有认证。" >&2
+  fi
+fi
+
+# basic 模式需要把 htpasswd 单独挂进容器（基础 compose 不再整目录挂 data/auth，
+# 那会把认证数据库暴露给容器内的 Agent）。只在文件已存在时叠加，否则 Docker 会
+# 在宿主上把那个路径造成目录。
+if [ "$ACCESS_MODE" = basic ] && [ -f data/auth/htpasswd ] && [ -f docker-compose.basic-auth.yml ]; then
+  COMPOSE_ARGS+=(-f docker-compose.basic-auth.yml)
+fi
+
+# 多用户改变入口与网络拓扑，必须带上编排服务与七层入口；它建立在认证层之上，
+# 因此认证层缺席时明确回报并跳过，而不是起出一套没人能登录的容器。
+if [ "$MULTI_USER" = on ]; then
+  if [ ! -f docker-compose.multiuser.yml ]; then
+    echo "[警告] .env 里 DSH_MULTI_USER=on，但目录里没有 docker-compose.multiuser.yml，已按单用户处理。" >&2
+  elif [ "$AUTH_ENABLED" != true ]; then
+    echo "[警告] .env 里 DSH_MULTI_USER=on，但认证网关未启用（缺 docker-compose.auth.yml），已按单用户处理——多用户必须由网关解析身份。" >&2
+  else
+    COMPOSE_ARGS+=(--profile multiuser -f docker-compose.multiuser.yml)
+    add_sidecars dsh-instances dsh-ingress
+    MULTI_USER_ENABLED=true
+  fi
+fi
+
+# blocklist 与 allowlist 用同一套隔离形态（都要把 dsh 收进没有网关的网络，出站全部经过
+# dsh-egress），两者只差代理里最后那道域名判定，因此除 open 之外都要叠加——与安装器一致。
+EGRESS_MODE="$(env_value DSH_EGRESS_MODE open)"
+if [ "$EGRESS_MODE" != open ]; then
   if [ -f docker-compose.isolated.yml ]; then
     COMPOSE_ARGS+=(-f docker-compose.isolated.yml)
-    SIDECAR_SERVICES+=(dsh-egress dsh-ingress)
+    add_sidecars dsh-egress dsh-ingress
     EGRESS_ENABLED=true
   else
-    echo "[警告] .env 里 DSH_EGRESS_MODE=allowlist，但目录里没有 docker-compose.isolated.yml，已按 open 处理。" >&2
+    echo "[警告] .env 里 DSH_EGRESS_MODE=${EGRESS_MODE}，但目录里没有 docker-compose.isolated.yml，已按 open 处理。" >&2
   fi
 fi
 
@@ -180,6 +249,62 @@ report_sidecar() {
   fi
   health="$(DOCKER inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}无健康检查{{end}}' "$name" 2>/dev/null || true)"
   printf '  %-15s %s：%s（健康：%s）\n' "$name" "$label" "$state" "${health:-未知}"
+}
+
+# 多用户运维：向实例编排服务发一次带令牌的请求。
+# 令牌由认证网关创建，两个容器共享 data/auth 挂载，因此这里直接读同一个文件。
+# 由用户名解析实例槽位号。
+#
+# 不走文本解析：/instances 的 JSON 里 uid 在 username **之前**，用 awk 顺序扫会错位
+# （实测把 alice 解析成了 bob 的 uid）。这里在容器内用 node 做精确匹配，注册表说什么就是什么。
+multiuser_uid_for() {
+  local username="$1" token uid
+  token="$(cat data/auth/instances.token 2>/dev/null || true)"
+  if [ -z "$token" ]; then
+    echo "[错误] 读不到 data/auth/instances.token（认证网关尚未创建它）。" >&2
+    return 1
+  fi
+  uid="$(DOCKER exec dsh-instances node -e '
+    const [username, token] = process.argv.slice(1)
+    fetch("http://127.0.0.1:8092/instances", { headers: { authorization: "Bearer " + token } })
+      .then((response) => response.json())
+      .then((data) => {
+        const hit = (data.instances || []).find((instance) => instance.username === username)
+        if (!hit) process.exit(3)
+        process.stdout.write(String(hit.uid))
+      })
+      .catch(() => process.exit(1))
+  ' "$username" "$token" 2>/dev/null)" || true
+  if [ -z "$uid" ]; then
+    echo "[错误] 找不到账户 $username 的实例；先用 ./dsh.sh users 看看现有实例。" >&2
+    return 1
+  fi
+  printf '%s\n' "$uid"
+}
+
+multiuser_request() {
+  local path="$1" body="$2" token
+  if ! DOCKER container inspect dsh-instances >/dev/null 2>&1; then
+    echo "[错误] 未发现 dsh-instances 容器：该部署不是多用户模式。" >&2
+    return 1
+  fi
+  if [ "$(DOCKER inspect --format '{{.State.Status}}' dsh-instances 2>/dev/null || true)" != running ]; then
+    echo "[错误] dsh-instances 当前未运行，请先 ./dsh.sh start。" >&2
+    return 1
+  fi
+  token="$(cat data/auth/instances.token 2>/dev/null || true)"
+  if [ -z "$token" ]; then
+    echo "[错误] 读不到 data/auth/instances.token（认证网关尚未创建它）。" >&2
+    return 1
+  fi
+  DOCKER exec dsh-instances node -e '
+    const [path, body, token] = process.argv.slice(1)
+    const init = { method: body ? "POST" : "GET", headers: { authorization: "Bearer " + token } }
+    if (body) { init.headers["content-type"] = "application/json"; init.body = body }
+    fetch("http://127.0.0.1:8092" + path, init)
+      .then(async (r) => { const text = await r.text(); process.stdout.write(text + "\n"); process.exit(r.ok ? 0 : 1) })
+      .catch((e) => { process.stderr.write(String(e) + "\n"); process.exit(1) })
+  ' "$path" "$body" "$token"
 }
 
 case "$ACTION" in
@@ -292,20 +417,50 @@ case "$ACTION" in
   verify)
     DOCKER exec dsh /usr/local/bin/verify-dsh-hardening
     ;;
+  users)
+    echo "==> 多用户实例（来自实例编排服务）："
+    multiuser_request /instances
+    ;;
+  start-user)
+    target="${2:-}"
+    if [ -z "$target" ]; then echo "用法: $0 start-user <用户名>" >&2; exit 1; fi
+    uid="$(multiuser_uid_for "$target")" || exit 1
+    echo "==> 启动 $target（uid $uid）..."
+    multiuser_request /instances/ensure "{\"uid\":$uid,\"username\":\"$target\"}"
+    ;;
+  stop-user)
+    target="${2:-}"
+    if [ -z "$target" ]; then echo "用法: $0 stop-user <用户名>" >&2; exit 1; fi
+    uid="$(multiuser_uid_for "$target")" || exit 1
+    echo "==> 停止 $target（uid $uid）..."
+    multiuser_request /instances/stop "{\"uid\":$uid}"
+    ;;
   status|ps)
     DOCKER compose "${COMPOSE_ARGS[@]}" ps
     echo
     echo "==> 旁路容器："
     report_sidecar dsh-key-broker "模型密钥代理" "$BROKER_ENABLED" DSH_MODEL_BROKER=on
     report_sidecar dsh-key-admin "密钥管理面板" "$KEY_ADMIN_ENABLED" DSH_KEY_ADMIN=on
+    report_sidecar dsh-auth "认证网关" "$AUTH_ENABLED" "DSH_ACCESS_MODE=password 或 DSH_MULTI_USER=on"
+    report_sidecar dsh-instances "实例编排服务" "$MULTI_USER_ENABLED" DSH_MULTI_USER=on
     report_sidecar dsh-egress "出站白名单代理" "$EGRESS_ENABLED" DSH_EGRESS_MODE=allowlist
-    report_sidecar dsh-ingress "宿主 3080 入口" "$EGRESS_ENABLED" DSH_EGRESS_MODE=allowlist
+    # 入口容器二选一：单管理员是 dsh-authgate，多用户是 dsh-ingress（出站隔离也用它）。
+    # 两个都列会让人以为两套入口可以并存，而它们发布的是同一个宿主端口。
+    if [ "$MULTI_USER_ENABLED" != true ]; then
+      report_sidecar dsh-authgate "宿主入口（单管理员）" "$AUTH_ENABLED" DSH_ACCESS_MODE=password
+    fi
+    if [ "$MULTI_USER_ENABLED" = true ] || [ "$EGRESS_ENABLED" = true ]; then
+      report_sidecar dsh-ingress "宿主入口（七层/出站）" true "DSH_MULTI_USER=on 或 DSH_EGRESS_MODE!=open"
+    fi
     ;;
   *)
-    echo "用法: $0 [start|update|stop|restart|logs [服务]|status|shell|root-shell|verify|keys|key-panel|egress|remove]"
+    echo "用法: $0 [start|update|stop|restart|logs [服务]|status|shell|root-shell|verify|keys|key-panel|egress|users|start-user <用户名>|stop-user <用户名>|remove]"
     echo "  keys      显示模型密钥代理（dsh-key-broker）的上游与用量，不显示密钥"
     echo "  key-panel 显示模型密钥管理面板（dsh-key-admin）的地址与访问令牌"
     echo "  egress    显示出站白名单代理（dsh-egress）的白名单规模与放行/拒绝计数"
+    echo "  users     列出多用户模式下的账户实例（在线/停止、忙碌、磁盘用量）"
+    echo "  start-user 手动拉起某个账户的实例（正常情况下由登录自动触发）"
+    echo "  stop-user 手动停止某个账户的实例（释放内存，数据保留）"
     exit 1
     ;;
 esac

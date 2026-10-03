@@ -37,16 +37,19 @@ Windows PowerShell（需要 Docker Desktop 并切换到 Linux containers）：
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
+> 上面这条 Linux 一行命令**连 TTY 都没有时会直接走「一键安装」**：Basic Auth + 随机用户名 `dsh` + 随机密码 + 随机容器 root 密码，模型密钥代理与出站隔离保持默认关闭，零提问。安装结束时会在终端打印访问地址和这些随机凭据（只显示这一次）。要自定义（选镜像来源、访问模式、反代、出站策略、填模型密钥）就开一个交互终端跑同一行命令，或在无 TTY 时显式加 `--non-interactive` 走旧的参数化模式。「一键」也随时可显式启用：`bash install.sh --quick`。
+
 安装器依次询问操作类型、镜像来源、访问保护方式、反向代理位置、域名与端口绑定、模型密钥代理的上游密钥、容器出站模式，并写入 `.env`。模型密钥那一步只问上游名字和密钥（自建网关多问一个 base_url），API 形态、模型清单、请求头都由安装器推断或向上游查询。模型密钥可以留空跳过，之后用菜单第 9 项或 `./install.sh model-key` 补填，该操作不重建容器。容器 root 密码仅以 sha512crypt 哈希写入 `data/secret/root.hash`，Basic Auth 密码仅以 bcrypt 哈希写入 `data/auth/htpasswd`，两者都不写入 `.env`。安装过程不使用特权容器、不挂载 Docker socket、不授予宿主机 root。
 
 | 菜单项 | 作用 |
 | --- | --- |
 | 1 全新安装 | 工程目录已存在时改为“重新配置并重建容器（保留挂载数据）” |
-| 2 在容器内更新 DSH | 在运行中的容器内从 npm 安装新版本并重打补丁，只重启 DSH 进程 |
+| 2 更新 | 进去再分：更新容器内 DSH（`update`），或换新镜像重建（`upgrade`） |
 | 3 启动 / 4 停止 / 5 重启 | 只操作已有容器，不重建，保留 apt 安装的工具链 |
 | 6 查看日志 / 7 查看状态 | 转发到 `./dsh.sh logs` 与 `status` |
 | 8 删除 | 先选数据范围（可保留会话、工作目录和插件），输入 `DELETE` 确认后清理容器、镜像、挂载、网络、构建缓存与工程目录 |
 | 9 补填模型 API 密钥 | 为已有部署写入密钥并启动密钥代理容器，不重建 `dsh` |
+| 10 模型密钥管理面板 | 浏览器里填密钥、拉模型列表，不重建 `dsh` |
 
 只有第 1 项会询问镜像来源，其余各项直接作用于现有容器。
 
@@ -64,6 +67,26 @@ DSH_ROOT_PASSWORD='至少12位的密码' bash install.sh install --access local 
 
 完整参数见 `bash install.sh --help`；Windows 对应 `powershell -ExecutionPolicy Bypass -File .\install.ps1`。
 
+### 受限网络下构建镜像
+
+直连 Debian 与 npm 官方源不稳定时，可以换成本地镜像再构建。构建参数是 Dockerfile 提供的，
+安装器不需要改动：
+
+```sh
+docker build \
+  --build-arg APT_MIRROR=https://mirrors.aliyun.com/debian \
+  --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
+  -t dsh:local .
+```
+
+- `APT_MIRROR`：替换 Debian 源。构建期会先用明文 HTTP 取回 CA 证书包（此时镜像里还没有证书，
+  HTTPS 源必然验签失败），随后切到 HTTPS 安装其余包——部分网络会截断明文通道上的大文件，
+  表现为单个 .deb 反复 500。
+- `NPM_REGISTRY`：替换 npm 源，并写入镜像配置，容器内安装插件时同样生效。
+
+构建期还统一开启了 apt 与 npm 的重试（`Acquire::Retries`、`fetch-retries`），
+网络抖动不再直接导致构建失败。
+
 ## 日常管理
 
 ```text
@@ -79,6 +102,8 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [服务]|status|shell|root-sh
 - 健康检查同时探测 Nginx 入口与 DSH 自身端口，DSH 崩溃循环时容器状态为 `unhealthy`。
 - 容器内更新会在替换 `/app/dsh` 之前预检 profile 插件的兼容性：DSH 会禁用 peer 范围不满足新版本的插件，这种禁用不会让进程起不来，存活检测和回滚都看不到，所以预检结果写进容器日志与更新状态。升级到新 DSH 版本前的准备见 [DSH 0.2.0-rc.2 迁移说明](docs/dsh-0.2.0-rc.2-migration.md)。
 
+### 删除
+
 彻底清空本项目：在工程目录运行菜单第 8 项，或执行 `./install.sh delete`（Windows：`powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`）。删除按精确名称清理本项目的容器、镜像、挂载、网络和工程目录，不使用子串匹配，也不会删除外部共享网络。
 
 删除会先问数据范围，最后才让人输入 `DELETE` 确认：
@@ -90,11 +115,57 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [服务]|status|shell|root-sh
 
 ## 公网访问与认证
 
-DSH 自身不提供登录认证，安装器默认把 3080 绑定到 `127.0.0.1`。公网访问必须经过 HTTPS 与认证入口，不要使用 `0.0.0.0`、`::` 等通配绑定。安装器提供三种访问模式：
+DSH 自身不提供登录认证，安装器默认把 3080 绑定到 `127.0.0.1`。公网访问必须经过 HTTPS 与认证入口，不要使用 `0.0.0.0`、`::` 等通配绑定。
+
+### 访问模式
+
+安装器提供四种访问模式：
 
 1. `local`：仅本地或 SSH 隧道访问。
 2. `trusted-proxy`：由 Cloudflare Access、Docker 面板、宿主机 Nginx、VPN 等外层入口负责认证，可记录 trusted hosts 与外部 Docker 网络。**该模式下容器内不做认证：直连源站 IP 并让请求被转发进 DSH 容器时，外层认证完全不参与，等同于无锁。** 自检：`curl -k -i -H "Host: <你的域名>" https://<源站IP>/` 返回 `200` 即为可绕过。该模式必须叠加一层不依赖 IP 与 Host 判断的凭据（Cloudflare Tunnel，或改用 `basic`），详见 `docs/security.md` 的「trusted-proxy 模式的边界与自检」。注意 `DSH_TRUSTED_HOSTS` 只是 cookie 绑定键，**不是访问白名单**。
 3. `basic`：容器内 Nginx 使用 bcrypt 密码文件认证，不含 MFA，公网部署仍需外层 HTTPS。这是唯一不依赖来源 IP 与 Host 判断的应用层锁。
+4. `password`：内置认证网关（`dsh-auth`）承担登录，支持账户注册、TOTP 两步验证与通行密钥。多用户模式固定使用这一项；单管理员想用图形登录页也可以选它。
+
+无论是否公网暴露，都建议设置 `DSH_AUTH_INGRESS_TOKEN`（入口与认证网关的共享密钥，`openssl rand -hex 32` 生成）。设置后认证网关的 `/__dsh_auth/verify` 判定端点只接受携带同一值的请求，容器网络里的其他组件无法凭一个会话 Cookie 换出身份头；留空时只靠网络边界防护。
+
+### 多用户模式
+
+自定义安装向导的访问保护方式选第 4 项（或在命令行加 `--multi-user`）会部署多用户模式：**账户注册 + 每个账户一个独立的 DSH 容器**。会话、文件与模型上下文按账户隔离，只有初始管理员能进入管理面板与模型密钥面板。
+
+它比单管理员模式多三个容器：
+
+| 容器 | 职责 |
+| --- | --- |
+| `dsh-auth` | 认证网关。提供登录页、注册页、实例等待页，并回答入口的 `auth_request` 判定 |
+| `dsh-instances` | 实例编排。**唯一持有 `docker.sock` 的组件**，按需创建/启停/删除每个账户的容器 |
+| `dsh-ingress` | 七层入口。按会话身份把请求转发到该账户自己的实例，并负责登出重定向与唤醒跳转 |
+
+- **认证方式**：Argon2id 口令、TOTP 两步验证与恢复码、通行密钥（Passkey）。多用户模式把访问模式固定为 `password`（认证在网关侧，容器内 Nginx 不再做 Basic Auth）。Passkey 需要固定 HTTPS 域名，设置 `DSH_PUBLIC_ORIGIN` 后启用。
+- **资源**：每实例默认内存上限 200MB；闲置 30 分钟后自动停用（内存归零、数据保留），用户回来时页面会显示等待页并在 10–30 秒内拉起。可用 `DSH_INSTANCE_MEMORY_MB` 与 `DSH_IDLE_TIMEOUT_SECONDS` 调整。
+- **注册门槛**：`DSH_REGISTER_GATE=open` 对能访问入口的任何人开放；`invite` 需要一个单次邀请码（安装结束打印一次，也可在管理面板里轮换）。
+- **账户数据**：`data/users/<uid>/`，属主为该实例 uid。删除账户可在管理面板里连带清理数据。
+- **管理面板**：`http://<绑定地址>:<端口>/admin`，仅初始管理员可访问，可停用/删除账户、重置口令、轮换邀请码、查看审计与实例水位。
+- **运维边界**：`dsh-instances` 持有 Docker socket 是这一模式的固有代价，因此它不含用户数据、不跑 Agent，且只在控制面内网接受带令牌的调用；用户实例不发布任何宿主端口。威胁模型与自检见 `docs/security.md` 的「多用户模式」一节。
+
+从单管理员切换到多用户只需重跑向导改选：原有 dsh 容器成为管理工作台（网络别名 `dsh-admin`），管理员数据原地保留，新用户走注册。反向切换会停用全部用户实例，需二次确认。
+
+#### 人机验证（防批量注册）
+
+多用户模式开放注册时，批量建号会消耗磁盘与内存配额。认证网关内置人机验证开关，在登录与注册表单上要求完成验证后才能提交：
+
+- 在管理面板（`/admin`）的「人机验证」里选择服务商并填入密钥对（site key / secret key），保存即生效，无需重启。密钥以 AES-256-GCM 封存后落盘，`state.json` 里只有密文。
+- 支持三家：Cloudflare Turnstile、hCaptcha、reCAPTCHA v2（代码内置清单）。开关状态随 `/api/auth/status` 公开给登录页，登录页会据此自动加载对应服务商的脚本；未开启时表单与现在完全一样。
+- 验证在网关侧完成（服务端向服务商的 siteverify 端点核验 token），Agent 容器读不到密钥。
+
+#### 每用户模型开放
+
+多用户模式下，哪些上游对普通用户开放由管理员决定：管理面板的「模型开放」为每个账户勾选可用的上游，保存后写入 `data/auth/broker-grants.json`（按实例令牌的 SHA-256 摘要识别调用者）。未被开放上游的账户发起的模型请求会被代理直接拒绝。
+
+- 用户侧不需要配置：账户被开放的上游会在其实例创建时自动写进 DSH 的 `settings.yaml`（走密钥代理的占位地址），登录后在工作台的「设置 → 模型」里直接可见、可用。之后管理员再调整开放范围时，实例在下次闲置回收重建后跟随新授权。
+- 单管理员（非多用户）模式没有这张表：所有已配置的上游对唯一用户全部可用。
+- 停用或删除账户会立即重算授权表，被撤销的实例令牌随即失效。
+
+### 反向代理配置
 
 宿主机 Nginx 反代示例：
 
@@ -157,7 +228,7 @@ flowchart LR
     agent x-- 不同网络，不可达 --x admin
 ```
 
-真实密钥只在宿主文件、`dsh-key-broker` 与 `dsh-key-admin` 之间流动，这三者和 `dsh` 容器之间没有共享卷；面板与 `dsh` 也不在同一个 Docker 网络上，因此 `dsh` 容器内既没有密钥字面值，也打不到持有密钥的面板。
+上图是单管理员模式的拓扑（多用户模式另有 `dsh-auth`、`dsh-instances`、`dsh-ingress` 三个容器，见「多用户模式」）。真实密钥只在宿主文件、`dsh-key-broker` 与 `dsh-key-admin` 之间流动，这三者和 `dsh` 容器之间没有共享卷；面板与 `dsh` 也不在同一个 Docker 网络上，因此 `dsh` 容器内既没有密钥字面值，也打不到持有密钥的面板。
 
 持久化目录：
 
