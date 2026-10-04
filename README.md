@@ -37,82 +37,15 @@ Windows PowerShell（需要 Docker Desktop 并切换到 Linux containers）：
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-> 上面这条 Linux 一行命令**默认打开安装向导**：即使 stdin 是 `curl` 的管道，只要进程还有控制终端（`/dev/tty` 可用），就会进入分页面向导。真正的无终端环境（CI、cron）不会静默安装，而是报错并给出两条出路：`install --non-interactive ...`（无值守）或 `install --quick`（一键）。一键安装不再是「没有 TTY」的隐式默认，而是向导安装分支里的一个选项：Basic Auth + 随机用户名 `dsh` + 随机密码 + 随机容器 root 密码，模型密钥代理与出站隔离保持默认关闭，零提问，结束时在终端打印访问地址和随机凭据（只显示这一次）。
+两条命令都进入分页向导：逐页选择镜像来源、访问保护方式、出站模式、模型密钥等，最后一页是执行前的确认摘要，答「否」时这一轮不写任何文件。常用参数：
 
-安装器依次询问操作类型、镜像来源、访问保护方式、反向代理位置、域名与端口绑定、模型密钥代理的上游密钥、容器出站模式，并写入 `.env`。模型密钥那一步只问上游名字和密钥（自建网关多问一个 base_url），API 形态、模型清单、请求头都由安装器推断或向上游查询。模型密钥可以留空跳过，之后用菜单第 9 项或 `./install.sh model-key` 补填，该操作不重建容器。容器 root 密码仅以 sha512crypt 哈希写入 `data/secret/root.hash`，Basic Auth 密码仅以 bcrypt 哈希写入 `data/auth/htpasswd`，两者都不写入 `.env`。安装过程不使用特权容器、不挂载 Docker socket、不授予宿主机 root。
+- `install --quick`：一键安装（Basic Auth + 随机账密 + 关闭密钥代理），零提问，装完打印访问地址与凭据。
+- `install --non-interactive`：无人值守，不提问、不生成随机凭据，配置取自参数与安全默认值。
+- `--menu`：已有部署上打开主菜单，用于更新、卸载或补填模型密钥。
+- 命令行上的密码会进入 shell 历史与 `ps`，改用 `DSH_ROOT_PASSWORD`、`DSH_BASIC_AUTH_PASSWORD` 等环境变量传入。
+- 完整参数见 `bash install.sh --help`；Windows 对应 `powershell -ExecutionPolicy Bypass -File .\install.ps1`。
 
-| 菜单项 | 作用 |
-| --- | --- |
-| 1 全新安装 | 工程目录已存在时改为“重新配置并重建容器（保留挂载数据）” |
-| 2 更新 | 进去再分：更新容器内 DSH（`update`），或换新镜像重建（`upgrade`） |
-| 3 启动 / 4 停止 / 5 重启 | 只操作已有容器，不重建，保留 apt 安装的工具链 |
-| 6 查看日志 / 7 查看状态 | 转发到 `./dsh.sh logs` 与 `status` |
-| 8 删除 | 先选数据范围（可保留会话、工作目录和插件），输入 `DELETE` 确认后清理容器、镜像、挂载、网络、构建缓存与工程目录 |
-| 9 补填模型 API 密钥 | 为已有部署写入密钥并启动密钥代理容器，不重建 `dsh` |
-| 10 模型密钥管理面板 | 浏览器里填密钥、拉模型列表，不重建 `dsh` |
-
-只有第 1 项会询问镜像来源，其余各项直接作用于现有容器。
-
-非交互安装：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- install --access local --image-source prebuilt --non-interactive
-```
-
-命令行上的密码会进入 shell 历史与 `ps`，建议改用环境变量：
-
-```bash
-DSH_ROOT_PASSWORD='至少12位的密码' bash install.sh install --access local --non-interactive
-```
-
-完整参数见 `bash install.sh --help`；Windows 对应 `powershell -ExecutionPolicy Bypass -File .\install.ps1`。
-
-### 已有部署要更新或卸载
-
-已装好的部署上 `install` 会因容器存在被拒绝（保护容器可写层里 apt 装的东西）。要更新或卸载，进主菜单选对应项：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- --menu
-```
-
-已在本工程目录时也可以直接 `./install.sh --menu`。
-
-### 向导的翻页操作
-
-交互式安装是**一页一题**的向导，占用终端的**备用屏幕缓冲**：进入后整个终端切到一张独立画布，页面不会滚进 scrollback；退出时终端恢复原样。主菜单列出全部生命周期动作，凡是有后续分支的选项都会开新的一页，不会退回成终端日志输出。
-
-```text
-       ▄▄▄▄▄▄▄▄     █▄
-   ▄███████████▄    ███▄ ▄▄▄▄█   ██████████    █████████  █████   █████
- ▄███████████████▄  ▀████████▀  ░░███░░░░███  ███░░░░░███░░███   ░░███
-▄██████████████████▄  ████▀▀     ░███   ░░███░███    ░░░  ░███    ░███
-██     ▀▀███████▀▀███████        ░███    ░███░░█████████  ░███████████
-██        ▀██████  ▀█████        ░███    ░███ ░░░░░░░░███ ░███░░░░░███
-███         ▀█████▄▄████         ░███    ███  ███    ░███ ░███    ░███
- ███          █████████          ██████████  ░░█████████  █████   █████
-  ▀██▄    █▄▄  ▀█████▀          ░░░░░░░░░░    ░░░░░░░░░  ░░░░░   ░░░░░
-   ▀▀███▄▄████▄▄▄██████▄
-      ▀▀███████▀▀▀
-
-  DeepSeek Harness - 选择操作 (1)
-
-  ▸ 安装 / 重新配置（保留挂载数据）
-      安装 DSH 或按新配置重建容器
-    更新
-      升级容器内的 DSH，或换成新镜像重建容器
-    卸载
-      清理容器、镜像、挂载、网络与工程目录
-
-  ↑/↓ 选择 | Enter 确认 | Esc 返回 | Ctrl+C 退出
-```
-
-页头每页重绘，格式为 `DeepSeek Harness - <页标题> (<页码>)`；页码随分支累计，所以不写死总页数。
-
-- **一键安装**在安装分支里显式选择（等同 `--quick`）：basic 认证 + 随机账密 + 关闭密钥代理，零提问，装完打印访问地址与凭据。它不再由「有没有 TTY」隐式决定。
-- 安装流程逐页询问镜像来源、访问保护方式、用户模式、注册门槛、闲置阈值、磁盘配额、出站模式、模型密钥、反向代理、域名与端口、容器 root 密码，最后一页是执行前的确认摘要（是 / 否）；答「否」时这一轮没有写任何文件。
-- 终端尺寸不够时按三级降级：宽度 <71 列时只画 DSH 大字（省掉 30 列的鲸鱼）；高度 <22 行时只留标题行，避免图案把选项挤出屏幕。
-- 容器已存在时，主菜单会把「安装」标注为当前不可用并说明先执行 `./dsh.sh remove`，而不是让人选了才报错。
-- 终端不支持翻页（被管道包住、`TERM=dumb`、CI）时自动退回编号输入，脚本化调用不受影响。
+容器 root 密码只以 sha512crypt 哈希写入 `data/secret/root.hash`，Basic Auth 密码只以 bcrypt 哈希写入 `data/auth/htpasswd`，两者都不写入 `.env`。安装过程不使用特权容器、不挂载 Docker socket、不授予宿主机 root。
 
 ### 受限网络下构建镜像
 
@@ -143,7 +76,7 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [服务]|status|shell|root-sh
 
 - `start` 只在容器不存在时准备镜像，之后复用同一个容器；`stop`、`restart` 与容器内的 `apt install` 都保留可写层。
 - `update` 只在容器内重装 DSH 的 npm 包，不是项目或镜像更新；`remove` 会删除容器可写层，绑定挂载保留。
-- 菜单第 2 项是"更新"，进去再分两支：更新容器内的 DSH（等同 `./install.sh update`，容器和镜像都不动），或换成新镜像并重建容器（等同 `./install.sh upgrade`）。后者沿用现有 `.env`，不重问配置，会话、插件、`workspace/` 与模型密钥全部保留，只有容器可写层里 `apt` 装的系统包要重装；收尾按项目标签回收换下来的悬空镜像、残留容器与空网络，不碰宿主上其他项目。
+- 菜单里的"更新"进去再分两支：更新容器内的 DSH（等同 `./install.sh update`，容器和镜像都不动），或换成新镜像并重建容器（等同 `./install.sh upgrade`）。后者沿用现有 `.env`，不重问配置，会话、插件、`workspace/` 与模型密钥全部保留，只有容器可写层里 `apt` 装的系统包要重装；收尾按项目标签回收换下来的悬空镜像、残留容器与空网络，不碰宿主上其他项目。
 - `shell` 进入非特权 `dsh` 账户，`root-shell` 是宿主机侧的管理通道（容器内部无法以此提权）。
 - `verify` 在容器内运行整套加固自检，`keys` 与 `egress` 打印密钥代理和出站代理的状态，`key-panel` 打印密钥管理面板的地址与访问令牌。
 - 健康检查同时探测 Nginx 入口与 DSH 自身端口，DSH 崩溃循环时容器状态为 `unhealthy`。
@@ -151,7 +84,7 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [服务]|status|shell|root-sh
 
 ### 删除
 
-彻底清空本项目：在工程目录运行菜单第 8 项，或执行 `./install.sh delete`（Windows：`powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`）。删除按精确名称清理本项目的容器、镜像、挂载、网络和工程目录，不使用子串匹配，也不会删除外部共享网络。
+彻底清空本项目：在工程目录运行 `./install.sh delete`，或从主菜单选「卸载」（Windows：`powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`）。删除按精确名称清理本项目的容器、镜像、挂载、网络和工程目录，不使用子串匹配，也不会删除外部共享网络。
 
 删除会先问数据范围，最后才让人输入 `DELETE` 确认：
 
@@ -177,7 +110,7 @@ DSH 自身不提供登录认证，安装器默认把 3080 绑定到 `127.0.0.1`�
 
 ### 多用户模式
 
-自定义安装向导的访问保护方式选第 4 项（或在命令行加 `--multi-user`）会部署多用户模式：**账户注册 + 每个账户一个独立的 DSH 容器**。会话、文件与模型上下文按账户隔离，只有初始管理员能进入管理面板与模型密钥面板。
+安装向导的访问保护方式选「多用户」（或在命令行加 `--multi-user`）会部署多用户模式：**账户注册 + 每个账户一个独立的 DSH 容器**。会话、文件与模型上下文按账户隔离，只有初始管理员能进入管理面板与模型密钥面板。
 
 它比单管理员模式多三个容器：
 

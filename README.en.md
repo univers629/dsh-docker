@@ -37,82 +37,15 @@ Windows PowerShell (requires Docker Desktop in Linux containers mode):
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-> The Linux one-liner above **opens the installation wizard by default**: even though stdin is curl's pipe, the wizard runs whenever the process still has a controlling terminal (`/dev/tty` is available). A genuinely terminal-less environment (CI, cron) does not silently install; it fails with two escape hatches: `install --non-interactive ...` (unattended) or `install --quick` (quick install). Quick install is no longer the implicit no-TTY default — it is one option inside the wizard's install branch: Basic Auth with a random `dsh` user, a random password, and a random container root password, with the model-key broker and outbound isolation left off, zero prompts, printing the access URL and those credentials once at the end.
+Both commands open the paged wizard: it asks page by page about image source, access protection, egress mode, model keys, and so on, with a pre-execution confirmation summary last; answering no leaves the run with nothing written. Common arguments:
 
-The installer asks what to do, where the image comes from, how access is protected, where the reverse proxy runs, which domain and port binding to use, which model-key-broker upstreams to configure, and which outbound mode to use, then writes `.env`. The key step only asks for an upstream name and its key (plus a base_url for self-hosted gateways); the API shape, model list, and request headers are inferred or queried from the upstream. Model keys can be left empty and added later with menu item 10 or `./install.sh model-key`, which does not recreate the container. The container root password is stored only as a sha512crypt hash in `data/secret/root.hash` and the Basic Auth password only as a bcrypt hash in `data/auth/htpasswd`; neither is written to `.env`. Nothing in this flow uses a privileged container, mounts a Docker socket, or grants host root.
+- `install --quick`: quick install (Basic Auth with random credentials, key broker off), zero prompts, printing the access URL and credentials at the end.
+- `install --non-interactive`: unattended, no prompts and no generated credentials; values come from arguments and safe defaults.
+- `--menu`: open the main menu on an existing deployment to update, uninstall, or add model keys.
+- Passwords on the command line land in shell history and `ps`; pass `DSH_ROOT_PASSWORD`, `DSH_BASIC_AUTH_PASSWORD`, and similar via environment variables instead.
+- Full options are in `bash install.sh --help`; on Windows use `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
 
-| Menu item | What it does |
-| --- | --- |
-| 1 Fresh install | Becomes "reconfigure and recreate the container (mounted data kept)" when the project directory already exists |
-| 2 Update | Branches in two: update DSH inside the container (`update`) or move to a new image and recreate (`upgrade`) |
-| 3 Start / 4 Stop / 5 Restart | Acts on the existing container only, keeping apt-installed toolchains |
-| 6 Logs / 7 Status | Forwarded to `./dsh.sh logs` and `status` |
-| 8 Delete | Asks for the data scope first (sessions, workspace, and plugins can be kept), then removes the container, images, mounts, networks, build cache, and project directory after a `DELETE` confirmation |
-| 9 Fill in model API keys | Writes keys for an existing deployment and starts the broker container without recreating `dsh` |
-| 10 Model key management panel | Fill in keys and fetch model lists in the browser without recreating `dsh` |
-
-Only item 1 asks about the image source; the rest act on the existing container.
-
-Non-interactive install:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- install --access local --image-source prebuilt --non-interactive
-```
-
-Passwords on the command line land in shell history and `ps`; prefer an environment variable:
-
-```bash
-DSH_ROOT_PASSWORD='a password of at least 12 characters' bash install.sh install --access local --non-interactive
-```
-
-Full options are in `bash install.sh --help`; on Windows use `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
-
-### Updating or uninstalling an existing deployment
-
-On an installed deployment `install` is refused because the container already exists (that protects the apt-installed software in the container writable layer). To update or uninstall, enter the main menu and pick the entry:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- --menu
-```
-
-Inside the project directory you can also run `./install.sh --menu` directly.
-
-### Paging through the wizard
-
-The interactive installer is a **one-question-per-page** wizard that takes over the terminal's **alternate screen buffer**: the whole terminal switches to a separate canvas, pages never scroll into the scrollback, and the original screen is restored on exit. The main menu lists every lifecycle action, and any option with follow-up branches opens a new page instead of falling back to log output.
-
-```text
-       ▄▄▄▄▄▄▄▄     █▄
-   ▄███████████▄    ███▄ ▄▄▄▄█   ██████████    █████████  █████   █████
- ▄███████████████▄  ▀████████▀  ░░███░░░░███  ███░░░░░███░░███   ░░███
-▄██████████████████▄  ████▀▀     ░███   ░░███░███    ░░░  ░███    ░███
-██     ▀▀███████▀▀███████        ░███    ░███░░█████████  ░███████████
-██        ▀██████  ▀█████        ░███    ░███ ░░░░░░░░███ ░███░░░░░███
-███         ▀█████▄▄████         ░███    ███  ███    ░███ ░███    ░███
- ███          █████████          ██████████  ░░█████████  █████   █████
-  ▀██▄    █▄▄  ▀█████▀          ░░░░░░░░░░    ░░░░░░░░░  ░░░░░   ░░░░░
-   ▀▀███▄▄████▄▄▄██████▄
-      ▀▀███████▀▀▀
-
-  DeepSeek Harness - Choose an action (1)
-
-  ▸ Install / reconfigure (keep mounted data)
-      Install DSH or rebuild the container from a new configuration
-    Update
-      Upgrade DSH in the container, or move to a new image and recreate
-    Uninstall
-      Remove containers, images, mounts, networks, and the project directory
-
-  ↑/↓ select | Enter confirm | Esc back | Ctrl+C exit
-```
-
-The header is redrawn on every page as `DeepSeek Harness - <page title> (<page number>)`; the number accumulates along the branch, so no total is hard-coded.
-
-- **Quick install** is chosen explicitly inside the install branch (equivalent to `--quick`): basic auth with random credentials and the key broker off, zero prompts, printing the access URL and credentials at the end. It is no longer decided implicitly by whether a TTY is present.
-- The install flow asks page by page about image source, access protection, user mode, registration gate, idle threshold, disk quota, egress mode, model keys, reverse proxy, domain and port, and the container root password. The last page is a pre-execution confirmation summary (yes / no); answering no leaves the run with nothing written.
-- Small terminals degrade in three steps: below 71 columns only the DSH wordmark is drawn (dropping the 30-column whale); below 22 rows only the title line remains, so artwork never pushes the options off screen.
-- When a container already exists, the main menu marks install as unavailable and says to run `./dsh.sh remove` first, instead of failing only after the choice.
-- Terminals that cannot page (piped input, `TERM=dumb`, CI) fall back to numbered input, so scripted calls are unaffected.
+The container root password is stored only as a sha512crypt hash in `data/secret/root.hash` and the Basic Auth password only as a bcrypt hash in `data/auth/htpasswd`; neither is written to `.env`. Nothing in this flow uses a privileged container, mounts a Docker socket, or grants host root.
 
 ### Building behind a restricted network
 
@@ -139,7 +72,7 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [service]|status|shell|root-s
 
 - `start` prepares the image only when the container is missing and reuses the same container afterwards; `stop`, `restart`, and in-container `apt install` all keep the writable layer.
 - `update` reinstalls the DSH npm package inside the container only — not a project or image update; `remove` drops the container writable layer and keeps bind mounts.
-- Menu item 2 ("Update") branches in two: update DSH inside the container (equivalent to `./install.sh update`; neither container nor image changes) or move to a new image and recreate the container (equivalent to `./install.sh upgrade`). The latter reuses the existing `.env` without re-asking anything, keeps sessions, plugins, `workspace/`, and model keys, and only requires reinstalling system packages from `apt` in the writable layer; the project label is used to reclaim the replaced dangling images, leftover containers, and empty networks without touching other host projects.
+- The menu's "Update" entry branches in two: update DSH inside the container (equivalent to `./install.sh update`; neither container nor image changes) or move to a new image and recreate the container (equivalent to `./install.sh upgrade`). The latter reuses the existing `.env` without re-asking anything, keeps sessions, plugins, `workspace/`, and model keys, and only requires reinstalling system packages from `apt` in the writable layer; the project label is used to reclaim the replaced dangling images, leftover containers, and empty networks without touching other host projects.
 - `shell` enters the unprivileged `dsh` account; `root-shell` is a host-side administration channel (it cannot be used to escalate inside the container).
 - `verify` runs the full hardening self-check inside the container; `keys` and `egress` print broker and egress-proxy status; `key-panel` prints the panel URL and its access token.
 - The health check probes both the Nginx entry point and the DSH port itself, so a crash-looping DSH reports `unhealthy`.
@@ -147,7 +80,7 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [service]|status|shell|root-s
 
 ### Deleting
 
-To clear the project completely, run menu item 8 in the project directory or `./install.sh delete` (Windows: `powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`). Deletion cleans the project's containers, images, mounts, networks, and directory by exact name — no substring matching, and no shared external networks are removed.
+To clear the project completely, run `./install.sh delete` or pick "Uninstall" in the main menu (Windows: `powershell -ExecutionPolicy Bypass -File .\install.ps1 -DshAction delete`). Deletion cleans the project's containers, images, mounts, networks, and directory by exact name — no substring matching, and no shared external networks are removed.
 
 Deletion asks for the data scope first and only then requires typing `DELETE`:
 
@@ -173,7 +106,7 @@ Exposed or not, set `DSH_AUTH_INGRESS_TOKEN` (a shared secret between the entry 
 
 ### Multi-user mode
 
-Choosing item 4 for access protection in the custom installer (or passing `--multi-user`) deploys multi-user mode: **account registration plus one dedicated DSH container per account**. Sessions, files, and model context are isolated per account, and only the initial administrator can reach the admin panel and the model-key panel.
+Choosing the multi-user access mode in the installer (or passing `--multi-user`) deploys multi-user mode: **account registration plus one dedicated DSH container per account**. Sessions, files, and model context are isolated per account, and only the initial administrator can reach the admin panel and the model-key panel.
 
 It adds three containers over single-admin mode:
 
