@@ -976,10 +976,15 @@ function New-DshPassword {
 # 翻页向导：一页问一件事，↑/↓ 选择、Enter 确认、Esc 回上一页。
 # 与 install.sh 的 ui_page_select 对齐（那边的 tty 判定在这里由 Console 能力等价表达）。
 # 没有控制台（重定向、CI）时退回编号输入，保证脚本化调用不受影响。
+#
+# 向导占用终端的备用屏幕缓冲（alternate screen buffer），与 install.sh 及 dpanel 的
+# 安装器同一种形态：进入后整个终端切到一张独立画布，向导画面不会滚进 scrollback；
+# 退出时终端恢复原样。用 Clear-Host 只能清主屏幕，历史仍留在日志里。
 $script:UiTui = $false
 $script:UiStep = 0
 $script:UiTotal = 0
 $script:UiBack = $false
+$script:UiAltScreen = $false
 
 function Test-UiTui {
     try {
@@ -987,6 +992,20 @@ function Test-UiTui {
         $null = [Console]::KeyAvailable
         return $true
     } catch { return $false }
+}
+
+# 进入备用屏幕：切到独立画布并清屏、隐藏光标。幂等。
+function Enter-UiAltScreen {
+    if ($script:UiAltScreen) { return }
+    try { Write-Host -NoNewline "`e[?1049h`e[2J`e[H`e[?25l" } catch { }
+    $script:UiAltScreen = $true
+}
+
+# 退出备用屏幕：恢复光标与终端原有画面。幂等。
+function Exit-UiAltScreen {
+    if (-not $script:UiAltScreen) { return }
+    try { Write-Host -NoNewline "`e[?25h`e[?1049l" } catch { }
+    $script:UiAltScreen = $false
 }
 
 # 一页单选。$Items 每项为 @{ Value; Label; Desc }。
@@ -1014,6 +1033,7 @@ function Select-UiPage {
     }
 
     $index = [Math]::Max(0, [Math]::Min($DefaultIndex, $Items.Count - 1))
+    Enter-UiAltScreen
     while ($true) {
         Clear-Host
         # 标题并入页头（对齐 dpanel 的 `DPanel - 安装方式 (3/9)`），正文直接列选项
@@ -1133,6 +1153,9 @@ function Confirm-InstallPlan {
         @{ Value = 'yes'; Label = '是'; Desc = '执行当前操作' }
         @{ Value = 'no'; Label = '否'; Desc = '不执行，返回上一步' }
     )
+    # 确认页是向导的最后一页：无论选是还是否都要离开备用屏幕，
+    # 否则后续的安装输出（或取消提示）会落在用户看不见的画布上。
+    Exit-UiAltScreen
     if ($answer -ne 'yes') {
         Write-Host '已取消，未做任何改动。' -ForegroundColor Yellow
         exit 0
@@ -1233,16 +1256,16 @@ function Confirm-DshDelete {
     if ($NonInteractive) { throw '删除是破坏性操作，需要交互确认；请不要使用 -NonInteractive。' }
     # 先问范围，再让人输 DELETE：最后那一下是不可逆的闸门，它前面不该再有别的问题，
     # 而且警告文案要能反映刚选的范围。
-    Write-Host '数据范围：'
-    Write-Host '1) 全部删除（容器、镜像、.env、模型密钥、root 密码哈希，以及 data\ 和 workspace\ 里的一切）'
-    Write-Host '2) 保留会话、工作目录和插件：workspace\、data\dsh\sessions\、data\dsh\profiles\'
-    Write-Host '    其余照样删干净：密钥、密码哈希、.env、data\home 里的工具链都不留。'
-    Write-Host '    重新安装到同一个目录时，安装器会自己把项目源码取回来，这三样接着用。'
-    switch (Ask '请选择' '1') {
-        '1' { $env:DSH_DELETE_KEEP = '0' }
-        '2' { $env:DSH_DELETE_KEEP = '1' }
-        default { throw '无效选项。' }
-    }
+    # 范围是一页面板（与其他分支一致）；DELETE 那一步刻意保留手输，
+    # 因为不可逆操作需要一次无法误触的确认。
+    $script:UiStep = 2
+    $script:UiTotal = 0
+    $scope = Select-UiPage -Title '删除的数据范围' -DefaultIndex 0 -Items @(
+        @{ Value = '0'; Label = '全部删除'; Desc = '容器、镜像、.env、模型密钥、root 密码哈希，以及 data\ 和 workspace\ 里的一切' }
+        @{ Value = '1'; Label = '保留会话、工作目录和插件'; Desc = '只留 workspace\、data\dsh\sessions\、data\dsh\profiles\；密钥、密码哈希、.env、data\home 里的工具链都不留' }
+    )
+    $env:DSH_DELETE_KEEP = $scope
+    Exit-UiAltScreen
     Write-Host ''
     Write-Host '[警告] 将删除 dsh 容器、DSH 镜像（dsh:* 与 .env 记录的预构建引用）、本项目挂载和网络、全局 Docker 构建缓存。' -ForegroundColor Yellow
     if ($env:DSH_DELETE_KEEP -eq '1') {
@@ -1864,9 +1887,11 @@ if ($DshAction -in @('install','configure')) {
         Write-Host '==> 一键安装：basic 认证 + 随机账密 + 关闭密钥代理，装完打印访问地址与凭据。'
     }
     if ($interactive -and -not $ImageSource) {
-        $imageDefault = if ($imageSource -eq 'build') { '2' } else { '1' }
-        Write-Host 'Debian 13 镜像来源：1=拉取公开预构建镜像（推荐）  2=在本机构建镜像（不编译 DSH 源码，约几分钟）'
-        $imageSource = switch (Ask '请选择' $imageDefault) { '2' {'build'}; default {'prebuilt'} }
+        $imageDefault = if ($imageSource -eq 'build') { 1 } else { 0 }
+        $imageSource = Select-UiPage -Title 'Debian 13 镜像来源' -DefaultIndex $imageDefault -Items @(
+            @{ Value = 'prebuilt'; Label = '拉取公开预构建镜像'; Desc = '推荐：不在本机编译 DSH，安装耗时约等于下载耗时' }
+            @{ Value = 'build'; Label = '在本机构建镜像'; Desc = '用当前工程 Dockerfile 现场构建，不编译 DSH 源码，约几分钟' }
+        )
     }
     if ($Image) { $imageRef = $Image }
     elseif ($imageSource -eq 'build') { $imageRef = $DefaultLocalImage }
@@ -1876,12 +1901,20 @@ if ($DshAction -in @('install','configure')) {
         if ($imageRef -eq $DefaultLocalImage) { $imageRef = $DefaultPrebuiltImage }
     }
     if ($interactive -and -not $Access) {
-        $accessDefault = switch ($accessMode) { 'trusted-proxy' {'2'}; 'basic' {'3'}; 'password' {'4'}; default {'1'} }
-        $accessMode = switch (Ask "访问保护：1=本机/SSH  2=已有 Access/面板  3=内置 Basic Auth  4=内置认证网关（支持多用户）" $accessDefault) { '2' {'trusted-proxy'}; '3' {'basic'}; '4' {'password'}; default {'local'} }
+        $accessDefault = switch ($accessMode) { 'trusted-proxy' { 1 }; 'basic' { 2 }; 'password' { 3 }; default { 0 } }
+        $accessMode = Select-UiPage -Title '访问保护方式' -DefaultIndex $accessDefault -Items @(
+            @{ Value = 'local'; Label = '仅本机或 SSH 隧道'; Desc = '容器内不做认证，只绑定回环地址' }
+            @{ Value = 'trusted-proxy'; Label = '已有 Cloudflare Access / 面板认证 / 私有 VPN'; Desc = '容器内不做认证，完全依赖外层入口' }
+            @{ Value = 'basic'; Label = 'DSH 内置 Nginx Basic Auth'; Desc = '容器内用 bcrypt 密码文件认证；外层仍须提供 HTTPS' }
+            @{ Value = 'password'; Label = '多用户（开放注册 + 每实例独立容器）'; Desc = '认证由内置网关承担，可注册账户、TOTP、通行密钥' }
+        )
     }
     if ($interactive -and -not $MultiUser -and -not $NoMultiUser -and $accessMode -eq 'password') {
-        $multiDefault = if ((Get-ComposeEnvValue $envFile 'DSH_MULTI_USER' 'off') -eq 'on') { '1' } else { '2' }
-        $multiUser = switch (Ask "多用户：1=开启（每账户独立容器，密码登录）  2=关闭（单管理员）" $multiDefault) { '1' {'on'}; default {'off'} }
+        $multiDefault = if ((Get-ComposeEnvValue $envFile 'DSH_MULTI_USER' 'off') -eq 'on') { 0 } else { 1 }
+        $multiUser = Select-UiPage -Title '用户模式' -DefaultIndex $multiDefault -Items @(
+            @{ Value = 'on'; Label = '多用户'; Desc = '开放注册；每个账户拥有独立会话与文件（独立 DSH 实例，默认 200MB 上限 + 闲置自动停用）' }
+            @{ Value = 'off'; Label = '单管理员'; Desc = '一套管理员凭据，不开放注册' }
+        )
     }
     if (-not $AckTrustedProxy -and $accessMode -eq 'trusted-proxy') {
         Write-Host ''
@@ -2060,20 +2093,12 @@ if ($DshAction -in @('install','configure')) {
 
     # ---- 出站模式 ----
     if ($interactive -and -not $Egress) {
-        Write-Host '容器出站网络（三种都不影响模型请求：那条路由走 dsh-key-broker，是另一个容器出网）：'
-        Write-Host '1) open：容器直接访问任意外网地址。'
-        Write-Host '2) blocklist：出站经 dsh-egress 代理，默认放行，只挡黑名单里的域名。'
-        Write-Host '    内置黑名单是常见的一键公网隧道服务（cloudflared 快速隧道、ngrok、cpolar 等），'
-        Write-Host '    它们能把容器里的端口发布到公网，等于把模型密钥代理变成别人能用的免费网关。'
-        Write-Host '    Agent 的网页搜索、文档站、第三方下载都照常可用。'
-        Write-Host '3) allowlist：出站经 dsh-egress 代理，只放行白名单里的域名，其余返回 403。'
-        Write-Host '    内置白名单覆盖 Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，'
-        Write-Host '    足够 apt / pip / npm / git 正常工作；网页搜索和文档站要自己补域名。'
-        Write-Host '  选 2 或 3 之后：dsh 容器不再直连外网，宿主 3080 改由 dsh-ingress 发布'
-        Write-Host '  （反向代理仍写 http://dsh:3080）。两份清单和 2/3 之间的切换之后都能在密钥管理'
-        Write-Host '  面板里热改，只有和 1 之间的切换要重跑这个安装器。'
-        $egressDefault = switch ($egressMode) { 'blocklist' { '2' } 'allowlist' { '3' } default { '1' } }
-        $egressMode = switch (Ask '请选择' $egressDefault) { '2' {'blocklist'}; '3' {'allowlist'}; default {'open'} }
+        $egressDefault = switch ($egressMode) { 'blocklist' { 1 } 'allowlist' { 2 } default { 0 } }
+        $egressMode = Select-UiPage -Title '容器出站网络' -DefaultIndex $egressDefault -Items @(
+            @{ Value = 'open'; Label = 'open'; Desc = '容器直接访问任意外网地址' }
+            @{ Value = 'blocklist'; Label = 'blocklist'; Desc = '出站经 dsh-egress 代理，默认放行，只挡黑名单里的域名（内置清单挡 cloudflared 快速隧道、ngrok、cpolar 这类一键公网隧道服务）' }
+            @{ Value = 'allowlist'; Label = 'allowlist'; Desc = '出站经 dsh-egress 代理，只放行白名单里的域名，其余返回 403（内置白名单覆盖 Debian、npm、PyPI、GitHub、ghcr.io 等）' }
+        )
     }
     if ($egressMode -eq 'allowlist' -and $interactive -and $EgressAllow.Count -eq 0) {
         Write-Host '    填写的域名会追加在内置白名单之后（内置的软件源始终放行），留空表示只用内置白名单。'
@@ -2338,6 +2363,11 @@ function Invoke-DshUpgrade {
     & docker system df
 }
 
+# 维护类动作（启动/停止/日志/状态/更新/卸载等）没有后续向导页，它们的输出必须落在
+# 普通终端上。install/configure 不在这里还原：Confirm-InstallPlan 之前还有向导页，
+# 提前还原会让后续页面退回成日志输出。
+if ($DshAction -notin @('install', 'configure')) { Exit-UiAltScreen }
+
 switch ($DshAction) {
     { $_ -in @('install','configure') } {
         # 确认摘要页（对齐 dpanel 安装器第 7 页「确认是否执行」）：把这一轮的选择汇总成
@@ -2346,6 +2376,9 @@ switch ($DshAction) {
         Confirm-InstallPlan -AccessMode $accessMode -MultiUser $multiUser `
             -ImageSource $imageSource -ImageRef $imageRef -Bind $bind `
             -ModelBroker $modelBroker -EgressMode $egressMode -KeyAdmin $keyAdmin
+        # Confirm-InstallPlan 内部已离开备用屏幕；这里是兜底，
+        # 防止它因 -not $interactive 提前 return 时把终端留在画布里。
+        Exit-UiAltScreen
         # 预构建优先，但公网拉取可能因为网络或尚未发布而失败；这时退回本机构建，
         # 而不是让整次安装中断。回退发生在写入 .env 之前，所以配置不会记错来源。
         $env:DSH_IMAGE = $imageRef

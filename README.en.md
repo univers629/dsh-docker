@@ -37,7 +37,7 @@ Windows PowerShell (requires Docker Desktop in Linux containers mode):
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-> When the Linux one-liner above has no TTY, it goes straight to **quick install**: Basic Auth with a random `dsh` user, a random password, and a random container root password; the model-key broker and outbound isolation stay off, with zero prompts. The access URL and those randomly generated credentials are printed at the end (one time only). To customize (image source, access mode, reverse proxy, egress policy, model keys), run the same line in an interactive terminal, or pass `--non-interactive` explicitly on a TTY-less run to keep the old parameterized behavior. Quick install can also be requested anytime with `bash install.sh --quick`.
+> The Linux one-liner above **opens the installation wizard by default**: even though stdin is curl's pipe, the wizard runs whenever the process still has a controlling terminal (`/dev/tty` is available). A genuinely terminal-less environment (CI, cron) does not silently install; it fails with two escape hatches: `install --non-interactive ...` (unattended) or `install --quick` (quick install). Quick install is no longer the implicit no-TTY default — it is one option inside the wizard's install branch: Basic Auth with a random `dsh` user, a random password, and a random container root password, with the model-key broker and outbound isolation left off, zero prompts, printing the access URL and those credentials once at the end.
 
 The installer asks what to do, where the image comes from, how access is protected, where the reverse proxy runs, which domain and port binding to use, which model-key-broker upstreams to configure, and which outbound mode to use, then writes `.env`. The key step only asks for an upstream name and its key (plus a base_url for self-hosted gateways); the API shape, model list, and request headers are inferred or queried from the upstream. Model keys can be left empty and added later with menu item 10 or `./install.sh model-key`, which does not recreate the container. The container root password is stored only as a sha512crypt hash in `data/secret/root.hash` and the Basic Auth password only as a bcrypt hash in `data/auth/htpasswd`; neither is written to `.env`. Nothing in this flow uses a privileged container, mounts a Docker socket, or grants host root.
 
@@ -69,7 +69,7 @@ Full options are in `bash install.sh --help`; on Windows use `powershell -Execut
 
 ### Updating or uninstalling an existing deployment
 
-A TTY-less `curl | bash` run defaults to quick install, and the main menu never appears; on an existing deployment `install` is then refused because the container already exists. Enter the menu explicitly in that case:
+On an installed deployment `install` is refused because the container already exists (that protects the apt-installed software in the container writable layer). To update or uninstall, enter the main menu and pick the entry:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- --menu
@@ -79,14 +79,24 @@ Inside the project directory you can also run `./install.sh --menu` directly.
 
 ### Paging through the wizard
 
-The interactive installer is a **one-question-per-page** wizard: the main menu lists every lifecycle action (install, update, start, stop, restart, logs, status, uninstall, add keys, key panel), and choosing install opens a further page asking "quick install or manual configuration". Manual configuration then walks image source, access protection, egress policy, and model keys page by page.
+The interactive installer is a **one-question-per-page** wizard that takes over the terminal's **alternate screen buffer**: the whole terminal switches to a separate canvas, pages never scroll into the scrollback, and the original screen is restored on exit. The main menu lists every lifecycle action, and any option with follow-up branches opens a new page instead of falling back to log output.
 
 ```text
-  DeepSeek Harness installer   (2/…)
+       ▄▄▄▄▄▄▄▄     █▄
+   ▄███████████▄    ███▄ ▄▄▄▄█   ██████████    █████████  █████   █████
+ ▄███████████████▄  ▀████████▀  ░░███░░░░███  ███░░░░░███░░███   ░░███
+▄██████████████████▄  ████▀▀     ░███   ░░███░███    ░░░  ░███    ░███
+██     ▀▀███████▀▀███████        ░███    ░███░░█████████  ░███████████
+██        ▀██████  ▀█████        ░███    ░███ ░░░░░░░░███ ░███░░░░░███
+███         ▀█████▄▄████         ░███    ███  ███    ░███ ░███    ░███
+ ███          █████████          ██████████  ░░█████████  █████   █████
+  ▀██▄    █▄▄  ▀█████▀          ░░░░░░░░░░    ░░░░░░░░░  ░░░░░   ░░░░░
+   ▀▀███▄▄████▄▄▄██████▄
+      ▀▀███████▀▀▀
 
-  Choose an action
+  DeepSeek Harness - Choose an action (1)
 
-  > Install
+  ▸ Install / reconfigure (keep mounted data)
       Install DSH or rebuild the container from a new configuration
     Update
       Upgrade DSH in the container, or move to a new image and recreate
@@ -96,7 +106,11 @@ The interactive installer is a **one-question-per-page** wizard: the main menu l
   ↑/↓ select | Enter confirm | Esc back | Ctrl+C exit
 ```
 
+The header is redrawn on every page as `DeepSeek Harness - <page title> (<page number>)`; the number accumulates along the branch, so no total is hard-coded.
+
 - **Quick install** is chosen explicitly inside the install branch (equivalent to `--quick`): basic auth with random credentials and the key broker off, zero prompts, printing the access URL and credentials at the end. It is no longer decided implicitly by whether a TTY is present.
+- The install flow asks page by page about image source, access protection, user mode, registration gate, idle threshold, disk quota, egress mode, model keys, reverse proxy, domain and port, and the container root password. The last page is a pre-execution confirmation summary (yes / no); answering no leaves the run with nothing written.
+- Small terminals degrade in three steps: below 71 columns only the DSH wordmark is drawn (dropping the 30-column whale); below 22 rows only the title line remains, so artwork never pushes the options off screen.
 - When a container already exists, the main menu marks install as unavailable and says to run `./dsh.sh remove` first, instead of failing only after the choice.
 - Terminals that cannot page (piped input, `TERM=dumb`, CI) fall back to numbered input, so scripted calls are unaffected.
 

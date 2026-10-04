@@ -59,14 +59,20 @@ assert.match(menuOut, /更新哪一层|只更新容器内的 DSH/, 'choosing upd
 // 2) 有容器时，菜单里要说明"安装"当前不可用，而不是让人选了才报错
 assert.match(menuOut, /安装（当前不可用/, 'the menu must mark install unavailable while a container exists')
 
-// 3) 不加 --menu 时报错保留（保护语义没变），但要指向 --menu 这条出路
+// 3) 没有终端、也没有显式动作时必须报错，并指出两条出路。
+//    旧契约（无 TTY ⇒ 隐式一键安装）已废弃：默认动作是显示向导。
 const noMenu = spawnSync(bash, ['-c',
   `export PATH="${msys(mockBin)}:$PATH"; exec "$1" --dir "$2" </dev/null`,
   'menu-smoke', msys(installScript), msys(proj)], { encoding: 'utf8' })
 const errOut = `${noMenu.stdout}${noMenu.stderr}`
-assert.match(errOut, /容器已经存在/, 'the container-exists guard must still protect the container')
-assert.match(errOut, /--menu/, 'the error must point at --menu instead of dead-ending')
-assert.equal(noMenu.status, 1, 'the guard still exits non-zero')
+assert.match(errOut, /没有可用的控制终端/, 'a terminal-less run without flags must explain the missing terminal')
+assert.match(errOut, /--quick/, 'the error must offer the quick-install escape hatch')
+assert.match(errOut, /--non-interactive/, 'the error must offer the unattended escape hatch')
+assert.equal(noMenu.status, 2, 'the guard exits non-zero')
+
+// 3b) 有终端（--menu）时才进主菜单；容器已存在时该页把「安装」标注为不可用。
+//     容器存在守卫本身仍由安装路径执行，这里断言的是它在菜单里被提前说明。
+assert.match(menuOut, /容器已存在/, 'the menu must say why install is unavailable')
 
 // 4) 安装分支里必须能选「一键安装」与「手动配置」——一键不再是靠 TTY 隐式决定的
 const installPage = spawnSync(bash, ['-c',

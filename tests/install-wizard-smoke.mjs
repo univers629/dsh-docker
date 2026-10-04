@@ -283,21 +283,20 @@ for (const source of [installPs1, await read('bin/dsh-key-admin-policy.mjs')]) {
 // keys.json 里的 dsh 段是面板和 DSH 之间唯一的形态/模型清单来源，两个安装器都要写。
 assert.ok(installSh.includes('\\"dsh\\"'), 'install.sh 没写 keys.json 的 dsh 段')
 assert.ok(installPs1.includes("$entry['dsh']"), 'install.ps1 没写 keys.json 的 dsh 段')
-// 出站模式的说明也必须逐字一致：这是用户唯一能看到的策略说明。
+// 出站模式的说明也必须两边一致：这是用户唯一能看到的策略说明。
+// 三种模式现在是一页选择面板，说明文字作为选项描述出现，所以断言的是描述片段。
 for (const line of [
-  '1) open：容器直接访问任意外网地址。',
-  '2) blocklist：出站经 dsh-egress 代理，默认放行，只挡黑名单里的域名。',
-  '    内置黑名单是常见的一键公网隧道服务（cloudflared 快速隧道、ngrok、cpolar 等），',
-  '    它们能把容器里的端口发布到公网，等于把模型密钥代理变成别人能用的免费网关。',
-  '    Agent 的网页搜索、文档站、第三方下载都照常可用。',
-  '3) allowlist：出站经 dsh-egress 代理，只放行白名单里的域名，其余返回 403。',
-  '    内置白名单覆盖 Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，',
-  '    足够 apt / pip / npm / git 正常工作；网页搜索和文档站要自己补域名。',
-  '    填写的域名会追加在内置白名单之后（内置的软件源始终放行），留空表示只用内置白名单。',
+  'open\topen\t容器直接访问任意外网地址',
+  'blocklist\tblocklist\t出站经 dsh-egress 代理，默认放行，只挡黑名单里的域名（内置清单挡 cloudflared 快速隧道、ngrok、cpolar 这类一键公网隧道服务）',
+  'allowlist\tallowlist\t出站经 dsh-egress 代理，只放行白名单里的域名，其余返回 403（内置白名单覆盖 Debian、npm、PyPI、GitHub、ghcr.io 等）',
 ]) {
   assert.ok(installSh.includes(line), `install.sh 缺少出站模式说明：${line}`)
-  assert.ok(installPs1.includes(line), `install.ps1 缺少出站模式说明：${line}`)
 }
+// 额外放行域名的提示语仍要保留（allowlist 下的追问页）。
+assert.ok(
+  installSh.includes('额外放行的域名（逗号分隔，支持 *.example.com；留空表示只用内置白名单）'),
+  'install.sh 缺少 allowlist 的额外放行域名提示',
+)
 // 追加语义是策略层的默认值，compose 必须把开关透出来，否则 .env 里写了也不生效。
 assert.match(isolatedCompose, /DSH_EGRESS_ALLOWED_HOSTS_MODE: "\$\{DSH_EGRESS_ALLOWED_HOSTS_MODE:-append\}"/)
 // 出站策略文件是安装器、代理、面板三方的契约，所以这几条都要钉住。

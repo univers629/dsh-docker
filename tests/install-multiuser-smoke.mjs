@@ -32,8 +32,9 @@ assert.match(installSh, /--idle-timeout=\*\)/, 'idle timeout flag exists')
 assert.match(installSh, /--user-disk-quota=\*\)/, 'disk quota flag exists')
 assert.match(installSh, /configure_user_mode\(\) \{/, 'the user-mode wizard function exists')
 assert.match(installSh, /configure_user_mode "\$access_mode"/, 'the wizard function is invoked')
-assert.match(installSh, /4\) 多用户（开放注册 \+ 每用户独立实例；认证由内置网关承担）/, 'the access menu offers multi-user')
-assert.match(installSh, /4\) access_mode=password; MULTI_USER_OVERRIDE=on ;;/, 'choosing multi-user pins password mode')
+// 访问保护方式是一页选择面板（不再是编号输入），多用户是其中一项。
+assert.match(installSh, /password\t多用户（开放注册 \+ 每实例独立容器）\t/, 'the access menu offers multi-user')
+assert.match(installSh, /password\) access_mode=password; MULTI_USER_OVERRIDE=on ;;/, 'choosing multi-user pins password mode')
 assert.match(installSh, /COMPOSE_ARGS\++=\(-f docker-compose\.multiuser\.yml\)/, 'the multi-user overlay is applied')
 assert.match(installSh, /set_compose_env DSH_MULTI_USER "\$PENDING_MULTI_USER"/, 'the choice is persisted to .env')
 assert.match(installSh, /set_compose_env DSH_REGISTER_GATE/, 'the register gate is persisted')
@@ -80,9 +81,26 @@ const functionBody = installSh.slice(start, end)
 
 const harness = `
 set -eu
-# 桩：向导函数只依赖这两个外部命令
+# 桩：向导函数只依赖这些外部命令。
+# 选择页走 ui_page_select（不再是编号 prompt），所以桩的是它——
+# 它按 STUB_ANSWER 返回选项值，语义与原来的编号输入一致。
 get_compose_env() { printf '%s\\n' "\${STUB_ENV_VALUE:-$2}"; }
 prompt() { PROMPT_RESULT="\${STUB_ANSWER:-1}"; }
+ui_page_select() {
+  # 参数：title default_index items...
+  local default_index="$2"; shift 2
+  local -a items=("$@")
+  local pick="\${STUB_PICK:-\${STUB_ANSWER:-1}}"
+  # STUB_PICK 给的是 1 起的序号；默认取默认项
+  case "$pick" in
+    ''|*[!0-9]*) pick=$((default_index + 1)) ;;
+  esac
+  local chosen="\${items[$((pick - 1))]:-\${items[$default_index]}}"
+  UI_VALUE="\${chosen%%$'\\t'*}"
+  UI_BACK=false
+  return 0
+}
+ui_next_page() { :; }
 QUICK_INSTALL="\${STUB_QUICK:-false}"
 MULTI_USER_OVERRIDE="\${STUB_MULTI_OVERRIDE:-}"
 REGISTER_GATE_OVERRIDE="\${STUB_GATE_OVERRIDE:-}"
@@ -124,6 +142,19 @@ const buildHarness = (scenario) => `
 set -eu
 get_compose_env() { printf '%s\\n' "\${2:-}"; }
 prompt() { PROMPT_RESULT="${scenario.answer ?? '1'}"; }
+# 选择页走 ui_page_select：按 scenario.pick（1 起的序号）返回对应选项值，
+# 未指定时回落到默认项——与旧编号 prompt 的语义一致。
+ui_page_select() {
+  local default_index="$2"; shift 2
+  local -a items=("$@")
+  local pick="${scenario.pick ?? ''}"
+  case "$pick" in ''|*[!0-9]*) pick=$((default_index + 1)) ;; esac
+  local chosen="\${items[$((pick - 1))]:-\${items[$default_index]}}"
+  UI_VALUE="\${chosen%%$'\\t'*}"
+  UI_BACK=false
+  return 0
+}
+ui_next_page() { :; }
 QUICK_INSTALL="${scenario.quick ? 'true' : 'false'}"
 MULTI_USER_OVERRIDE="${scenario.multiUser ?? ''}"
 REGISTER_GATE_OVERRIDE="${scenario.gate ?? ''}"
@@ -167,18 +198,18 @@ try {
   const localDefault = runWizard({ access: 'local' })
   assert.equal(localDefault.multi_user, 'off', 'non-password access stays single-administrator by default')
 
-  // password 模式 + 交互选择多用户 → 开启，并走子问答
-  const multi = runWizard({ access: 'password', answer: '2' })
+  // password 模式 + 交互选择多用户（第 2 项）→ 开启，并走子问答
+  const multi = runWizard({ access: 'password', pick: '2' })
   assert.equal(multi.multi_user, 'on', 'answering multi-user in the wizard enables it')
 
-  // password 模式 + 选择单管理员 → 保持关闭
-  const single = runWizard({ access: 'password', answer: '1' })
+  // password 模式 + 选择单管理员（第 1 项）→ 保持关闭
+  const single = runWizard({ access: 'password', pick: '1' })
   assert.equal(single.multi_user, 'off', 'answering single-administrator keeps it off')
 
   // 显式旗标优先于问答
   const flagged = runWizard({ access: 'local', multiUser: 'on', quick: true })
   assert.equal(flagged.multi_user, 'on', 'the explicit flag wins over the default')
-  const off = runWizard({ access: 'password', multiUser: 'off', answer: '2' })
+  const off = runWizard({ access: 'password', multiUser: 'off', pick: '2' })
   assert.equal(off.multi_user, 'off', 'the explicit opt-out wins over the answer')
 
   // 参数覆盖

@@ -317,46 +317,82 @@ case "$EGRESS_MODE_OVERRIDE" in
 esac
 
 if [ "$INTERACTIVE" = auto ]; then
-  # 交互 = stdin 是 TTY（能读答案）且 /dev/tty 可读写（prompt 从这里读）。curl|bash
-  # 直灌时 stdout 有 TTY 但 stdin 是管道，`-t 0` 为假 → 不是交互。
-  if [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  # 交互 = 控制终端可用。判据必须是 /dev/tty，不能是 stdin：
+  # curl|bash 直灌时 stdin 是 curl 的管道（`-t 0` 恒为假），但终端本身还在，
+  # 用户就坐在它前面。按 stdin 判定会让这条最常见的安装方式直接跳过整个向导。
+  # 注意 -r/-w 在某些 pty 环境里会返回真但打开仍失败，所以要实际试着打开一次。
+  if (: < /dev/tty) 2>/dev/null; then
     INTERACTIVE=true
   else
     INTERACTIVE=false
   fi
 fi
-# --menu 是显式要求看主菜单，优先于上面的环境判定：哪怕 stdin 不是 TTY，
-# 也从 /dev/tty 读答案（终端里执行时它可用）。读不到就直接失败并指明原因，
-# 而不是退回一键——那样用户根本看不到自己要的菜单。
+# --menu 是显式要求看主菜单。此时 INTERACTIVE 置真，让菜单分支执行；
+# 若 /dev/tty 不可用（被管道包住、无控制终端），ui_page_select 会退回编号输入，
+# 从 stdin 读答案——这样 CI 与自动化仍能驱动菜单，而不是直接失败。
 if [ "$MENU_REQUESTED" = true ]; then
   INTERACTIVE=true
-  if [ "$QUICK_INSTALL" = auto ] || [ "$QUICK_INSTALL" = true ]; then
-    QUICK_INSTALL=false
-  fi
 fi
-# 一键判定：--quick 显式开；或没显式给 --non-interactive 且连 TTY 都没有（curl|bash 直灌）。
-# 只有 install / configure 才有一键语义；维护动作不能占一键的默认。
+# 一键安装只由 --quick 显式开启，不再是"没有 TTY"的隐式默认。
+# 默认动作是显示向导，一键安装是向导第一页里的一个选项。
 if [ "$QUICK_INSTALL" = auto ]; then
-  case "$ACTION" in
-    ''|install|configure)
-      if [ "$INTERACTIVE" = false ] && [ "$NON_INTERACTIVE_FLAG" = false ]; then
-        QUICK_INSTALL=true
-      else
-        QUICK_INSTALL=false
-      fi
-      ;;
-    *) QUICK_INSTALL=false ;;
-  esac
+  QUICK_INSTALL=false
 fi
-# 一键 = 零提问：强制走非交互，但没有显式动作时默认 install。这里同时覆盖
-# 显式 --quick（哪怕有 TTY）与无 TTY 的 curl|bash 两条路，于是主菜单对它整体短路。
+# 一键 = 零提问：强制走非交互，但没有显式动作时默认 install。
+# 这一步必须排在下面的"无终端"守卫之前：--quick 本身就是不需要终端的路径，
+# 若先判守卫，`install.sh --quick` 在 CI 里会被误判成"没有终端所以无法安装"。
 if [ "$QUICK_INSTALL" = true ]; then
   INTERACTIVE=false
   [ -z "$ACTION" ] && ACTION=install
 fi
+# 无终端、无显式动作、也不是一键：不能静默替用户选一条安装路径（默认值会写进 .env
+# 并创建容器）。这里报错并给出两条明确出路，而不是偷偷跑一键安装。
+if [ "$INTERACTIVE" != true ] && [ "$NON_INTERACTIVE_FLAG" != true ] \
+   && [ "$QUICK_INSTALL" != true ] && [ -z "$ACTION" ]; then
+  echo "[错误] 当前环境没有可用的控制终端，无法显示安装向导。" >&2
+  echo >&2
+  echo "       要无人值守安装，请显式指定动作与参数：" >&2
+  echo "         install.sh install --non-interactive --access local --image-source prebuilt" >&2
+  echo "       要一键安装（basic 认证 + 随机账密 + 关闭密钥代理）：" >&2
+  echo "         install.sh install --quick" >&2
+  echo >&2
+  echo "       在终端里运行时不应出现这条提示；若出现，请检查 /dev/tty 是否可用。" >&2
+  exit 2
+fi
+
+# 向导页计数器：每进入一页自增，用于页头显示「(N)」。文本输入与单选共用。
+UI_PAGE_NO=0
+ui_next_page() {
+  UI_PAGE_NO=$((UI_PAGE_NO + 1))
+  UI_STEP=$UI_PAGE_NO
+}
 
 prompt() {
   local message="$1" default="${2:-}" answer
+  # 向导模式下，文本提问也渲染成独立一页（与单选页同一版式）。
+  # 这是把 prompt 原语本身做成页面，而不是在 30 多处调用点各写一遍绘制代码——
+  # 否则任何新增提问都会退回成终端日志输出。
+  if [ "$UI_TUI" = true ]; then
+    ui_raw_on || true
+    ui_next_page
+    ui_clear
+    ui_draw_header "$message"
+    printf '\n' > /dev/tty
+    if [ -n "$default" ]; then
+      printf '  \033[2m%s\033[0m \033[2m[%s]\033[0m\n' "$message" "$default" > /dev/tty
+    else
+      printf '  \033[2m%s\033[0m\n' "$message" > /dev/tty
+    fi
+    printf '\n  \033[36m▸\033[0m ' > /dev/tty
+    stty icanon echo < /dev/tty 2>/dev/null || true
+    IFS= read -r answer < /dev/tty || { ui_raw_off; exit 1; }
+    stty -icanon -echo < /dev/tty 2>/dev/null || true
+    answer="${answer:-$default}"
+    if [ -n "$answer" ]; then
+      PROMPT_RESULT="$answer"
+      return 0
+    fi
+  fi
   # 默认从 /dev/tty 读：即使 stdin 被 curl 的管道占着，也能读到终端上的输入。
   # 但 --menu 会在没有真实 tty 设备的环境里被显式调用（例如被包在 pty 里的会话），
   # 这时退回 stdin，否则菜单刚画出来就因打不开 /dev/tty 而退出。
@@ -405,13 +441,13 @@ prompt_secret() {
 
 # ---------------------------------------------------------------- 翻页向导
 #
-# 交互式安装做成可翻页的向导：一页问一件事，↑/↓ 选择、Enter 确认、Esc 回上一页。
-# 只有真正带 tty 的终端才启用（stty 能把行缓冲关掉、能读到方向键）；否则一律退回
-# 上面的编号 prompt，保证一键安装、CI、以及被管道包住的调用完全不受影响。
+# 向导占用终端的**备用屏幕缓冲**（alternate screen buffer），与 dpanel 的安装器同一种
+# 形态：进入后整个终端切到一张独立画布，向导画面不会滚进 scrollback；退出时终端恢复到
+# 进入前的样子，就像从没打印过东西。用主屏幕缓冲 + 清屏是做不到这一点的——那会把每一页
+# 都留在日志里，看起来就是"不断往终端刷界面"。
 #
-# 与 dpanel 的差别是刻意保留的：那边是闭源 Go 二进制里的全屏 TUI，这里是 bash，
-# 所以只做「一页一题 + 可回退」，不做全屏重绘——回退要能撤销的是**已写入的答案**，
-# 那才是用户真正需要的能力。
+# 备用缓冲由 terminal 自身维护（CSI ?1049h/l），不需要 curses。退出路径有三条，
+# 都要还原：正常结束、Ctrl+C、以及任何 EXIT（含 set -e 触发的提前退出）。
 
 UI_TUI=false
 UI_STTY_STATE=""
@@ -419,6 +455,7 @@ UI_STEP=0
 UI_TOTAL=0
 UI_TRAP_SAVED=false
 UI_PREV_EXIT_TRAP=""
+UI_ALT_SCREEN=false
 
 # 判定能否进入翻页模式：必须有可读写的 tty，且 stty 能切换模式。
 ui_detect_tui() {
@@ -430,10 +467,26 @@ ui_detect_tui() {
   return 0
 }
 
+# 进入备用屏幕：切到独立画布并清屏、隐藏光标。
+ui_alt_enter() {
+  [ "$UI_ALT_SCREEN" = true ] && return 0
+  printf '\033[?1049h\033[2J\033[H\033[?25l' > /dev/tty
+  UI_ALT_SCREEN=true
+}
+
+# 退出备用屏幕：恢复光标与终端原有画面。
+ui_alt_leave() {
+  [ "$UI_ALT_SCREEN" = true ] || return 0
+  printf '\033[?25h\033[?1049l' > /dev/tty
+  UI_ALT_SCREEN=false
+}
+
 ui_raw_on() {
   UI_STTY_STATE="$(stty -g < /dev/tty 2>/dev/null)" || return 1
   stty -icanon -echo min 1 time 0 < /dev/tty 2>/dev/null || return 1
-  # 退出时一定要还原终端，否则用户的 shell 会留在无回显状态。
+  # 备用屏幕在整个向导期间保持：每页都进出一次会闪屏。ui_alt_enter 自身幂等。
+  ui_alt_enter
+  # 退出时一定要还原终端，否则用户的 shell 会留在无回显、无光标的备用屏幕里。
   # 但**不能直接覆盖**已有的 EXIT trap：安装路径挂了 cleanup_pending_env、
   # delete 的 detached 路径挂了自删脚本，覆盖掉它们会漏掉清理。所以把原有 trap
   # 记下来，退出时先还原终端再执行原逻辑。
@@ -442,9 +495,9 @@ ui_raw_on() {
     UI_PREV_EXIT_TRAP="$(trap -p EXIT 2>/dev/null || true)"
     UI_TRAP_SAVED=true
   fi
-  trap 'ui_raw_off; ui_run_prev_trap' EXIT
-  trap 'ui_raw_off; exit 130' INT
-  trap 'ui_raw_off; exit 143' TERM
+  trap 'ui_term_restore; ui_run_prev_trap' EXIT
+  trap 'ui_term_restore; exit 130' INT
+  trap 'ui_term_restore; exit 143' TERM
 }
 
 # 执行 ui_raw_on 之前记录的 EXIT trap（若有）。trap -p 的输出形如
@@ -458,11 +511,20 @@ ui_run_prev_trap() {
   [ "$body" != "$spec" ] && [ -n "$body" ] && eval "$body" || true
 }
 
+# 退出按键原始模式（页与页之间调用）。刻意**不**离开备用屏幕：
+# 那会让每翻一页都闪一次屏，向导应当始终待在同一张画布上。
 ui_raw_off() {
   if [ -n "$UI_STTY_STATE" ]; then
     stty "$UI_STTY_STATE" < /dev/tty 2>/dev/null || true
     UI_STTY_STATE=""
   fi
+}
+
+# 彻底还原终端：离开备用屏幕并恢复行模式。向导结束（或任何退出路径）时调用，
+# 之后终端回到用户原本的画面，向导内容不会留在 scrollback 里。
+ui_term_restore() {
+  ui_alt_leave
+  ui_raw_off
 }
 
 # 读一个按键，归一化成 up/down/enter/esc/其他。方向键是 ESC [ A/B 三字节序列，
@@ -705,11 +767,13 @@ confirm_install_plan() {
     echo
   fi
 
-  UI_STEP=3
   UI_TOTAL=0
-  ui_page_select "确认是否执行" 0 \
-    "yes	是	执行当前操作" \
+  ui_next_page
+  ui_page_select "确认是否执行" 0 \    "yes	是	执行当前操作" \
     "no	否	不执行，返回上一步"
+  # 确认页是向导的最后一页：无论选是还是否都要离开备用屏幕，
+  # 否则后续的安装输出（或取消提示）会落在用户看不见的画布上。
+  ui_term_restore
   if [ "$UI_VALUE" != yes ]; then
     echo "已取消，未做任何改动。" >&2
     exit 0
@@ -720,6 +784,25 @@ confirm_install_plan() {
 # 所以这一个只问一次，回车即表示清空当前值。
 prompt_optional() {
   local message="$1" default="${2:-}" answer
+  # 向导模式下同样渲染成独立一页，版式与 prompt 一致。
+  if [ "$UI_TUI" = true ]; then
+    ui_raw_on || true
+    ui_next_page
+    ui_clear
+    ui_draw_header "$message"
+    printf '\n' > /dev/tty
+    if [ -n "$default" ]; then
+      printf '  \033[2m当前值: %s（回车表示清空）\033[0m\n\n' "$default" > /dev/tty
+    else
+      printf '  \033[2m可留空\033[0m\n\n' > /dev/tty
+    fi
+    printf '  \033[36m▸\033[0m ' > /dev/tty
+    stty icanon echo < /dev/tty 2>/dev/null || true
+    IFS= read -r answer < /dev/tty || { ui_raw_off; exit 1; }
+    stty -icanon -echo < /dev/tty 2>/dev/null || true
+    PROMPT_RESULT="$answer"
+    return 0
+  fi
   if [ -n "$default" ]; then
     printf '%s [当前 %s，回车表示清空]: ' "$message" "$default" > /dev/tty
   else
@@ -731,6 +814,21 @@ prompt_optional() {
 
 prompt_yes_no() {
   local message="$1" default="$2" answer
+  # 向导模式下渲染成真正的「是/否」选择页（↑/↓ + Enter），而不是让人手打 y/n——
+  # 手打字母既不是面板形态，也容易输错。非向导模式保留原来的 y/n 循环。
+  if [ "$UI_TUI" = true ]; then
+    local default_index=0
+    case "$default" in n|N|no|NO|否) default_index=1 ;; esac
+    ui_next_page
+    ui_page_select "$message" "$default_index" \
+      "yes	是	确认" \
+      "no	否	拒绝"
+    case "$UI_VALUE" in
+      yes) PROMPT_RESULT=true ;;
+      *) PROMPT_RESULT=false ;;
+    esac
+    return 0
+  fi
   while :; do
     prompt "$message" "$default"
     answer="$PROMPT_RESULT"
@@ -875,8 +973,10 @@ if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
 
     # 页数只在确实能算准时给分母：主菜单之后的分支长度不同（选「启动」到此为止，
     # 选「安装」还要再走一页并进各自的配置流程），所以这里只报页码，不编造总数。
-    UI_STEP=1
+    # UI_PAGE_NO 由 ui_next_page 自增，跨页面累计；UI_STEP 是它给页头读的镜像值。
+    UI_PAGE_NO=0
     UI_TOTAL=0
+    ui_next_page
     ui_page_select "选择操作" 0 \
       "install	${install_label}	安装 DSH 或按新配置重建容器" \
       "update	更新	升级容器内的 DSH，或换成新镜像重建容器" \
@@ -893,7 +993,7 @@ if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
     # 更新是两件不同粒度的事，合成一个入口再分页：日常更新 DSH 本体不需要碰镜像，
     # 只有发布了新镜像（容器里那套脚本、控制层、基础层变了）才需要重建容器。
     if [ "$ACTION" = update ]; then
-      UI_STEP=2
+      ui_next_page
       ui_page_select "更新哪一层" 0 \
         "update	只更新容器内的 DSH	重装 npm 包，容器和镜像都不动，最快" \
         "upgrade	换成新镜像并重建容器	沿用现有配置不重问；会话、插件、项目文件、密钥全部保留，只有容器里 apt 装的系统包要重装"
@@ -903,7 +1003,7 @@ if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
     # 安装分两页：先选「一键」还是「手动」，再进各自的流程。
     # 一键安装不是靠有没有 TTY 隐式决定的——那是无 TTY 直灌时的默认，不是交互时的选项。
     if [ "$ACTION" = install ]; then
-      UI_STEP=2
+      ui_next_page
       ui_page_select "安装方式" 0 \
         "quick	一键安装	basic 认证 + 随机账密 + 关闭密钥代理，零提问，装完打印访问地址与凭据" \
         "manual	手动配置	逐页选择镜像来源、访问保护、出站策略、模型密钥等"
@@ -912,10 +1012,17 @@ if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
           # 一键 = 零提问：与 --quick 走同一条路径。
           QUICK_INSTALL=true
           INTERACTIVE=false
-          echo "==> 一键安装：basic 认证 + 随机账密 + 关闭密钥代理，装完打印访问地址与凭据。"
           ;;
         *) QUICK_INSTALL=false ;;
       esac
+    fi
+
+    # 这里**不**离开备用屏幕：后续还有 configure_dsh / configure_user_mode 等十余页，
+    # 它们同样是向导的一部分。备用屏幕只在真正开始安装前（或任何退出路径）才退出，
+    # 否则第二页起就退回成终端日志输出。
+    if [ "$QUICK_INSTALL" = true ]; then
+      ui_term_restore
+      echo "==> 一键安装：basic 认证 + 随机账密 + 关闭密钥代理，装完打印访问地址与凭据。"
     fi
   else
     ACTION=install
@@ -1126,18 +1233,20 @@ confirm_delete() {
   fi
   # 先问范围，再让人输 DELETE：最后那一下是不可逆的闸门，它前面不该再有别的问题，
   # 而且警告文案要能反映刚选的范围——否则"全都删"和"留下会话"两种结局共用一句话。
-  echo "数据范围："
-  echo "1) 全部删除（容器、镜像、.env、模型密钥、root 密码哈希，以及 data/ 和 workspace/ 里的一切）"
-  echo "2) 保留会话、工作目录和插件：workspace/、data/dsh/sessions/、data/dsh/profiles/"
-  echo "    其余照样删干净：密钥、密码哈希、.env、data/home 里的工具链都不留。"
-  echo "    重新安装到同一个目录时，安装器会自己把项目源码取回来，这三样接着用。"
-  prompt "请选择" "1"
-  case "$PROMPT_RESULT" in
-    1) DSH_DELETE_KEEP=0 ;;
-    2) DSH_DELETE_KEEP=1 ;;
+  # 范围是一页面板（与其他分支一致）；DELETE 那一步刻意保留手输，
+  # 因为不可逆操作需要一次无法误触的确认。
+  UI_TOTAL=0
+  ui_next_page
+  ui_page_select "删除的数据范围" 0 \
+    "0	全部删除	容器、镜像、.env、模型密钥、root 密码哈希，以及 data/ 和 workspace/ 里的一切" \
+    "1	保留会话、工作目录和插件	只留 workspace/、data/dsh/sessions/、data/dsh/profiles/；密钥、密码哈希、.env、data/home 里的工具链都不留"
+  case "$UI_VALUE" in
+    0) DSH_DELETE_KEEP=0 ;;
+    1) DSH_DELETE_KEEP=1 ;;
     *) echo "[错误] 无效选项。" >&2; exit 2 ;;
   esac
   export DSH_DELETE_KEEP
+  ui_term_restore
   echo
   echo "[警告] 将删除 dsh 容器、DSH 镜像（dsh:* 与 .env 记录的预构建引用）、本项目 Compose 挂载和网络、全局 Docker 构建缓存。"
   if [ "$DSH_DELETE_KEEP" = 1 ]; then
@@ -2538,36 +2647,20 @@ configure_egress_mode() {
   fi
   if [ "$INTERACTIVE" = true ] && [ -z "$EGRESS_MODE_OVERRIDE" ]; then
     case "$PENDING_EGRESS_MODE" in
-      blocklist) default_route=2 ;;
-      allowlist) default_route=3 ;;
-      *) default_route=1 ;;
+      blocklist) default_route=1 ;;
+      allowlist) default_route=2 ;;
+      *) default_route=0 ;;
     esac
-    echo
-    echo "容器出站网络（三种都不影响模型请求：那条路由走 dsh-key-broker，是另一个容器出网）："
-    echo "1) open：容器直接访问任意外网地址。"
-    echo "2) blocklist：出站经 dsh-egress 代理，默认放行，只挡黑名单里的域名。"
-    echo "    内置黑名单是常见的一键公网隧道服务（cloudflared 快速隧道、ngrok、cpolar 等），"
-    echo "    它们能把容器里的端口发布到公网，等于把模型密钥代理变成别人能用的免费网关。"
-    echo "    Agent 的网页搜索、文档站、第三方下载都照常可用。"
-    echo "3) allowlist：出站经 dsh-egress 代理，只放行白名单里的域名，其余返回 403。"
-    echo "    内置白名单覆盖 Debian、npm、PyPI、GitHub、ghcr.io、nodejs.org、astral.sh，"
-    echo "    足够 apt / pip / npm / git 正常工作；网页搜索和文档站要自己补域名。"
-    echo "  选 2 或 3 之后：dsh 容器不再直连外网，宿主 3080 改由 dsh-ingress 发布"
-    echo "  （反向代理仍写 http://dsh:3080）。两份清单和 2/3 之间的切换之后都能在密钥管理"
-    echo "  面板里热改，只有和 1 之间的切换要重跑这个安装器。"
-    prompt "请选择" "$default_route"
-    case "$PROMPT_RESULT" in
-      1) PENDING_EGRESS_MODE=open ;;
-      2) PENDING_EGRESS_MODE=blocklist ;;
-      3) PENDING_EGRESS_MODE=allowlist ;;
-      *) echo "[错误] 无效出站模式选项。" >&2; exit 2 ;;
-    esac
+    ui_next_page
+    ui_page_select "容器出站网络" "$default_route" \
+      "open	open	容器直接访问任意外网地址" \
+      "blocklist	blocklist	出站经 dsh-egress 代理，默认放行，只挡黑名单里的域名（内置清单挡 cloudflared 快速隧道、ngrok、cpolar 这类一键公网隧道服务）" \
+      "allowlist	allowlist	出站经 dsh-egress 代理，只放行白名单里的域名，其余返回 403（内置白名单覆盖 Debian、npm、PyPI、GitHub、ghcr.io 等）"
+    PENDING_EGRESS_MODE="$UI_VALUE"
   fi
   PENDING_EGRESS_ALLOWED_HOSTS="${EGRESS_ALLOW_OVERRIDE:-$(get_compose_env DSH_EGRESS_ALLOWED_HOSTS '')}"
   if [ "$PENDING_EGRESS_MODE" = allowlist ] && [ "$INTERACTIVE" = true ] && [ -z "$EGRESS_ALLOW_OVERRIDE" ]; then
-    echo "    填写的域名会追加在内置白名单之后（内置的软件源始终放行），留空表示只用内置白名单。"
-    echo "    Agent 需要访问的网页或 API 域名也填在这里，例如 www.google.com,*.wikipedia.org。"
-    prompt_optional "额外放行的域名（逗号分隔，支持 *.example.com）" "$PENDING_EGRESS_ALLOWED_HOSTS"
+    prompt_optional "额外放行的域名（逗号分隔，支持 *.example.com；留空表示只用内置白名单）" "$PENDING_EGRESS_ALLOWED_HOSTS"
     PENDING_EGRESS_ALLOWED_HOSTS="$PROMPT_RESULT"
   fi
 }
@@ -2625,17 +2718,12 @@ configure_dsh() {
   image_source="${IMAGE_SOURCE_OVERRIDE:-$(get_compose_env DSH_IMAGE_SOURCE prebuilt)}"
   case "$image_source" in prebuilt|build) ;; *) image_source=prebuilt ;; esac
   if [ "$INTERACTIVE" = true ] && [ -z "$IMAGE_SOURCE_OVERRIDE" ]; then
-    case "$image_source" in build) default_route=2 ;; *) default_route=1 ;; esac
-    echo
-    echo "Debian 13 镜像来源："
-    echo "1) 拉取公开预构建镜像（推荐：不在本机编译 DSH，安装耗时约等于下载耗时）"
-    echo "2) 在本机构建镜像（用当前工程 Dockerfile 现场构建，不编译 DSH 源码，约几分钟）"
-    prompt "请选择" "$default_route"
-    case "$PROMPT_RESULT" in
-      1) image_source=prebuilt ;;
-      2) image_source=build ;;
-      *) echo "[错误] 无效镜像来源选项。" >&2; exit 2 ;;
-    esac
+    case "$image_source" in build) default_route=1 ;; *) default_route=0 ;; esac
+    ui_next_page
+    ui_page_select "Debian 13 镜像来源" "$default_route" \
+      "prebuilt	拉取公开预构建镜像	推荐：不在本机编译 DSH，安装耗时约等于下载耗时" \
+      "build	在本机构建镜像	用当前工程 Dockerfile 现场构建，不编译 DSH 源码，约几分钟"
+    image_source="$UI_VALUE"
   fi
   if [ -n "$IMAGE_OVERRIDE" ]; then
     image_ref="$IMAGE_OVERRIDE"
@@ -2656,20 +2744,18 @@ configure_dsh() {
     access_mode="${ACCESS_MODE_OVERRIDE:-$(get_compose_env DSH_ACCESS_MODE local)}"
   fi
   if [ "$INTERACTIVE" = true ] && [ -z "$ACCESS_MODE_OVERRIDE" ]; then
-    case "$access_mode" in local) default_route=1 ;; trusted-proxy) default_route=2 ;; basic) default_route=3 ;; *) default_route=1 ;; esac
-    echo
-    echo "访问保护方式："
-    echo "1) 仅本机或 SSH 隧道"
-    echo "2) 已有 Cloudflare Access / 面板认证 / 私有 VPN"
-    echo "3) DSH 内置 Nginx Basic Auth（外层仍须提供 HTTPS）"
-    echo "4) 多用户（开放注册 + 每用户独立实例；认证由内置网关承担）"
-    prompt "请选择" "$default_route"
-    case "$PROMPT_RESULT" in
-      1) access_mode=local ;;
-      2) access_mode=trusted-proxy ;;
-      3) access_mode=basic ;;
-      4) access_mode=password; MULTI_USER_OVERRIDE=on ;;
-      *) echo "[错误] 无效访问保护选项。" >&2; exit 2 ;;
+    case "$access_mode" in local) default_route=0 ;; trusted-proxy) default_route=1 ;; basic) default_route=2 ;; password) default_route=3 ;; *) default_route=0 ;; esac
+    ui_next_page
+    ui_page_select "访问保护方式" "$default_route" \
+      "local	仅本机或 SSH 隧道	容器内不做认证，只绑定回环地址" \
+      "trusted-proxy	已有 Cloudflare Access / 面板认证 / 私有 VPN	容器内不做认证，完全依赖外层入口" \
+      "basic	DSH 内置 Nginx Basic Auth	容器内用 bcrypt 密码文件认证；外层仍须提供 HTTPS" \
+      "password	多用户（开放注册 + 每实例独立容器）	认证由内置网关承担，可注册账户、TOTP、通行密钥"
+    case "$UI_VALUE" in
+      local) access_mode=local ;;
+      trusted-proxy) access_mode=trusted-proxy ;;
+      basic) access_mode=basic ;;
+      password) access_mode=password; MULTI_USER_OVERRIDE=on ;;
     esac
   fi
 
@@ -2716,13 +2802,19 @@ configure_dsh() {
     network="${NETWORK_OVERRIDE:-dsh-private}"
     network_external="${NETWORK_EXTERNAL_OVERRIDE:-false}"
   elif [ "$INTERACTIVE" = true ]; then
-    default_route=1
+    default_route=0
     if DOCKER network inspect dpanel-local >/dev/null 2>&1 || [ "$network_external" = true ]; then
-      default_route=2
+      default_route=1
     fi
-    echo
-    prompt "反向代理在哪里：1) 宿主机  2) Docker 容器/面板" "$default_route"
-    route="$PROMPT_RESULT"
+    ui_next_page
+    ui_page_select "反向代理在哪里" "$default_route" \
+      "host	宿主机	用宿主机的 Nginx 或 SSH 隧道反代，上游写 http://127.0.0.1:3080" \
+      "docker	Docker 容器 / 面板	DSH 加入一个外部网络，反向代理用 http://dsh:3080 访问它"
+    case "$UI_VALUE" in
+      host) route=1 ;;
+      docker) route=2 ;;
+      *) route=1 ;;
+    esac
     case "$route" in
       1)
         bind_host="${BIND_HOST_OVERRIDE:-127.0.0.1}"
@@ -2911,17 +3003,11 @@ configure_user_mode() {
     if [ "$QUICK_INSTALL" = true ]; then
       multi_user="$existing"
     elif [ "$access_mode" = password ]; then
-      echo
-      echo "用户模式："
-      echo "1) 单管理员（默认）—— 一套管理员凭据，不开放注册"
-      echo "2) 多用户 —— 开放注册；每个账户拥有独立会话与文件（独立 DSH 实例，"
-      echo "    默认 200MB 上限 + 闲置自动停用 + 负载动态调整）"
-      prompt "请选择" "1"
-      case "$PROMPT_RESULT" in
-        2) multi_user=on ;;
-        1) multi_user=off ;;
-        *) multi_user="$PROMPT_RESULT" ;;
-      esac
+      ui_next_page
+      ui_page_select "用户模式" 0 \
+        "off	单管理员	一套管理员凭据，不开放注册" \
+        "on	多用户	开放注册；每个账户拥有独立会话与文件（独立 DSH 实例，默认 200MB 上限 + 闲置自动停用）"
+      multi_user="$UI_VALUE"
     else
       multi_user="$existing"
     fi
@@ -2949,43 +3035,27 @@ configure_user_mode() {
     return 0
   fi
 
-  echo
-  echo "注册门槛："
-  echo "1) 开放注册（默认）"
-  echo "2) 需要邀请码（安装结束时会生成一个初始码并显示一次）"
-  prompt "请选择" "1"
-  case "$PROMPT_RESULT" in
-    2) register_gate=invite ;;
-    *) register_gate="${register_gate:-open}" ;;
-  esac
+  ui_next_page
+  ui_page_select "注册门槛" 0 \
+    "open	开放注册	任何能访问入口的人都可以注册" \
+    "invite	需要邀请码	安装结束时会生成一个初始码并显示一次，之后可在管理面板轮换"
+  register_gate="$UI_VALUE"
 
-  echo
-  echo "闲置停用阈值（实例无活动超过该时长即停用，内存归零、数据保留）："
-  echo "1) 30 分钟（默认）"
-  echo "2) 15 分钟"
-  echo "3) 60 分钟"
-  echo "4) 从不"
-  prompt "请选择" "1"
-  case "$PROMPT_RESULT" in
-    2) idle_timeout=900 ;;
-    3) idle_timeout=3600 ;;
-    4) idle_timeout=0 ;;
-    *) idle_timeout="${idle_timeout:-1800}" ;;
-  esac
+  ui_next_page
+  ui_page_select "闲置停用阈值" 0 \
+    "1800	30 分钟	默认；实例无活动超过该时长即停用，内存归零、数据保留" \
+    "900	15 分钟	更省内存，用户回来的等待更频繁" \
+    "3600	60 分钟	更少唤醒，闲置内存占用更久" \
+    "0	从不	实例常驻不回收，内存占用最高"
+  idle_timeout="$UI_VALUE"
 
-  echo
-  echo "每用户磁盘配额："
-  echo "1) 5GB（默认）"
-  echo "2) 2GB"
-  echo "3) 10GB"
-  echo "4) 不限制"
-  prompt "请选择" "1"
-  case "$PROMPT_RESULT" in
-    2) user_disk_quota=2 ;;
-    3) user_disk_quota=10 ;;
-    4) user_disk_quota=0 ;;
-    *) user_disk_quota="${user_disk_quota:-5}" ;;
-  esac
+  ui_next_page
+  ui_page_select "每用户磁盘配额" 0 \
+    "5	5GB	默认" \
+    "2	2GB	更省磁盘" \
+    "10	10GB	更宽松" \
+    "0	不限制	不设上限"
+  user_disk_quota="$UI_VALUE"
 }
 
 build_dsh_image() {
@@ -3792,7 +3862,17 @@ manage_key_admin() {
 cleanup_pending_env() {
   [ -z "$PENDING_ENV_FILE" ] || rm -f "$PENDING_ENV_FILE"
 }
-trap cleanup_pending_env EXIT
+# 这个 trap 在向导之后才安装，会覆盖 ui_raw_on 装的还原 trap。所以它自己也要负责
+# 还原终端：否则安装中途出错（set -e）会把用户留在无回显、无光标的备用屏幕里。
+trap 'ui_term_restore; cleanup_pending_env' EXIT
+
+# 维护类动作（启动/停止/日志/状态/更新/卸载等）没有后续向导页，它们的输出必须落在
+# 普通终端上。install/configure 不在这里还原：configure_dsh 与 confirm_install_plan
+# 还有十余页向导，提前还原会让第二页起退回成日志输出。
+case "$ACTION" in
+  install|configure) ;;
+  *) ui_term_restore ;;
+esac
 
 case "$ACTION" in
   install|configure)

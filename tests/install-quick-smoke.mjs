@@ -79,7 +79,8 @@ const prepareProject = async (name) => {
   return directory
 }
 
-// 不传 --non-interactive，模拟没有 TTY 的 curl|bash 直灌（spawnSync 默认无 tty）。
+// 一键安装由 --quick 显式开启。无 TTY 的 curl|bash 直灌不再隐式走一键——
+// 那是旧契约，已按需求改为「默认显示向导；没有终端时报错并给出两条出路」。
 const runQuick = (target, args = []) => spawnSync(bash, [
   '-c',
   'PATH="$MOCK_BIN:$PATH"; export PATH; exec "$INSTALL_SCRIPT" "$@"',
@@ -99,7 +100,7 @@ const runQuick = (target, args = []) => spawnSync(bash, [
 
 try {
   await prepareProject('quick')
-  const quick = runQuick('quick')
+  const quick = runQuick('quick', ['install', '--quick'])
   assert.equal(quick.status, 0, `${quick.stdout}\n${quick.stderr}`)
 
   // 出站/代理默认关闭，访问模式默认 basic。
@@ -134,11 +135,20 @@ try {
   assert.ok(!env.includes(rootPw), '.env must not contain the generated root password')
   assert.ok(!(await readFile(dockerLog, 'utf8')).includes(basicPw), 'generated password must never reach a docker command line')
 
-  // 显式 --quick 与无 TTY 直灌等价。
+  // --quick 与 install --quick 等价（显式开启，不依赖终端）。
   await prepareProject('explicit')
   const explicit = runQuick('explicit', ['--quick'])
   assert.equal(explicit.status, 0, `${explicit.stdout}\n${explicit.stderr}`)
   assert.match(await readFile(join(sandbox, 'explicit', '.env'), 'utf8'), /^DSH_ACCESS_MODE=basic$/m)
+
+  // 没有终端、也没有显式动作：必须报错退出，不能静默替用户选一条安装路径。
+  // 这条取代了旧契约（无 TTY ⇒ 隐式一键安装）。
+  await prepareProject('notty')
+  const noTty = runQuick('notty')
+  assert.equal(noTty.status, 2, 'a terminal-less run without flags must fail instead of installing silently')
+  assert.match(`${noTty.stdout}${noTty.stderr}`, /没有可用的控制终端/, 'the error must explain the missing terminal')
+  assert.match(`${noTty.stdout}${noTty.stderr}`, /--quick/, 'the error must offer the quick-install escape hatch')
+  assert.ok(!existsSync(join(sandbox, 'notty', '.env')), 'a failed run must not write .env')
 
   // 显式 --non-interactive 不允许生成随机账号：它需要旧语义（local 默认 + 显式参数）。
   // 无 access 参数时默认 local，不应出现 basic 凭据。
