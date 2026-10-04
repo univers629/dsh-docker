@@ -1249,6 +1249,26 @@ if [ "$USERNS_PREFLIGHT" = true ]; then
   exit 1
 fi
 
+# 补上工程内脚本的可执行位。
+#
+# 为什么需要：docker-compose.yml 把 ./bin/dsh-supervisor 绑定挂载到容器的
+# /usr/local/bin/dsh-supervisor（只读），它会覆盖镜像里已 chmod +x 的那份。宿主机上
+# 这个文件一旦没有可执行位，容器启动时 exec 就会失败并陷入重启循环，而报错只是
+# 「permission denied」，看不出是权限位的问题。
+#
+# 触发条件不止 git：tar 解包不保留权限位（install.sh 在无 git 时就走这条路），
+# Windows 上检出的仓库也可能丢掉执行位。所以这里无条件对齐一次，代价可以忽略。
+fix_exec_bits() {
+  local dir="${1:-$TARGET_DIR}" f
+  [ -d "$dir/bin" ] || return 0
+  # bin/ 下的文件全部是可执行脚本（无扩展名的入口，以及 .mjs/.sh 辅助脚本），
+  # 所以整目录对齐，不做扩展名筛选——漏掉一个无扩展名的入口就会复现同样的故障。
+  for f in "$dir"/bin/*; do
+    [ -f "$f" ] || continue
+    chmod +x "$f" 2>/dev/null || true
+  done
+}
+
 fetch_project() {
   if [ ! -d "$TARGET_DIR" ]; then
     echo "==> 正在获取工程文件..."
@@ -1262,14 +1282,18 @@ fetch_project() {
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
       chown -R "$SUDO_USER:$SUDO_USER" "$TARGET_DIR" 2>/dev/null || true
     fi
+    fix_exec_bits "$TARGET_DIR"
   elif [ -f "$TARGET_DIR/docker-compose.yml" ]; then
     echo "==> 使用现有工程文件；不会自动同步或更新项目源码。"
+    # 已有工程同样要核对：老部署可能是 tar 解包或从 Windows 同步过来的。
+    fix_exec_bits "$TARGET_DIR"
   elif [ -f "$TARGET_DIR/$DELETE_KEEP_MARKER" ]; then
     # 上一次删除选择了"保留会话 / 工作目录 / 插件"：目录里只剩那几样，源码是被删掉的。
     # 这里必须把源码取回同一个目录（而不是报错让人手工搬），否则"删除→重装→接着用"
     # 这条路走不通。
     echo "==> $TARGET_DIR 里只剩上次删除时保留的数据，正在取回项目源码..."
     fetch_into_existing_dir
+    fix_exec_bits "$TARGET_DIR"
   else
     echo "[错误] $TARGET_DIR 已存在但不是 Git 工程，请移动该目录后重试。" >&2
     exit 1
@@ -3386,19 +3410,38 @@ compose_up_with_pending_env() {
 # DSH 必须以非 root 的 dsh 账户（UID 1000）运行，容器的能力集、no_new_privs、
 # Docker socket 与 /proc 挂载状态再由容器内的自检脚本实际验证一遍。
 assert_dsh_hardening() {
-  local uid attempt
+  local uid attempt exec_err
   # /run/dsh.pid 由 dsh-supervisor 写入：第一行是 PID，第二行是进程启动时刻，
   # 所以只能取第一行，整读会拼出无效的 /proc 路径。
+  #
+  # 只接受纯数字：runc 在 exec 启动失败时会把错误文本写进 stdout（不只是 stderr），
+  # 若不加校验就会把那段错误当成 UID 接收，最终报出「实际为 OCI runtime exec failed...」
+  # 这种读不通的话，反而盖住了真正的故障原因。
   uid=""
+  exec_err=""
   for ((attempt = 0; attempt < 120; attempt++)); do
     uid="$(DOCKER exec dsh sh -c 'pid="$(sed -n 1p /run/dsh.pid 2>/dev/null)"; case "$pid" in ""|*[!0-9]*) exit 1 ;; esac; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>/dev/null || true)"
-    if [ -n "$uid" ]; then
-      break
-    fi
+    case "$uid" in
+      '') ;;
+      *[!0-9]*) exec_err="$uid"; uid="" ;;   # 运行时报错文本，不是 UID
+      *) break ;;
+    esac
     sleep 1
   done
   if [ -z "$uid" ]; then
-    echo "[错误] DSH 容器已创建，但无法在 120 秒内核验主进程 UID。" >&2
+    if [ -n "$exec_err" ]; then
+      # 容器已启动但 exec 进不去：这是容器运行时的故障，不是配置问题。
+      echo "[错误] 无法在 dsh 容器内执行命令，容器运行时报告：" >&2
+      printf '%s\n' "$exec_err" | sed 's/^/       /' >&2
+      echo "       容器本身可能是运行中的；请先在宿主上确认：" >&2
+      echo "         docker exec dsh true" >&2
+      echo "       若同样失败，问题在容器运行时（runc）或宿主内核，与本项目配置无关：" >&2
+      echo "       常见原因是宿主为容器化 VPS、宿主内存/进程数耗尽，或 runc 与内核不匹配。" >&2
+    else
+      echo "[错误] DSH 容器已创建，但无法在 120 秒内核验主进程 UID。" >&2
+      echo "       容器可能仍在启动，或 dsh-supervisor 未能写入 /run/dsh.pid；" >&2
+      echo "       用 docker logs dsh 查看容器内日志。" >&2
+    fi
     return 1
   fi
   if [ "$uid" != 1000 ]; then

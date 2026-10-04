@@ -17,6 +17,17 @@ unset DSH_KEY_ADMIN DSH_KEY_ADMIN_BIND_HOST DSH_KEY_ADMIN_HOST_PORT
 
 ACTION="${1:-start}"
 
+# 补上 bin/ 下脚本的可执行位。
+#
+# docker-compose.yml 把 ./bin/dsh-supervisor 绑定挂载进容器的 /usr/local/bin（只读），
+# 覆盖镜像里已 chmod +x 的那份。宿主机上这个文件缺可执行位时，容器启动会失败并陷入
+# 重启循环，日志只有一句 "Permission denied"，看不出是权限位的问题。git 能保留执行位，
+# 但 tar 解包（无 git 时的安装路径）不会，从 Windows 同步过来的工程也可能丢。
+# 放在这里：start / restart / up 之前都会执行到。
+if [ -d bin ]; then
+  chmod +x bin/* 2>/dev/null || true
+fi
+
 if ! command -v docker &>/dev/null; then
   echo "[错误] 未检测到 Docker，请先安装 Docker 后重试。"
   exit 1
