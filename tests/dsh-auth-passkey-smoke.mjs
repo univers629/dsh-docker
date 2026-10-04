@@ -133,7 +133,7 @@ const wrongAuthOrigin = await finishAuthentication({
 })
 assert.equal(wrongAuthOrigin.ok, false, 'wrong origin rejected on login')
 
-// 计数器回退（克隆信号）：v13 的库自己就会拒绝，我们另有一层显式检查作为兜底，
+// 计数器回退（克隆信号）：v13 的库自身会拒绝，另有一层显式检查作为兜底，
 // 所以只要断言「被拒绝」并且原因可解释即可，不绑定具体是哪一层拦下的。
 const regressed = await finishAuthentication({
   response: authenticator.assertion(authOptions.challenge, { counter: 0 }),

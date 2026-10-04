@@ -67,6 +67,39 @@ DSH_ROOT_PASSWORD='至少12位的密码' bash install.sh install --access local 
 
 完整参数见 `bash install.sh --help`；Windows 对应 `powershell -ExecutionPolicy Bypass -File .\install.ps1`。
 
+### 已有部署要更新或卸载
+
+无 TTY 的 `curl | bash` 直灌默认走「一键安装」，那时主菜单不会出现；而已有部署上 `install` 会因容器存在被拒绝。这种情况下显式进主菜单：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- --menu
+```
+
+已在本工程目录时也可以直接 `./install.sh --menu`。
+
+### 向导的翻页操作
+
+交互式安装是**一页一题**的向导：主菜单列出全部生命周期动作（安装、更新、启动、停止、重启、日志、状态、卸载、补填密钥、密钥面板），选中「安装」后再分页问「一键安装还是手动配置」，手动配置逐页问镜像来源、访问保护、出站策略、模型密钥等。
+
+```text
+  DeepSeek Harness 安装向导   (2/…)
+
+  选择操作
+
+  ▶ 安装
+      安装 DSH 或按新配置重建容器
+    更新
+      升级容器内的 DSH，或换成新镜像重建容器
+    卸载
+      清理容器、镜像、挂载、网络与工程目录
+
+  ↑/↓ 选择 | Enter 确认 | Esc 返回 | Ctrl+C 退出
+```
+
+- **一键安装**在安装分支里显式选择（等同 `--quick`）：basic 认证 + 随机账密 + 关闭密钥代理，零提问，装完打印访问地址与凭据。它不再只由「有没有 TTY」隐式决定。
+- 容器已存在时，主菜单会把「安装」标注为当前不可用并说明先执行 `./dsh.sh remove`，而不是让人选了才报错。
+- 终端不支持翻页（被管道包住、`TERM=dumb`、CI）时自动退回编号输入，脚本化调用不受影响。
+
 ### 受限网络下构建镜像
 
 直连 Debian 与 npm 官方源不稳定时，可以换成本地镜像再构建。构建参数是 Dockerfile 提供的，

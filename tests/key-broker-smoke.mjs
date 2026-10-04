@@ -339,7 +339,7 @@ try {
   assert.equal(rawDotStatus, 400, `raw dot traversal must be rejected by the broker, got ${rawDotStatus}`)
 
   // 客户端自带的 Authorization 会被剥掉，不会混进上游请求（这里上游不可达，
-  // 关键是响应体里既没有我们的密钥，也没有调用方的伪造凭据）。
+  // 关键是响应体里既没有真实密钥，也没有调用方的伪造凭据）。
   const upstreamFailure = await fetch(`${base}/u/probe/v1/chat/completions`, {
     method: 'POST',
     headers: {

@@ -20,18 +20,17 @@ assert.match(installPs1, /^    'upgrade' \{ Invoke-DshUpgrade \}$/m)
 assert.match(installSh, /up -d --no-build --force-recreate --remove-orphans/)
 assert.match(installPs1, /'up','-d','--no-build','--force-recreate','--remove-orphans'/)
 
-// 菜单第 2 项是一个二级分支："更新 DSH 本体"和"换镜像重建容器"是两种粒度，
-// 合成一个入口再问一次，避免把最常用的那条藏进一串编号里。
-assert.match(installSh, /2\) 更新（容器内更新 DSH，或换成新镜像重建容器）/)
-assert.match(installSh, /更新哪一层：/)
-assert.match(installSh, /^          1\) ACTION=update ;;$/m)
-assert.match(installSh, /^          2\) ACTION=upgrade ;;$/m)
-assert.match(installSh, /^    echo "8\) 删除"$/m)
-assert.match(installPs1, /2\) 更新（容器内更新 DSH，或换成新镜像重建容器）/)
-assert.match(installPs1, /更新哪一层：/)
-assert.match(installPs1, /'1' \{ \$DshAction = 'update' \}/)
-assert.match(installPs1, /'2' \{ \$DshAction = 'upgrade' \}/)
-assert.match(installPs1, /'8' \{ \$DshAction = 'delete' \}/)
+// 菜单是翻页式的：更新与卸载都是主菜单里的一页选项，更新再分一页问粒度。
+assert.match(installSh, /"update\t更新\t/)
+assert.match(installSh, /ui_page_select "更新哪一层" 0/)
+assert.match(installSh, /"update\t只更新容器内的 DSH\t/)
+assert.match(installSh, /"upgrade\t换成新镜像并重建容器\t/)
+assert.match(installSh, /"delete\t卸载\t/)
+assert.match(installPs1, /Value = 'update'; Label = '更新'/)
+assert.match(installPs1, /Select-UiPage -Title '更新哪一层'/)
+assert.match(installPs1, /Value = 'update'; Label = '只更新容器内的 DSH'/)
+assert.match(installPs1, /Value = 'upgrade'; Label = '换成新镜像并重建容器'/)
+assert.match(installPs1, /Value = 'delete'; Label = '卸载'/)
 
 // 回收的边界：这两条会清掉宿主上别的项目，任何时候都不许出现在 upgrade 路径里。
 const shellUpgrade = installSh.slice(installSh.indexOf('load_upgrade_config() {'), installSh.indexOf('print_config_summary() {'))

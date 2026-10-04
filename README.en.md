@@ -67,6 +67,39 @@ DSH_ROOT_PASSWORD='a password of at least 12 characters' bash install.sh install
 
 Full options are in `bash install.sh --help`; on Windows use `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
 
+### Updating or uninstalling an existing deployment
+
+A TTY-less `curl | bash` run defaults to quick install, and the main menu never appears; on an existing deployment `install` is then refused because the container already exists. Enter the menu explicitly in that case:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- --menu
+```
+
+Inside the project directory you can also run `./install.sh --menu` directly.
+
+### Paging through the wizard
+
+The interactive installer is a **one-question-per-page** wizard: the main menu lists every lifecycle action (install, update, start, stop, restart, logs, status, uninstall, add keys, key panel), and choosing install opens a further page asking "quick install or manual configuration". Manual configuration then walks image source, access protection, egress policy, and model keys page by page.
+
+```text
+  DeepSeek Harness installer   (2/…)
+
+  Choose an action
+
+  > Install
+      Install DSH or rebuild the container from a new configuration
+    Update
+      Upgrade DSH in the container, or move to a new image and recreate
+    Uninstall
+      Remove containers, images, mounts, networks, and the project directory
+
+  ↑/↓ select | Enter confirm | Esc back | Ctrl+C exit
+```
+
+- **Quick install** is chosen explicitly inside the install branch (equivalent to `--quick`): basic auth with random credentials and the key broker off, zero prompts, printing the access URL and credentials at the end. It is no longer decided implicitly by whether a TTY is present.
+- When a container already exists, the main menu marks install as unavailable and says to run `./dsh.sh remove` first, instead of failing only after the choice.
+- Terminals that cannot page (piped input, `TERM=dumb`, CI) fall back to numbered input, so scripted calls are unaffected.
+
 ### Building behind a restricted network
 
 If the official Debian and npm mirrors are unreliable, build against local mirrors instead. The build arguments come from the Dockerfile, so the installer needs no changes:

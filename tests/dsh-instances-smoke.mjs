@@ -154,7 +154,7 @@ const child = spawn(process.execPath, [path.join(root, 'bin', 'dsh-instances.mjs
     DSH_INSTANCES_LISTEN: `127.0.0.1:${port}`,
     DSH_INSTANCES_TOKEN_FILE: tokenFile,
     DSH_INSTANCES_STATE: path.join(sandbox, 'instances.json'),
-    // 模型授权与代理配置：默认路径在 /data 下，沙箱里指向我们写的文件
+    // 模型授权与代理配置：默认路径在 /data 下，沙箱里指向本测试写入的文件
     DSH_BROKER_GRANTS_FILE: path.join(sandbox, 'broker-grants.json'),
     DSH_BROKER_TOKENS_FILE: path.join(sandbox, 'broker-tokens.json'),
     DSH_BROKER_KEYS_FILE: path.join(sandbox, 'broker-keys.json'),

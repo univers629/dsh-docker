@@ -79,7 +79,7 @@ $composeFileArgs = @('-f','docker-compose.yml')
 # ---------------------------------------------------------------------------
 
 # 内置 base_url 只是省掉常见上游的手输。其它上游必须显式给 -ModelBaseUrl：
-# 猜错 base_url 等于把密钥发到一个我们没验证过的域名，宁可报错退出。
+# 猜错 base_url 等于把密钥发到一个未经验证的域名，宁可报错退出。
 #
 # 这些值抄的是 DSH 内置模型目录（pi-ai catalog）里同名 provider 的 base_url，版本段
 # （/v1、/v1beta 等）必须留在这里：DSH 侧填的是 <代理>/u/<上游名>，客户端 SDK 只会往后
@@ -950,6 +950,195 @@ function Ask {
     return $answer.Trim()
 }
 
+# 强随机密码：至少 16 位，含大小写与数字。字符集刻意去掉容易看错的 0/O/1/l/I，
+# 因为一键安装的凭据是让人从终端抄下来的。与 install.sh 的 generate_password 同口径。
+function New-DshPassword {
+    param([int]$Length = 16)
+    $pool = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        while ($true) {
+            $chars = New-Object System.Text.StringBuilder
+            $buf = New-Object byte[] 1
+            for ($i = 0; $i -lt $Length; $i++) {
+                $rng.GetBytes($buf)
+                $null = $chars.Append($pool[$buf[0] % $pool.Length])
+            }
+            $candidate = $chars.ToString()
+            # 必须同时含小写、大写、数字：DSH 的口令策略要求字母与数字并存。
+            if ($candidate -cmatch '[a-z]' -and $candidate -cmatch '[A-Z]' -and $candidate -match '[0-9]') {
+                return $candidate
+            }
+        }
+    } finally { $rng.Dispose() }
+}
+
+# 翻页向导：一页问一件事，↑/↓ 选择、Enter 确认、Esc 回上一页。
+# 与 install.sh 的 ui_page_select 对齐（那边的 tty 判定在这里由 Console 能力等价表达）。
+# 没有控制台（重定向、CI）时退回编号输入，保证脚本化调用不受影响。
+$script:UiTui = $false
+$script:UiStep = 0
+$script:UiTotal = 0
+$script:UiBack = $false
+
+function Test-UiTui {
+    try {
+        if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { return $false }
+        $null = [Console]::KeyAvailable
+        return $true
+    } catch { return $false }
+}
+
+# 一页单选。$Items 每项为 @{ Value; Label; Desc }。
+# 返回选中的 Value；用户按 Esc 时置 $script:UiBack 并返回 $null。
+function Select-UiPage {
+    param(
+        [string]$Title,
+        [int]$DefaultIndex = 0,
+        [array]$Items
+    )
+    $script:UiBack = $false
+    if (-not $script:UiTui) {
+        Write-Host ''
+        Write-Host $Title
+        for ($i = 0; $i -lt $Items.Count; $i++) {
+            Write-Host ("  {0}) {1}" -f ($i + 1), $Items[$i].Label)
+        }
+        $picked = Ask '请选择' ([string]($DefaultIndex + 1))
+        $idx = 0
+        if ($picked -match '^\d+$') {
+            $n = [int]$picked
+            if ($n -ge 1 -and $n -le $Items.Count) { $idx = $n - 1 }
+        }
+        return $Items[$idx].Value
+    }
+
+    $index = [Math]::Max(0, [Math]::Min($DefaultIndex, $Items.Count - 1))
+    while ($true) {
+        Clear-Host
+        # 标题并入页头（对齐 dpanel 的 `DPanel - 安装方式 (3/9)`），正文直接列选项
+        Show-UiHeader -PageTitle $Title
+        Write-Host ''
+        for ($i = 0; $i -lt $Items.Count; $i++) {
+            if ($i -eq $index) { Write-Host ("  ▸ {0}" -f $Items[$i].Label) -ForegroundColor Cyan }
+            else { Write-Host ("    {0}" -f $Items[$i].Label) }
+            if ($Items[$i].Desc) { Write-Host ("    {0}" -f $Items[$i].Desc) -ForegroundColor DarkGray }
+        }
+        Write-Host ''
+        Write-Host '  ↑/↓ 选择 | Enter 确认 | Esc 返回 | Ctrl+C 退出' -ForegroundColor DarkGray
+
+        $key = [Console]::ReadKey($true)
+        switch ($key.Key) {
+            'UpArrow' { $index = if ($index -gt 0) { $index - 1 } else { $Items.Count - 1 } }
+            'DownArrow' { $index = if ($index -lt $Items.Count - 1) { $index + 1 } else { 0 } }
+            'Enter' { return $Items[$index].Value }
+            'Escape' { $script:UiBack = $true; return $null }
+        }
+    }
+}
+
+# 每页重绘的页头：鲸鱼 + 「向导名 - 当前页标题 (步骤)」。与 install.sh 的 ui_draw_header 对应。
+# 版式对齐 dpanel 的安装器：标题与步骤计数同一行，每页都重画一遍 logo，读起来是
+# "同一个程序在翻页"而不是一串散问。窗口高度不够时只留标题行，免得把选项挤出屏幕。
+function Show-UiHeader {
+    param([string]$PageTitle = '')
+    $rows = 0; $cols = 0
+    try { $rows = [Console]::WindowHeight } catch { $rows = 0 }
+    try { $cols = [Console]::WindowWidth } catch { $cols = 0 }
+    # 三级降级，与 install.sh 的 ui_draw_header 同一规则：
+    #   宽 >=71 列且高 >=22 行：鲸鱼 + DSH 并排；宽不够只画 DSH；高不够只留标题行。
+    if ($rows -eq 0 -or $rows -ge 22) {
+        if ($cols -eq 0 -or $cols -ge 71) { Show-Banner } else { Show-Wordmark }
+        Write-Host ''
+    }
+    Write-Host '  DeepSeek Harness' -ForegroundColor White -NoNewline
+    if ($PageTitle) { Write-Host ' - ' -ForegroundColor DarkGray -NoNewline; Write-Host $PageTitle -ForegroundColor White -NoNewline }
+    # 总页数依赖分支（选「启动」一页，选「安装」还有一页），写死一个分母就是假的，
+    # 所以只在确实知道总数时显示 N/M，否则只报页码。
+    if ($script:UiTotal -gt 0) {
+        Write-Host (" ({0}/{1})" -f $script:UiStep, $script:UiTotal) -ForegroundColor DarkGray
+    } elseif ($script:UiStep -gt 0) {
+        Write-Host (" ({0})" -f $script:UiStep) -ForegroundColor DarkGray
+    } else { Write-Host '' }
+}
+
+# 一页文本输入。Esc 回上一页（返回 $null 并置 UiBack）。
+function Read-UiPage {
+    param([string]$Title, [string]$Label, [string]$Default = '', [switch]$Secret)
+    $script:UiBack = $false
+    if (-not $script:UiTui) {
+        if ($Secret) { return (Ask-Secret $Label) }
+        return (Ask $Label $Default)
+    }
+    Clear-Host
+    Show-UiHeader -PageTitle $Title
+    Write-Host ''
+    Write-Host '  （Esc 返回上一页）' -ForegroundColor DarkGray
+    if ($Secret) { return (Ask-Secret $Label) }
+    return (Ask $Label $Default)
+}
+
+# 执行前的确认摘要（对齐 dpanel 安装器第 7 页「确认是否执行」）。
+# 放在配置问完、但任何写盘之前：答「否」时这一轮什么都没改动。
+function Confirm-InstallPlan {
+    param(
+        [string]$AccessMode, [string]$MultiUser, [string]$ImageSource,
+        [string]$ImageRef, [string]$Bind, [string]$ModelBroker,
+        [string]$EgressMode, [string]$KeyAdmin
+    )
+    # 非交互（一键 / CI）没有确认页：那条路本来就是零提问，多问一次会破坏脚本化调用。
+    if (-not $interactive) { return }
+
+    $brokerLabel = if ($ModelBroker -eq 'on') { '开（密钥只存宿主机与独立容器）' } else { '关（密钥直接写进 DSH 配置）' }
+    $egressLabel = switch ($EgressMode) {
+        'blocklist' { 'blocklist（挡隧道清单）' }
+        'allowlist' { 'allowlist（只放行白名单）' }
+        default { 'open（容器直连外网）' }
+    }
+    $keyAdminLabel = if ($KeyAdmin -eq 'on') {
+        $kb = if ($script:KeyAdminBindHost) { $script:KeyAdminBindHost } else { '127.0.0.1' }
+        $kp = if ($script:KeyAdminPortValue) { $script:KeyAdminPortValue } else { '3082' }
+        "开（${kb}:${kp}）"
+    } else { '关' }
+    $multiLabel = if ($MultiUser -eq 'on') { '多用户（开放注册 + 每实例独立容器）' } else { '单管理员' }
+
+    $rows = @(
+        "访问保护: $AccessMode"
+        "用户模式: $multiLabel"
+        "镜像来源: $ImageSource"
+        "镜像引用: $(if ($ImageRef) { $ImageRef } else { '（按来源推导）' })"
+        "绑定地址: $Bind"
+        "模型密钥代理: $brokerLabel"
+        "出站模式: $egressLabel"
+        "密钥管理面板: $keyAdminLabel"
+        "工程目录: $Dir"
+    )
+
+    if ($script:UiTui) {
+        Clear-Host
+        Show-UiHeader -PageTitle '确认是否执行'
+        Write-Host ''
+        foreach ($row in $rows) { Write-Host "  $row" -ForegroundColor DarkGray }
+        Write-Host ''
+    } else {
+        Write-Host ''
+        Write-Host '确认是否执行：'
+        foreach ($row in $rows) { Write-Host "  $row" }
+        Write-Host ''
+    }
+
+    $script:UiStep = 3
+    $script:UiTotal = 0
+    $answer = Select-UiPage -Title '确认是否执行' -DefaultIndex 0 -Items @(
+        @{ Value = 'yes'; Label = '是'; Desc = '执行当前操作' }
+        @{ Value = 'no'; Label = '否'; Desc = '不执行，返回上一步' }
+    )
+    if ($answer -ne 'yes') {
+        Write-Host '已取消，未做任何改动。' -ForegroundColor Yellow
+        exit 0
+    }
+}
+
 # 允许留空的提问：回车返回空串，用来收「可选值」和「填到不想填为止」的循环。
 # 与 Ask 的区别是空串是合法答案，所以不能回落到默认值。
 function Ask-Optional {
@@ -1457,6 +1646,73 @@ function Fetch-Project {
     } else { throw "$Dir 已存在但不是 dsh-docker 工程。" }
 }
 
+# 官方 DeepSeek 鲸鱼徽标（来源 @lobehub/icons 的 deepseek 图标，品牌蓝 #4D6BFE）。
+# 图案与 install.sh 的 print_banner 完全一致：两边都是同一份光栅化结果的纯文本，
+# 不依赖外部字体或图片。改动图案时两个文件要一起改（有测试比对两边是否一致）。
+#
+# 光栅化必须按图标声明的 fill-rule="evenodd" 做点内测试，并支持路径里的圆弧命令
+# （a/A）：镂空（腹部留白与眼睛）靠奇偶规则从实心形状里挖出来，眼睛的边界是圆弧。
+# 少任何一项，图案就只剩外部轮廓。
+# 图案只在这里存一份：启动横幅、翻页向导的每页页头、以及窄终端的降级版都读它。
+# install.sh 存同一份（BANNER_ART / WORDMARK_ART），有测试比对两边是否一致。
+$script:BannerArt = @(
+    '       ▄▄▄▄▄▄▄▄     █▄'
+    '   ▄███████████▄    ███▄ ▄▄▄▄█   ██████████    █████████  █████   █████'
+    ' ▄███████████████▄  ▀████████▀  ░░███░░░░███  ███░░░░░███░░███   ░░███'
+    '▄██████████████████▄  ████▀▀     ░███   ░░███░███    ░░░  ░███    ░███'
+    '██     ▀▀███████▀▀███████        ░███    ░███░░█████████  ░███████████'
+    '██        ▀██████  ▀█████        ░███    ░███ ░░░░░░░░███ ░███░░░░░███'
+    '███         ▀█████▄▄████         ░███    ███  ███    ░███ ░███    ░███'
+    ' ███          █████████          ██████████  ░░█████████  █████   █████'
+    '  ▀██▄    █▄▄  ▀█████▀          ░░░░░░░░░░    ░░░░░░░░░  ░░░░░   ░░░░░'
+    '   ▀▀███▄▄████▄▄▄██████▄'
+    '      ▀▀███████▀▀▀'
+)
+$script:WordmarkArt = @(
+    ' ██████████    █████████  █████   █████'
+    '░░███░░░░███  ███░░░░░███░░███   ░░███'
+    ' ░███   ░░███░███    ░░░  ░███    ░███'
+    ' ░███    ░███░░█████████  ░███████████'
+    ' ░███    ░███ ░░░░░░░░███ ░███░░░░░███'
+    ' ░███    ███  ███    ░███ ░███    ░███'
+    ' ██████████  ░░█████████  █████   █████'
+    '░░░░░░░░░░    ░░░░░░░░░  ░░░░░   ░░░░░'
+)
+
+function Show-Banner {
+    Write-UiArt $script:BannerArt
+}
+
+# 只画 DSH 大字：窄终端（放不下鲸鱼 + 大字并排）时的页头图案。
+function Show-Wordmark {
+    Write-UiArt $script:WordmarkArt
+}
+
+# 打印一段图案：末行后重置颜色，避免终端后续输出被染成品牌蓝。
+# 真彩色需要终端支持 ANSI；重定向输出（CI、日志文件）时不加颜色码，
+# 免得把转义序列写进日志——形状本身仍然完整可读。
+function Write-UiArt {
+    param([string[]]$Art)
+    $useColor = $false
+    try {
+        if (-not [Console]::IsOutputRedirected) { $useColor = $true }
+    } catch { $useColor = $false }
+
+    $esc = [char]27
+    $blue = if ($useColor) { "$esc[38;2;77;107;254m" } else { '' }
+    $reset = if ($useColor) { "$esc[0m" } else { '' }
+
+    for ($i = 0; $i -lt $Art.Count; $i++) {
+        if ($i -eq $Art.Count - 1) { Write-Host "$blue$($Art[$i])$reset" }
+        else { Write-Host "$blue$($Art[$i])" }
+    }
+}
+
+Show-Banner
+Write-Host ''
+Write-Host 'DeepSeek Harness (DSH) 安装与管理向导'
+Write-Host ''
+
 Ensure-DockerEngine
 # --userns-preflight 只做宿主检查，不该被"这次要做什么"的菜单挡住，也不需要工程目录。
 if ($UsernsPreflight) {
@@ -1465,30 +1721,43 @@ if ($UsernsPreflight) {
 }
 
 if (-not $DshAction -and $interactive) {
-    $installLabel = if (Test-Path $Dir) { '重新配置并重建容器（保留挂载数据）' } else { '全新安装' }
-    Write-Host "1) $installLabel`n2) 更新（容器内更新 DSH，或换成新镜像重建容器）`n3) 启动`n4) 停止`n5) 重启`n6) 日志`n7) 状态`n8) 删除`n9) 补填模型 API 密钥（只新增密钥代理容器，不重建 dsh）`n10) 模型密钥管理面板（浏览器里填密钥、拉模型列表，不重建 dsh）"
-    switch (Ask '这次要做什么' '1') {
-        '1' { $DshAction = 'install' }
-        # "更新"是两件不同粒度的事，合成一个入口再分支：日常更新 DSH 本体不需要碰镜像，
-        # 只有发布了新镜像（容器里那套脚本、控制层、基础层变了）才需要重建容器。
-        '2' {
-            Write-Host ''
-            Write-Host '更新哪一层：'
-            Write-Host '1) 只更新容器内的 DSH（重装 npm 包，容器和镜像都不动，最快）'
-            Write-Host '2) 换成新镜像并重建容器（沿用现有配置不重问；会话、插件、项目文件、'
-            Write-Host '   密钥全部保留，只有容器里 apt 装的系统包要重装）'
-            switch (Ask '请选择' '1') {
-                '1' { $DshAction = 'update' }
-                '2' { $DshAction = 'upgrade' }
-                default { throw '无效操作。' }
-            }
+    $script:UiTui = Test-UiTui
+    $installLabel = if (Test-Path $Dir) { '安装 / 重新配置（保留挂载数据）' } else { '安装' }
+    $script:UiStep = 1
+    $DshAction = Select-UiPage -Title '选择操作' -DefaultIndex 0 -Items @(
+        @{ Value = 'install'; Label = $installLabel; Desc = '安装 DSH 或按新配置重建容器' }
+        @{ Value = 'update'; Label = '更新'; Desc = '升级容器内的 DSH，或换成新镜像重建容器' }
+        @{ Value = 'start'; Label = '启动'; Desc = '启动已有容器，不重建' }
+        @{ Value = 'stop'; Label = '停止'; Desc = '停止容器，保留可写层与数据' }
+        @{ Value = 'restart'; Label = '重启'; Desc = '重启容器，保留可写层与数据' }
+        @{ Value = 'logs'; Label = '查看日志'; Desc = '跟随容器日志输出' }
+        @{ Value = 'status'; Label = '查看状态'; Desc = '容器、健康检查与访问入口' }
+        @{ Value = 'delete'; Label = '卸载'; Desc = '清理容器、镜像、挂载、网络与工程目录' }
+        @{ Value = 'model-key'; Label = '补填模型 API 密钥'; Desc = '只新增密钥代理容器，不重建 dsh' }
+        @{ Value = 'key-panel'; Label = '模型密钥管理面板'; Desc = '浏览器里填密钥、拉模型列表，不重建 dsh' }
+    )
+    # "更新"是两件不同粒度的事，合成一个入口再分页：日常更新 DSH 本体不需要碰镜像，
+    # 只有发布了新镜像（容器里那套脚本、控制层、基础层变了）才需要重建容器。
+    if ($DshAction -eq 'update') {
+        $script:UiStep = 2
+        $DshAction = Select-UiPage -Title '更新哪一层' -DefaultIndex 0 -Items @(
+            @{ Value = 'update'; Label = '只更新容器内的 DSH'; Desc = '重装 npm 包，容器和镜像都不动，最快' }
+            @{ Value = 'upgrade'; Label = '换成新镜像并重建容器'; Desc = '沿用现有配置不重问；会话、插件、项目文件、密钥全部保留，只有容器里 apt 装的系统包要重装' }
+        )
+    }
+    # 安装分两页：先选「一键」还是「手动」。一键不是靠有没有 TTY 隐式决定的。
+    if ($DshAction -eq 'install') {
+        $script:UiStep = 2
+        $mode = Select-UiPage -Title '安装方式' -DefaultIndex 0 -Items @(
+            @{ Value = 'quick'; Label = '一键安装'; Desc = 'basic 认证 + 随机账密 + 关闭密钥代理，零提问，装完打印访问地址与凭据' }
+            @{ Value = 'manual'; Label = '手动配置'; Desc = '逐页选择镜像来源、访问保护、出站策略、模型密钥等' }
+        )
+        if ($mode -eq 'quick') {
+            # 一键 = 零提问：与 --quick 走同一条路径。
+            $script:QuickInstall = $true
+            $interactive = $false
+            Write-Host '==> 一键安装：basic 认证 + 随机账密 + 关闭密钥代理，装完打印访问地址与凭据。'
         }
-        '3' { $DshAction = 'start' }; '4' { $DshAction = 'stop' }; '5' { $DshAction = 'restart' }
-        '6' { $DshAction = 'logs' }; '7' { $DshAction = 'status' }
-        '8' { $DshAction = 'delete' }
-        '9' { $DshAction = 'model-key' }
-        '10' { $DshAction = 'key-panel' }
-        default { throw '无效操作。' }
     }
 } elseif (-not $DshAction) { $DshAction = 'install' }
 
@@ -1573,6 +1842,27 @@ if (-not $Egress -and $egressMode -ne 'open') {
 $egressAllowed = if ($EgressAllow.Count -gt 0) { ($EgressAllow -join ',') } else { Get-ComposeEnvValue $envFile 'DSH_EGRESS_ALLOWED_HOSTS' '' }
 
 if ($DshAction -in @('install','configure')) {
+    # 一键安装：与 install.sh 的 QUICK_INSTALL 同一语义——basic 认证 + 随机账密 +
+    # 关闭密钥代理与出站隔离，全程零提问。它在菜单里被显式选择，或由 -NonInteractive
+    # 之外的无交互调用触发；这里先把该定的值定下来，后面的交互分支据此短路。
+    if ($script:QuickInstall) {
+        $interactive = $false
+        if (-not $Access) { $accessMode = 'basic' }
+        $imageSource = if ($ImageSource) { $ImageSource } else { 'prebuilt' }
+        $multiUser = 'off'
+        $modelBroker = 'off'
+        $egressMode = 'open'
+        $keyAdmin = 'off'
+        if (-not $basicUser) { $basicUser = 'dsh' }
+        if (-not $basicPassword) { $basicPassword = New-DshPassword 16 }
+        if (-not $rootPassword) { $rootPassword = New-DshPassword 16 }
+        $writeBasicAuth = $true
+        $writeRootPassword = $true
+        $script:GeneratedBasicUser = $basicUser
+        $script:GeneratedBasicPassword = $basicPassword
+        $script:GeneratedRootPassword = $rootPassword
+        Write-Host '==> 一键安装：basic 认证 + 随机账密 + 关闭密钥代理，装完打印访问地址与凭据。'
+    }
     if ($interactive -and -not $ImageSource) {
         $imageDefault = if ($imageSource -eq 'build') { '2' } else { '1' }
         Write-Host 'Debian 13 镜像来源：1=拉取公开预构建镜像（推荐）  2=在本机构建镜像（不编译 DSH 源码，约几分钟）'
@@ -2050,6 +2340,12 @@ function Invoke-DshUpgrade {
 
 switch ($DshAction) {
     { $_ -in @('install','configure') } {
+        # 确认摘要页（对齐 dpanel 安装器第 7 页「确认是否执行」）：把这一轮的选择汇总成
+        # 一张表，让人在执行前看一眼再决定。放在这里是因为配置已经问完、但还没有拉镜像、
+        # 写文件或创建任何容器——答「否」就等于什么都没发生。
+        Confirm-InstallPlan -AccessMode $accessMode -MultiUser $multiUser `
+            -ImageSource $imageSource -ImageRef $imageRef -Bind $bind `
+            -ModelBroker $modelBroker -EgressMode $egressMode -KeyAdmin $keyAdmin
         # 预构建优先，但公网拉取可能因为网络或尚未发布而失败；这时退回本机构建，
         # 而不是让整次安装中断。回退发生在写入 .env 之前，所以配置不会记错来源。
         $env:DSH_IMAGE = $imageRef

@@ -386,7 +386,7 @@ try {
   assert.equal(afterDisable.status, 200)
   assert.ok(!(await afterDisable.json()).secondFactor, 'password alone works again after disable')
 
-  // ---- Passkey 全流程（KPanel 同构：库负责密码学，我们只写策略）----
+  // ---- Passkey 全流程（KPanel 同构：库负责密码学，本端只写策略）----
   const passkeyStatus = await (await fetch(`${base}/api/auth/status`, { headers: PROXY_HEADERS })).json()
   assert.equal(passkeyStatus.passkeyAvailable, true, 'passkey available when a public https origin is configured')
   const noOriginStatus = await (await fetch(`${base}/api/auth/status`)).json()

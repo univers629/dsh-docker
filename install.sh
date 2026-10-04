@@ -21,6 +21,9 @@ INTERACTIVE=auto
 # 显式 --non-interactive 保留旧的自动化语义（全显式参数、不随机、不打印横幅）。
 QUICK_INSTALL=auto
 NON_INTERACTIVE_FLAG=false
+# 显式要看主菜单：无 TTY 的 curl|bash 直灌默认走一键，那时菜单不会出现。
+# 已有部署要更新或卸载时正需要它，因此 --menu 强制进入交互，不依赖 stdin 是否 TTY。
+MENU_REQUESTED=false
 # 一键模式下本次生成的明文凭据，只在结尾回显一次；只存哈希，绝不写进 .env。
 GENERATED_BASIC_USER=""
 GENERATED_BASIC_PASSWORD=""
@@ -126,6 +129,7 @@ usage() {
   --egress-allow HOSTS            allowlist 下额外放行的域名（可重复，逗号分隔，支持 *.example.com）
   --userns-preflight              只做宿主 userns-remap 预检并退出，不安装
   --non-interactive               不显示问答，使用参数或安全默认值
+  --menu                          显示主菜单（更新/卸载等都在其中），即使没有 TTY
   --quick                         一键安装：basic 认证 + 随机账密 + 关闭密钥代理，零提问
   --multi-user                    多用户：开放注册 + 每用户独立实例（与 --access=password 搭配）
   --no-multi-user                 单管理员模式（默认）
@@ -269,6 +273,7 @@ while [ "$#" -gt 0 ]; do
     --network-external) NETWORK_EXTERNAL_OVERRIDE=true ;;
     --network-internal) NETWORK_EXTERNAL_OVERRIDE=false ;;
     --non-interactive|-y|--yes) INTERACTIVE=false; NON_INTERACTIVE_FLAG=true ;;
+    --menu) MENU_REQUESTED=true ;;
     --quick) QUICK_INSTALL=true ;;
   --multi-user) MULTI_USER_OVERRIDE=on ;;
   --no-multi-user) MULTI_USER_OVERRIDE=off ;;
@@ -320,6 +325,15 @@ if [ "$INTERACTIVE" = auto ]; then
     INTERACTIVE=false
   fi
 fi
+# --menu 是显式要求看主菜单，优先于上面的环境判定：哪怕 stdin 不是 TTY，
+# 也从 /dev/tty 读答案（终端里执行时它可用）。读不到就直接失败并指明原因，
+# 而不是退回一键——那样用户根本看不到自己要的菜单。
+if [ "$MENU_REQUESTED" = true ]; then
+  INTERACTIVE=true
+  if [ "$QUICK_INSTALL" = auto ] || [ "$QUICK_INSTALL" = true ]; then
+    QUICK_INSTALL=false
+  fi
+fi
 # 一键判定：--quick 显式开；或没显式给 --non-interactive 且连 TTY 都没有（curl|bash 直灌）。
 # 只有 install / configure 才有一键语义；维护动作不能占一键的默认。
 if [ "$QUICK_INSTALL" = auto ]; then
@@ -343,13 +357,36 @@ fi
 
 prompt() {
   local message="$1" default="${2:-}" answer
+  # 默认从 /dev/tty 读：即使 stdin 被 curl 的管道占着，也能读到终端上的输入。
+  # 但 --menu 会在没有真实 tty 设备的环境里被显式调用（例如被包在 pty 里的会话），
+  # 这时退回 stdin，否则菜单刚画出来就因打不开 /dev/tty 而退出。
+  local input=/dev/tty
+  # -r/-w 在某些 pty 环境里会返回真，但真正打开时仍失败（Git-Bash 的 /dev/tty 如此）。
+  # 所以直接试着打开一次；打不开就退回脚本自己的 stdin/stdout（不重定向）。
+  # 这样 --menu 在没有真实 tty 设备的环境里也能用，而不是菜单画出来之后才崩。
+  local use_redirect=true
+  if ! (: < "$input") 2>/dev/null; then
+    use_redirect=false
+  fi
   while :; do
     if [ -n "$default" ]; then
-      printf '%s [%s]: ' "$message" "$default" > /dev/tty
+      if [ "$use_redirect" = true ]; then
+        printf '%s [%s]: ' "$message" "$default" > "$input"
+      else
+        printf '%s [%s]: ' "$message" "$default"
+      fi
     else
-      printf '%s: ' "$message" > /dev/tty
+      if [ "$use_redirect" = true ]; then
+        printf '%s: ' "$message" > "$input"
+      else
+        printf '%s: ' "$message"
+      fi
     fi
-    IFS= read -r answer < /dev/tty || exit 1
+    if [ "$use_redirect" = true ]; then
+      IFS= read -r answer < "$input" || exit 1
+    else
+      IFS= read -r answer || exit 1
+    fi
     answer="${answer:-$default}"
     if [ -n "$answer" ]; then
       PROMPT_RESULT="$answer"
@@ -364,6 +401,319 @@ prompt_secret() {
   IFS= read -r -s answer < /dev/tty || exit 1
   printf '\n' > /dev/tty
   PROMPT_RESULT="$answer"
+}
+
+# ---------------------------------------------------------------- 翻页向导
+#
+# 交互式安装做成可翻页的向导：一页问一件事，↑/↓ 选择、Enter 确认、Esc 回上一页。
+# 只有真正带 tty 的终端才启用（stty 能把行缓冲关掉、能读到方向键）；否则一律退回
+# 上面的编号 prompt，保证一键安装、CI、以及被管道包住的调用完全不受影响。
+#
+# 与 dpanel 的差别是刻意保留的：那边是闭源 Go 二进制里的全屏 TUI，这里是 bash，
+# 所以只做「一页一题 + 可回退」，不做全屏重绘——回退要能撤销的是**已写入的答案**，
+# 那才是用户真正需要的能力。
+
+UI_TUI=false
+UI_STTY_STATE=""
+UI_STEP=0
+UI_TOTAL=0
+UI_TRAP_SAVED=false
+UI_PREV_EXIT_TRAP=""
+
+# 判定能否进入翻页模式：必须有可读写的 tty，且 stty 能切换模式。
+ui_detect_tui() {
+  [ "$INTERACTIVE" = true ] || return 1
+  case "${TERM:-}" in ''|dumb) return 1 ;; esac
+  (: < /dev/tty) 2>/dev/null || return 1
+  stty -g < /dev/tty >/dev/null 2>&1 || return 1
+  UI_TUI=true
+  return 0
+}
+
+ui_raw_on() {
+  UI_STTY_STATE="$(stty -g < /dev/tty 2>/dev/null)" || return 1
+  stty -icanon -echo min 1 time 0 < /dev/tty 2>/dev/null || return 1
+  # 退出时一定要还原终端，否则用户的 shell 会留在无回显状态。
+  # 但**不能直接覆盖**已有的 EXIT trap：安装路径挂了 cleanup_pending_env、
+  # delete 的 detached 路径挂了自删脚本，覆盖掉它们会漏掉清理。所以把原有 trap
+  # 记下来，退出时先还原终端再执行原逻辑。
+  # 只在第一次记录：每页都会调 ui_raw_on，重复记录会把本函数安装的 trap 当成原有 trap。
+  if [ "$UI_TRAP_SAVED" != true ]; then
+    UI_PREV_EXIT_TRAP="$(trap -p EXIT 2>/dev/null || true)"
+    UI_TRAP_SAVED=true
+  fi
+  trap 'ui_raw_off; ui_run_prev_trap' EXIT
+  trap 'ui_raw_off; exit 130' INT
+  trap 'ui_raw_off; exit 143' TERM
+}
+
+# 执行 ui_raw_on 之前记录的 EXIT trap（若有）。trap -p 的输出形如
+# `trap -- '命令' EXIT`，这里把引号里的命令取出来执行。
+ui_run_prev_trap() {
+  local spec="$UI_PREV_EXIT_TRAP"
+  UI_PREV_EXIT_TRAP=""
+  [ -n "$spec" ] || return 0
+  local body="${spec#trap -- \'}"
+  body="${body%\' EXIT}"
+  [ "$body" != "$spec" ] && [ -n "$body" ] && eval "$body" || true
+}
+
+ui_raw_off() {
+  if [ -n "$UI_STTY_STATE" ]; then
+    stty "$UI_STTY_STATE" < /dev/tty 2>/dev/null || true
+    UI_STTY_STATE=""
+  fi
+}
+
+# 读一个按键，归一化成 up/down/enter/esc/其他。方向键是 ESC [ A/B 三字节序列，
+# 裸 ESC（回退）与它共用首字节，所以用极短超时区分：没有后续字节就是裸 ESC。
+ui_read_key() {
+  local key rest
+  IFS= read -rsn1 key < /dev/tty || { echo esc; return; }
+  case "$key" in
+    $'\x1b')
+      IFS= read -rsn1 -t 0.05 rest < /dev/tty 2>/dev/null || { echo esc; return; }
+      if [ "$rest" = '[' ]; then
+        IFS= read -rsn1 -t 0.05 rest < /dev/tty 2>/dev/null || { echo esc; return; }
+        case "$rest" in
+          A) echo up ;;
+          B) echo down ;;
+          *) echo other ;;
+        esac
+      else
+        echo esc
+      fi
+      ;;
+    '') echo enter ;;
+    $'\x03') echo interrupt ;;
+    k) echo up ;;
+    j) echo down ;;
+    *) echo "other:$key" ;;
+  esac
+}
+
+ui_clear() { printf '\033[2J\033[H' > /dev/tty; }
+
+# 每页重绘的页头：鲸鱼 + DSH 大字 + 「向导名 - 当前页标题 (步骤)」。
+# 版式对齐 dpanel 的安装器：标题与步骤计数同一行（`🚀 DPanel - 安装方式 (3/9)`），
+# 每页都重画一遍 logo，读起来是"同一个程序在翻页"而不是一串散问。
+#
+# 三级降级，按终端尺寸依次退让：
+#   宽 >=71 列且高 >=22 行：鲸鱼 + DSH 并排（最完整）
+#   宽 <71 列（并排放不下）：只画 DSH 大字
+#   高 <22 行（图案会把选项挤走）：只留标题行
+ui_draw_header() {
+  local page_title="${1:-}"
+  local term_rows=0 term_cols=0 size
+  size="$(stty size < /dev/tty 2>/dev/null)"
+  term_rows="${size%% *}"
+  term_cols="${size##* }"
+  case "$term_rows" in ''|*[!0-9]*) term_rows=0 ;; esac
+  case "$term_cols" in ''|*[!0-9]*) term_cols=0 ;; esac
+
+  if [ "$term_rows" -eq 0 ] || [ "$term_rows" -ge 22 ]; then
+    # 鲸鱼 30 列 + 间隔 2 + DSH 39 列 = 71 列；放不下就退成只画 DSH
+    if [ "$term_cols" -eq 0 ] || [ "$term_cols" -ge 71 ]; then
+      print_banner > /dev/tty
+    else
+      print_wordmark > /dev/tty
+    fi
+    printf '\n' > /dev/tty
+  fi
+  printf '\033[1m  DeepSeek Harness\033[0m' > /dev/tty
+  [ -n "$page_title" ] && printf ' \033[2m-\033[0m \033[1m%s\033[0m' "$page_title" > /dev/tty
+  # 总页数依赖分支（选「启动」一页，选「安装」两页），写死一个分母就是假的，
+  # 所以只在确实知道总数时显示 N/M，否则只报页码。
+  if [ "$UI_TOTAL" -gt 0 ]; then
+    printf ' \033[2m(%s/%s)\033[0m' "$UI_STEP" "$UI_TOTAL" > /dev/tty
+  elif [ "$UI_STEP" -gt 0 ]; then
+    printf ' \033[2m(%s)\033[0m' "$UI_STEP" > /dev/tty
+  fi
+  printf '\n' > /dev/tty
+}
+
+# 一页单选。items 每项为 "值\t标题\t说明"。
+# 结果：UI_VALUE=选中的值；UI_BACK=true 表示用户按了 Esc 要回上一页。
+ui_page_select() {
+  local title="$1" default_index="$2"; shift 2
+  local -a items=("$@")
+  local index=0 i value label desc key
+  # 默认项定位
+  for ((i = 0; i < ${#items[@]}; i++)); do
+    if [ "${items[$i]%%$'\t'*}" = "$default_index" ]; then index=$i; fi
+  done
+  [ "$default_index" -ge 0 ] 2>/dev/null && [ "$default_index" -lt "${#items[@]}" ] && index="$default_index"
+
+  UI_BACK=false
+  if [ "$UI_TUI" != true ]; then
+    # 非 TUI 回退：编号选择。输出走与 prompt 相同的可降级通道——没有 /dev/tty 的
+    # 环境（pty 包装、CI）里必须仍然能跑，否则菜单画出来就崩。
+    printf '\n%s\n' "$title"
+    for ((i = 0; i < ${#items[@]}; i++)); do
+      value="${items[$i]%%$'\t'*}"
+      desc="${items[$i]#*$'\t'}"
+      printf '  %s) %s\n' "$((i + 1))" "${desc%%$'\t'*}"
+    done
+    prompt "请选择" "$((index + 1))"
+    case "$PROMPT_RESULT" in
+      [0-9]*) if [ "$PROMPT_RESULT" -ge 1 ] && [ "$PROMPT_RESULT" -le "${#items[@]}" ]; then
+                UI_VALUE="${items[$((PROMPT_RESULT - 1))]%%$'\t'*}"
+              else
+                UI_VALUE="${items[$index]%%$'\t'*}"
+              fi ;;
+      *) UI_VALUE="${items[$index]%%$'\t'*}" ;;
+    esac
+    return 0
+  fi
+
+  ui_raw_on || { UI_TUI=false; ui_page_select "$title" "$default_index" "${items[@]}"; return 0; }
+  while :; do
+    ui_clear
+    # 标题并入页头（dpanel 的版式：`DPanel - 安装方式 (3/9)`），正文直接列选项
+    ui_draw_header "$title"
+    printf '\n' > /dev/tty
+    for ((i = 0; i < ${#items[@]}; i++)); do
+      value="${items[$i]%%$'\t'*}"
+      rest="${items[$i]#*$'\t'}"
+      label="${rest%%$'\t'*}"
+      desc=""
+      [ "$rest" != "$label" ] && desc="${rest#*$'\t'}"
+      if [ "$i" = "$index" ]; then
+        printf '  \033[36m▸ %s\033[0m\n' "$label" > /dev/tty
+      else
+        printf '    %s\n' "$label" > /dev/tty
+      fi
+      [ -n "$desc" ] && printf '    \033[2m%s\033[0m\n' "$desc" > /dev/tty
+    done
+    printf '\n  \033[2m↑/↓ 选择 | Enter 确认 | Esc 返回 | Ctrl+C 退出\033[0m\n' > /dev/tty
+
+    key="$(ui_read_key)"
+    case "$key" in
+      up) index=$((index > 0 ? index - 1 : ${#items[@]} - 1)) ;;
+      down) index=$((index < ${#items[@]} - 1 ? index + 1 : 0)) ;;
+      enter)
+        UI_VALUE="${items[$index]%%$'\t'*}"
+        ui_raw_off
+        return 0
+        ;;
+      esc)
+        ui_raw_off
+        UI_BACK=true
+        return 0
+        ;;
+      interrupt)
+        ui_raw_off
+        printf '\n已取消。\n' > /dev/tty
+        exit 130
+        ;;
+    esac
+  done
+}
+
+# 一页文本输入。Esc 回上一页。UI_VALUE=输入值；UI_BACK=true 表示回退。
+ui_page_input() {
+  local title="$1" label="$2" default="$3" secret="${4:-false}"
+  UI_BACK=false
+  if [ "$UI_TUI" != true ]; then
+    if [ "$secret" = true ]; then prompt_secret "$label"; else prompt "$label" "$default"; fi
+    UI_VALUE="$PROMPT_RESULT"
+    return 0
+  fi
+  ui_raw_on || { UI_TUI=false; ui_page_input "$title" "$label" "$default" "$secret"; return 0; }
+  ui_clear
+  ui_draw_header "$title"
+  printf '\n' > /dev/tty
+  if [ -n "$default" ]; then
+    printf '  %s \033[2m[%s]\033[0m: ' "$label" "$default" > /dev/tty
+  else
+    printf '  %s: ' "$label" > /dev/tty
+  fi
+  local answer
+  if [ "$secret" = true ]; then
+    IFS= read -rs answer < /dev/tty || { ui_raw_off; UI_BACK=true; return 0; }
+  else
+    stty icanon echo < /dev/tty 2>/dev/null || true
+    IFS= read -r answer < /dev/tty || { ui_raw_off; UI_BACK=true; return 0; }
+    stty -icanon -echo < /dev/tty 2>/dev/null || true
+  fi
+  printf '\n' > /dev/tty
+  ui_raw_off
+  UI_VALUE="${answer:-$default}"
+  return 0
+}
+
+prompt_secret_orig() { prompt_secret "$@"; }
+
+# 执行前的确认摘要（对齐 dpanel 安装器第 7 页「确认是否执行」）。
+# 把它放在 configure_dsh 之后、任何写盘之前：答「否」时这一轮什么都没改动。
+# 表格按两列排（键: 值），选项多时自动分栏，避免一屏塞不下。
+confirm_install_plan() {
+  local -a rows=()
+  local broker_label egress_label key_admin_label multi_label
+
+  case "${PENDING_MODEL_BROKER:-off}" in
+    on) broker_label="开（密钥只存宿主机与独立容器）" ;;
+    *) broker_label="关（密钥直接写进 DSH 配置）" ;;
+  esac
+  case "${PENDING_EGRESS_MODE:-open}" in
+    blocklist) egress_label="blocklist（挡隧道清单）" ;;
+    allowlist) egress_label="allowlist（只放行白名单）" ;;
+    *) egress_label="open（容器直连外网）" ;;
+  esac
+  case "${PENDING_KEY_ADMIN:-off}" in
+    on) key_admin_label="开（${PENDING_KEY_ADMIN_BIND_HOST:-127.0.0.1}:${PENDING_KEY_ADMIN_PORT:-3082}）" ;;
+    *) key_admin_label="关" ;;
+  esac
+  case "${PENDING_MULTI_USER:-off}" in
+    on) multi_label="多用户（注册门槛=${PENDING_REGISTER_GATE:-open}，闲置=${PENDING_IDLE_TIMEOUT:-1800}s）" ;;
+    *) multi_label="单管理员" ;;
+  esac
+
+  rows+=("访问保护: ${PENDING_ACCESS_MODE:-local}")
+  rows+=("用户模式: $multi_label")
+  rows+=("镜像来源: ${PENDING_IMAGE_SOURCE:-prebuilt}")
+  rows+=("镜像引用: ${PENDING_IMAGE:-（按来源推导）}")
+  rows+=("绑定地址: ${PENDING_BIND_HOST:-127.0.0.1}")
+  rows+=("模型密钥代理: $broker_label")
+  rows+=("出站模式: $egress_label")
+  rows+=("密钥管理面板: $key_admin_label")
+  rows+=("工程目录: $TARGET_DIR")
+
+  # 非交互（一键 / CI）没有确认页：那条路本来就是零提问，多问一次会破坏脚本化调用。
+  if [ "$INTERACTIVE" != true ]; then
+    return 0
+  fi
+
+  if [ "$UI_TUI" = true ]; then
+    ui_raw_on || true
+    ui_clear
+    ui_draw_header "确认是否执行"
+    printf '\n' > /dev/tty
+    local i
+    for ((i = 0; i < ${#rows[@]}; i++)); do
+      printf '  \033[2m%s\033[0m\n' "${rows[$i]}" > /dev/tty
+    done
+    printf '\n' > /dev/tty
+    ui_raw_off
+  else
+    echo
+    echo "确认是否执行："
+    local i
+    for ((i = 0; i < ${#rows[@]}; i++)); do
+      echo "  ${rows[$i]}"
+    done
+    echo
+  fi
+
+  UI_STEP=3
+  UI_TOTAL=0
+  ui_page_select "确认是否执行" 0 \
+    "yes	是	执行当前操作" \
+    "no	否	不执行，返回上一步"
+  if [ "$UI_VALUE" != yes ]; then
+    echo "已取消，未做任何改动。" >&2
+    exit 0
+  fi
 }
 
 # prompt 会一直问到非空，但有些配置项"留空"本身就是有效答案（例如额外放行的域名），
@@ -423,21 +773,73 @@ fi
 
 # 官方 DeepSeek 鲸鱼徽标（来源 @lobehub/icons 的 deepseek 图标，品牌蓝 #4D6BFE）。
 # 用 Unicode 半块字符（▀/▄/█）光栅化成纯文本，不依赖任何外部字体或图片。
-print_banner() {
-  local blue=""
+#
+# 光栅化必须按图标声明的 fill-rule="evenodd" 做点内测试，并且要支持路径里的圆弧
+# 命令（a/A）：镂空（腹部大块留白与眼睛）正是靠奇偶规则从实心形状里挖出来的，
+# 而眼睛那条边界是圆弧。少任何一项，图案就只剩外部轮廓。
+#
+# 图案只在这里存一份：启动横幅与翻页向导的每页页头都读它，避免两处各写一份而漂移。
+# install.ps1 的 Show-Banner 存同一份，有测试比对两边是否一致。
+BANNER_ART=(
+  '       ▄▄▄▄▄▄▄▄     █▄'
+  '   ▄███████████▄    ███▄ ▄▄▄▄█   ██████████    █████████  █████   █████'
+  ' ▄███████████████▄  ▀████████▀  ░░███░░░░███  ███░░░░░███░░███   ░░███'
+  '▄██████████████████▄  ████▀▀     ░███   ░░███░███    ░░░  ░███    ░███'
+  '██     ▀▀███████▀▀███████        ░███    ░███░░█████████  ░███████████'
+  '██        ▀██████  ▀█████        ░███    ░███ ░░░░░░░░███ ░███░░░░░███'
+  '███         ▀█████▄▄████         ░███    ███  ███    ░███ ░███    ░███'
+  ' ███          █████████          ██████████  ░░█████████  █████   █████'
+  '  ▀██▄    █▄▄  ▀█████▀          ░░░░░░░░░░    ░░░░░░░░░  ░░░░░   ░░░░░'
+  '   ▀▀███▄▄████▄▄▄██████▄'
+  '      ▀▀███████▀▀▀'
+)
+# DSH 大字（FIGlet 的 DOS Rebel 字体，8 行）。窄终端放不下鲸鱼时只画它。
+# 与 BANNER_ART 一样由字体文件生成、不手抄；install.ps1 存同一份，有测试比对两边。
+WORDMARK_ART=(
+  ' ██████████    █████████  █████   █████'
+  '░░███░░░░███  ███░░░░░███░░███   ░░███'
+  ' ░███   ░░███░███    ░░░  ░███    ░███'
+  ' ░███    ░███░░█████████  ░███████████'
+  ' ░███    ░███ ░░░░░░░░███ ░███░░░░░███'
+  ' ░███    ███  ███    ░███ ░███    ░███'
+  ' ██████████  ░░█████████  █████   █████'
+  '░░░░░░░░░░    ░░░░░░░░░  ░░░░░   ░░░░░'
+)
+
+
+banner_blue() {
   if [ -n "$ANSI_CLEAR" ]; then
-    blue="$(printf '\033[38;2;77;107;254m')"
+    printf '\033[38;2;77;107;254m'
   fi
-  printf '%s\n' "$blue"'      ▄▄▄▄▄▄▄█    █▄'
-  printf '%s\n' "$blue"'  ▄██████████▄▄   ███▄▄▄▄▄█'
-  printf '%s\n' "$blue"' ███████████████▄ ▀███████'
-  printf '%s\n' "$blue"'██████████████████▄ ███▀'
-  printf '%s\n' "$blue"'██████████████████████▀'
-  printf '%s\n' "$blue"'██████████████████████'
-  printf '%s\n' "$blue"'▀████████████████████'
-  printf '%s\n' "$blue"' ▀█████████████████▀'
-  printf '%s\n' "$blue"'   ▀████████████████▄'
-  printf '%s\n' "$blue"'     ▀▀███████▀▀'"$ANSI_CLEAR"
+}
+
+print_banner() {
+  local blue last
+  blue="$(banner_blue)"
+  last=$(( ${#BANNER_ART[@]} - 1 ))
+  local i
+  for ((i = 0; i <= last; i++)); do
+    if [ "$i" -eq "$last" ]; then
+      printf '%s\n' "$blue${BANNER_ART[$i]}$ANSI_CLEAR"
+    else
+      printf '%s\n' "$blue${BANNER_ART[$i]}"
+    fi
+  done
+}
+
+# 只画 DSH 大字：窄终端（放不下鲸鱼 + 大字并排）时的页头图案。
+print_wordmark() {
+  local blue last
+  blue="$(banner_blue)"
+  last=$(( ${#WORDMARK_ART[@]} - 1 ))
+  local i
+  for ((i = 0; i <= last; i++)); do
+    if [ "$i" -eq "$last" ]; then
+      printf '%s\n' "$blue${WORDMARK_ART[$i]}$ANSI_CLEAR"
+    else
+      printf '%s\n' "$blue${WORDMARK_ART[$i]}"
+    fi
+  done
 }
 
 print_banner
@@ -447,50 +849,74 @@ echo "（无 TTY 的 curl|bash 直灌会默认走「一键安装」；也可显�
 echo
 
 # --userns-preflight 只做宿主检查，不该被"这次要做什么"的菜单挡住。
+# 菜单要标出"安装"当前是否可用。container_exists() 依赖 DOCKER()，而 DOCKER()
+# 在菜单之后才定义，所以这里直接探一次 docker：容器存在则安装走不通。
+# 探不到 docker 时按"可用"处理——随后统一的 Docker 检测会给出真正的报错。
+INSTALL_AVAILABLE=true
+if command -v docker >/dev/null 2>&1 && docker container inspect dsh >/dev/null 2>&1; then
+  INSTALL_AVAILABLE=false
+elif command -v sudo >/dev/null 2>&1 && sudo docker container inspect dsh >/dev/null 2>&1; then
+  INSTALL_AVAILABLE=false
+fi
+
 if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
   if [ "$INTERACTIVE" = true ]; then
-    if [ -d "$TARGET_DIR" ]; then
-      echo "1) 重新配置并重建容器（保留挂载数据）"
+    ui_detect_tui || true
+
+    # 主菜单：一页列出全部生命周期动作。安装项在容器已存在时标注不可用，
+    # 而不是让人选了才撞上报错。
+    if [ "$INSTALL_AVAILABLE" = false ]; then
+      install_label="安装（当前不可用：容器已存在，需先 ./dsh.sh remove）"
+    elif [ -d "$TARGET_DIR" ]; then
+      install_label="安装 / 重新配置（保留挂载数据）"
     else
-      echo "1) 全新安装"
+      install_label="安装"
     fi
-    echo "2) 更新（容器内更新 DSH，或换成新镜像重建容器）"
-    echo "3) 启动"
-    echo "4) 停止"
-    echo "5) 重启"
-    echo "6) 查看日志"
-    echo "7) 查看状态"
-    echo "8) 删除"
-    echo "9) 补填模型 API 密钥（只新增密钥代理容器，不重建 dsh）"
-    echo "10) 模型密钥管理面板（浏览器里填密钥、拉模型列表，不重建 dsh）"
-    prompt "这次要做什么" "1"
-    case "$PROMPT_RESULT" in
-      1) ACTION=install ;;
-      # "更新"是两件不同粒度的事，合成一个入口再分支：日常更新 DSH 本体不需要碰镜像，
-      # 只有发布了新镜像（容器里那套脚本、控制层、基础层变了）才需要重建容器。
-      2)
-        echo
-        echo "更新哪一层："
-        echo "1) 只更新容器内的 DSH（重装 npm 包，容器和镜像都不动，最快）"
-        echo "2) 换成新镜像并重建容器（沿用现有配置不重问；会话、插件、项目文件、"
-        echo "   密钥全部保留，只有容器里 apt 装的系统包要重装）"
-        prompt "请选择" "1"
-        case "$PROMPT_RESULT" in
-          1) ACTION=update ;;
-          2) ACTION=upgrade ;;
-          *) echo "[错误] 无效选项。" >&2; exit 2 ;;
-        esac
-        ;;
-      3) ACTION=start ;;
-      4) ACTION=stop ;;
-      5) ACTION=restart ;;
-      6) ACTION=logs ;;
-      7) ACTION=status ;;
-      8) ACTION=delete ;;
-      9) ACTION=model-key ;;
-      10) ACTION=key-panel ;;
-      *) echo "[错误] 无效选项。" >&2; exit 2 ;;
-    esac
+
+    # 页数只在确实能算准时给分母：主菜单之后的分支长度不同（选「启动」到此为止，
+    # 选「安装」还要再走一页并进各自的配置流程），所以这里只报页码，不编造总数。
+    UI_STEP=1
+    UI_TOTAL=0
+    ui_page_select "选择操作" 0 \
+      "install	${install_label}	安装 DSH 或按新配置重建容器" \
+      "update	更新	升级容器内的 DSH，或换成新镜像重建容器" \
+      "start	启动	启动已有容器，不重建" \
+      "stop	停止	停止容器，保留可写层与数据" \
+      "restart	重启	重启容器，保留可写层与数据" \
+      "logs	查看日志	跟随容器日志输出" \
+      "status	查看状态	容器、健康检查与访问入口" \
+      "delete	卸载	清理容器、镜像、挂载、网络与工程目录" \
+      "model-key	补填模型 API 密钥	只新增密钥代理容器，不重建 dsh" \
+      "key-panel	模型密钥管理面板	浏览器里填密钥、拉模型列表，不重建 dsh"
+    ACTION="$UI_VALUE"
+
+    # 更新是两件不同粒度的事，合成一个入口再分页：日常更新 DSH 本体不需要碰镜像，
+    # 只有发布了新镜像（容器里那套脚本、控制层、基础层变了）才需要重建容器。
+    if [ "$ACTION" = update ]; then
+      UI_STEP=2
+      ui_page_select "更新哪一层" 0 \
+        "update	只更新容器内的 DSH	重装 npm 包，容器和镜像都不动，最快" \
+        "upgrade	换成新镜像并重建容器	沿用现有配置不重问；会话、插件、项目文件、密钥全部保留，只有容器里 apt 装的系统包要重装"
+      ACTION="$UI_VALUE"
+    fi
+
+    # 安装分两页：先选「一键」还是「手动」，再进各自的流程。
+    # 一键安装不是靠有没有 TTY 隐式决定的——那是无 TTY 直灌时的默认，不是交互时的选项。
+    if [ "$ACTION" = install ]; then
+      UI_STEP=2
+      ui_page_select "安装方式" 0 \
+        "quick	一键安装	basic 认证 + 随机账密 + 关闭密钥代理，零提问，装完打印访问地址与凭据" \
+        "manual	手动配置	逐页选择镜像来源、访问保护、出站策略、模型密钥等"
+      case "$UI_VALUE" in
+        quick)
+          # 一键 = 零提问：与 --quick 走同一条路径。
+          QUICK_INSTALL=true
+          INTERACTIVE=false
+          echo "==> 一键安装：basic 认证 + 随机账密 + 关闭密钥代理，装完打印访问地址与凭据。"
+          ;;
+        *) QUICK_INSTALL=false ;;
+      esac
+    fi
   else
     ACTION=install
   fi
@@ -976,6 +1402,10 @@ if [ "$ACTION" = install ] || [ "$ACTION" = configure ]; then
   if container_exists; then
     echo "[错误] dsh 容器已经存在；为保护容器内 apt 软件和系统修改，安装器不会隐式重建它。" >&2
     echo "       使用 ./dsh.sh start|restart 管理现有容器；如需全新系统，请明确执行 ./dsh.sh remove 后再安装。" >&2
+    echo >&2
+    echo "       要更新、卸载或做其它维护，进主菜单选：" >&2
+    echo "         curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- --menu" >&2
+    echo "       已在本工程目录时也可以直接：./install.sh --menu" >&2
     exit 1
   fi
 fi
@@ -1136,7 +1566,7 @@ set_compose_args() {
 # ---------------------------------------------------------------------------
 
 # 内置 base_url 只是省掉常见上游的手输。其它上游必须显式给 --model-base-url：
-# 猜错 base_url 等于把密钥发到一个我们没验证过的域名，宁可报错退出。
+# 猜错 base_url 等于把密钥发到一个未经验证的域名，宁可报错退出。
 #
 # 这些值抄的是 DSH 内置模型目录（pi-ai catalog）里同名 provider 的 base_url，
 # 版本段（/v1、/v1beta 等）必须留在这里：DSH 侧填的是 <代理>/u/<上游名>，客户端
@@ -3367,6 +3797,10 @@ trap cleanup_pending_env EXIT
 case "$ACTION" in
   install|configure)
     configure_dsh
+    # 确认摘要页（对齐 dpanel 安装器第 7 页「确认是否执行」）：把这一轮收集到的选择
+    # 汇总成一张表，让人在执行前看一眼再决定。放在这里是因为此时配置已经问完、但还
+    # 没有写任何文件或创建任何容器——答「否」就等于什么都没发生。
+    confirm_install_plan
     obtain_dsh_image
     write_basic_auth
     write_root_password
