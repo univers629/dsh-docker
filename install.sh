@@ -361,10 +361,12 @@ if [ "$INTERACTIVE" != true ] && [ "$NON_INTERACTIVE_FLAG" != true ] \
 fi
 
 # 向导页计数器：每进入一页自增，用于页头显示「(N)」。文本输入与单选共用。
+# 进入新页同时要求整页重绘：新页内容与上一页无关，逐行比对没有意义。
 UI_PAGE_NO=0
 ui_next_page() {
   UI_PAGE_NO=$((UI_PAGE_NO + 1))
   UI_STEP=$UI_PAGE_NO
+  UI_FULL_REDRAW=true
 }
 
 prompt() {
@@ -375,15 +377,17 @@ prompt() {
   if [ "$UI_TUI" = true ]; then
     ui_raw_on || true
     ui_next_page
-    ui_clear
+    ui_lines_begin
     ui_draw_header "$message"
-    printf '\n' > /dev/tty
+    ui_line ""
     if [ -n "$default" ]; then
-      printf '  \033[2m%s\033[0m \033[2m[%s]\033[0m\n' "$message" "$default" > /dev/tty
+      ui_line "$(printf '  \033[2m%s\033[0m \033[2m[%s]\033[0m' "$message" "$default")"
     else
-      printf '  \033[2m%s\033[0m\n' "$message" > /dev/tty
+      ui_line "$(printf '  \033[2m%s\033[0m' "$message")"
     fi
-    printf '\n  \033[36m▸\033[0m ' > /dev/tty
+    ui_line ""
+    ui_flush
+    printf '  \033[1;36m▸\033[0m ' > /dev/tty
     stty icanon echo < /dev/tty 2>/dev/null || true
     IFS= read -r answer < /dev/tty || { ui_raw_off; exit 1; }
     stty -icanon -echo < /dev/tty 2>/dev/null || true
@@ -554,7 +558,51 @@ ui_read_key() {
   esac
 }
 
-ui_clear() { printf '\033[2J\033[H' > /dev/tty; }
+# ---------------------------------------------------------------- 页面渲染
+#
+# 渲染分两种：进入一页时整页重绘一次，页内每次按键只重画变化的那几行。
+#
+# 这是 dpanel 安装器的实际做法（抓取其原始字节确认）：按一次方向键只输出 121 字节，
+# 其中不含 CSI 2J（全屏清空），而是「CSI H 回到左上 → 用换行走到目标行 → 画该行
+# → CSI K 擦掉行尾」，只覆盖变化的行。整页清屏重画会让画面整片闪动，观感上像是
+# 每按一次键就把界面重印一遍。
+UI_LINES=()          # 本帧要显示的行
+UI_DRAWN=()          # 上一帧已绘制的行
+UI_FULL_REDRAW=true  # 下一页是否整页重绘
+
+ui_lines_begin() { UI_LINES=(); }
+ui_line() { UI_LINES+=("$1"); }
+
+# 输出一帧。UI_FULL_REDRAW 为真时先清屏再逐行画；否则只重画内容有变化的行。
+ui_flush() {
+  local total=${#UI_LINES[@]} i
+  if [ "$UI_FULL_REDRAW" = true ]; then
+    printf '\033[2J\033[H' > /dev/tty
+    for ((i = 0; i < total; i++)); do
+      printf '%s\033[K\r\n' "${UI_LINES[$i]}" > /dev/tty
+    done
+    UI_DRAWN=("${UI_LINES[@]}")
+    UI_FULL_REDRAW=false
+    return 0
+  fi
+  printf '\033[H' > /dev/tty
+  for ((i = 0; i < total; i++)); do
+    if [ "${UI_LINES[$i]}" = "${UI_DRAWN[$i]:-}" ]; then
+      # 未变化：只下移一行，不重画。这正是「选中的那一行才闪」的关键。
+      printf '\r\n' > /dev/tty
+    else
+      printf '%s\033[K\r\n' "${UI_LINES[$i]}" > /dev/tty
+      UI_DRAWN[$i]="${UI_LINES[$i]}"
+    fi
+  done
+  # 本帧行数少于上一帧时，清掉尾部的旧行，避免残留。
+  for ((i = total; i < ${#UI_DRAWN[@]}; i++)); do
+    printf '\033[K\r\n' > /dev/tty
+  done
+  if [ "${#UI_DRAWN[@]}" -gt "$total" ]; then
+    UI_DRAWN=("${UI_LINES[@]}")
+  fi
+}
 
 # 每页重绘的页头：鲸鱼 + DSH 大字 + 「向导名 - 当前页标题 (步骤)」。
 # 版式对齐 dpanel 的安装器：标题与步骤计数同一行（`🚀 DPanel - 安装方式 (3/9)`），
@@ -574,24 +622,54 @@ ui_draw_header() {
   case "$term_cols" in ''|*[!0-9]*) term_cols=0 ;; esac
 
   if [ "$term_rows" -eq 0 ] || [ "$term_rows" -ge 22 ]; then
-    # 鲸鱼 30 列 + 间隔 2 + DSH 39 列 = 71 列；放不下就退成只画 DSH
+    # 鲸鱼 30 列 + 间隔 2 + DSH 39 列 = 71 列；放不下就退成只画 DSH。
+    # 图案作为「行」进入缓冲，而不是直接打印：页内重绘时它们不变化，
+    # 于是 ui_flush 只下移光标、不重画，图片不会被反复刷。
     if [ "$term_cols" -eq 0 ] || [ "$term_cols" -ge 71 ]; then
-      print_banner > /dev/tty
+      ui_paint_banner
     else
-      print_wordmark > /dev/tty
+      ui_paint_wordmark
     fi
-    printf '\n' > /dev/tty
+    ui_line ""
   fi
-  printf '\033[1m  DeepSeek Harness\033[0m' > /dev/tty
-  [ -n "$page_title" ] && printf ' \033[2m-\033[0m \033[1m%s\033[0m' "$page_title" > /dev/tty
+  local head
+  head="$(printf '\033[1m  DeepSeek Harness\033[0m')"
+  [ -n "$page_title" ] && head="$head$(printf ' \033[2m-\033[0m \033[1m%s\033[0m' "$page_title")"
   # 总页数依赖分支（选「启动」一页，选「安装」两页），写死一个分母就是假的，
   # 所以只在确实知道总数时显示 N/M，否则只报页码。
   if [ "$UI_TOTAL" -gt 0 ]; then
-    printf ' \033[2m(%s/%s)\033[0m' "$UI_STEP" "$UI_TOTAL" > /dev/tty
+    head="$head$(printf ' \033[2m(%s/%s)\033[0m' "$UI_STEP" "$UI_TOTAL")"
   elif [ "$UI_STEP" -gt 0 ]; then
-    printf ' \033[2m(%s)\033[0m' "$UI_STEP" > /dev/tty
+    head="$head$(printf ' \033[2m(%s)\033[0m' "$UI_STEP")"
   fi
-  printf '\n' > /dev/tty
+  ui_line "$head"
+}
+
+# 把图案追加为「行」，供增量重绘使用（每行都带品牌蓝，末行后复位颜色）。
+ui_paint_banner() {
+  local blue last i
+  blue="$(banner_blue)"
+  last=$(( ${#BANNER_ART[@]} - 1 ))
+  for ((i = 0; i <= last; i++)); do
+    if [ "$i" -eq "$last" ]; then
+      ui_line "${blue}${BANNER_ART[$i]}$ANSI_CLEAR"
+    else
+      ui_line "${blue}${BANNER_ART[$i]}"
+    fi
+  done
+}
+
+ui_paint_wordmark() {
+  local blue last i
+  blue="$(banner_blue)"
+  last=$(( ${#WORDMARK_ART[@]} - 1 ))
+  for ((i = 0; i <= last; i++)); do
+    if [ "$i" -eq "$last" ]; then
+      ui_line "${blue}${WORDMARK_ART[$i]}$ANSI_CLEAR"
+    else
+      ui_line "${blue}${WORDMARK_ART[$i]}"
+    fi
+  done
 }
 
 # 一页单选。items 每项为 "值\t标题\t说明"。
@@ -630,10 +708,12 @@ ui_page_select() {
 
   ui_raw_on || { UI_TUI=false; ui_page_select "$title" "$default_index" "${items[@]}"; return 0; }
   while :; do
-    ui_clear
+    # 组装本帧：页头 + 空行 + 选项 + 操作键提示。
+    # 只组装不打印；ui_flush 决定重画哪些行。
+    ui_lines_begin
     # 标题并入页头（dpanel 的版式：`DPanel - 安装方式 (3/9)`），正文直接列选项
     ui_draw_header "$title"
-    printf '\n' > /dev/tty
+    ui_line ""
     for ((i = 0; i < ${#items[@]}; i++)); do
       value="${items[$i]%%$'\t'*}"
       rest="${items[$i]#*$'\t'}"
@@ -641,13 +721,16 @@ ui_page_select() {
       desc=""
       [ "$rest" != "$label" ] && desc="${rest#*$'\t'}"
       if [ "$i" = "$index" ]; then
-        printf '  \033[36m▸ %s\033[0m\n' "$label" > /dev/tty
+        # 选中项只改这一行：dpanel 用高亮行首标记，其余行原样不动。
+        ui_line "$(printf '  \033[1;36m▸ %s\033[0m' "$label")"
       else
-        printf '    %s\n' "$label" > /dev/tty
+        ui_line "$(printf '    %s' "$label")"
       fi
-      [ -n "$desc" ] && printf '    \033[2m%s\033[0m\n' "$desc" > /dev/tty
+      [ -n "$desc" ] && ui_line "$(printf '    \033[2m%s\033[0m' "$desc")"
     done
-    printf '\n  \033[2m↑/↓ 选择 | Enter 确认 | Esc 返回 | Ctrl+C 退出\033[0m\n' > /dev/tty
+    ui_line ""
+    ui_line "$(printf '  \033[2m↑/↓ 选择 | Enter 确认 | Esc 返回 | Ctrl+C 退出\033[0m')"
+    ui_flush
 
     key="$(ui_read_key)"
     case "$key" in
@@ -682,14 +765,17 @@ ui_page_input() {
     return 0
   fi
   ui_raw_on || { UI_TUI=false; ui_page_input "$title" "$label" "$default" "$secret"; return 0; }
-  ui_clear
+  ui_lines_begin
   ui_draw_header "$title"
-  printf '\n' > /dev/tty
+  ui_line ""
   if [ -n "$default" ]; then
-    printf '  %s \033[2m[%s]\033[0m: ' "$label" "$default" > /dev/tty
+    ui_line "$(printf '  %s \033[2m[%s]\033[0m' "$label" "$default")"
   else
-    printf '  %s: ' "$label" > /dev/tty
+    ui_line "$(printf '  %s' "$label")"
   fi
+  ui_line ""
+  ui_flush
+  printf '  \033[1;36m▸\033[0m ' > /dev/tty
   local answer
   if [ "$secret" = true ]; then
     IFS= read -rs answer < /dev/tty || { ui_raw_off; UI_BACK=true; return 0; }
@@ -746,17 +832,18 @@ confirm_install_plan() {
     return 0
   fi
 
+  # 摘要表先以整页绘制一次，随后紧跟的是「是 / 否」选择页（共用同一帧）。
   if [ "$UI_TUI" = true ]; then
     ui_raw_on || true
-    ui_clear
+    ui_lines_begin
     ui_draw_header "确认是否执行"
-    printf '\n' > /dev/tty
+    ui_line ""
     local i
     for ((i = 0; i < ${#rows[@]}; i++)); do
-      printf '  \033[2m%s\033[0m\n' "${rows[$i]}" > /dev/tty
+      ui_line "$(printf '  \033[2m%s\033[0m' "${rows[$i]}")"
     done
-    printf '\n' > /dev/tty
-    ui_raw_off
+    ui_line ""
+    ui_flush
   else
     echo
     echo "确认是否执行："
@@ -769,7 +856,8 @@ confirm_install_plan() {
 
   UI_TOTAL=0
   ui_next_page
-  ui_page_select "确认是否执行" 0 \    "yes	是	执行当前操作" \
+  ui_page_select "确认是否执行" 0 \
+    "yes	是	执行当前操作" \
     "no	否	不执行，返回上一步"
   # 确认页是向导的最后一页：无论选是还是否都要离开备用屏幕，
   # 否则后续的安装输出（或取消提示）会落在用户看不见的画布上。
@@ -788,15 +876,17 @@ prompt_optional() {
   if [ "$UI_TUI" = true ]; then
     ui_raw_on || true
     ui_next_page
-    ui_clear
+    ui_lines_begin
     ui_draw_header "$message"
-    printf '\n' > /dev/tty
+    ui_line ""
     if [ -n "$default" ]; then
-      printf '  \033[2m当前值: %s（回车表示清空）\033[0m\n\n' "$default" > /dev/tty
+      ui_line "$(printf '  \033[2m当前值: %s（回车表示清空）\033[0m' "$default")"
     else
-      printf '  \033[2m可留空\033[0m\n\n' > /dev/tty
+      ui_line "$(printf '  \033[2m可留空\033[0m')"
     fi
-    printf '  \033[36m▸\033[0m ' > /dev/tty
+    ui_line ""
+    ui_flush
+    printf '  \033[1;36m▸\033[0m ' > /dev/tty
     stty icanon echo < /dev/tty 2>/dev/null || true
     IFS= read -r answer < /dev/tty || { ui_raw_off; exit 1; }
     stty -icanon -echo < /dev/tty 2>/dev/null || true
@@ -940,11 +1030,17 @@ print_wordmark() {
   done
 }
 
-print_banner
-echo
-echo "DeepSeek Harness (DSH) 安装与管理向导"
-echo "（无 TTY 的 curl|bash 直灌会默认走「一键安装」；也可显式加 --quick）"
-echo
+# 横幅只在无法进入向导时直接打印。判定要用 UI_TUI 而不是 INTERACTIVE：
+# 终端不可翻页（TERM=dumb、stty 不可用）时向导会退回编号输入，那时仍需横幅，
+# 而它必须落在主屏幕上。向导路径由第一页页头在备用屏幕内绘制——在主屏幕打印会
+# 留在 scrollback 里，退出向导后仍能看到。
+ui_detect_tui || true
+if [ "$UI_TUI" != true ]; then
+  print_banner
+  echo
+  echo "DeepSeek Harness (DSH) 安装与管理向导"
+  echo
+fi
 
 # --userns-preflight 只做宿主检查，不该被"这次要做什么"的菜单挡住。
 # 菜单要标出"安装"当前是否可用。container_exists() 依赖 DOCKER()，而 DOCKER()
@@ -959,8 +1055,6 @@ fi
 
 if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
   if [ "$INTERACTIVE" = true ]; then
-    ui_detect_tui || true
-
     # 主菜单：一页列出全部生命周期动作。安装项在容器已存在时标注不可用，
     # 而不是让人选了才撞上报错。
     if [ "$INSTALL_AVAILABLE" = false ]; then
