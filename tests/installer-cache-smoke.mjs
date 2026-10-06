@@ -79,8 +79,14 @@ const writeManifest = (hash) =>
   writeFileSync(manifestPath, `${hash}  dsh-installer-linux-amd64\n`)
 
 const runner = join(sandbox, 'run.sh')
+// 注意工作目录：dsh_installer_path 会优先使用「工程内已构建的产物」
+//（./cmd/dsh-installer/dsh-installer），那是给开发者本机验证用的。
+// 测试必须在空目录里跑，否则会命中那个产物、绕过被测的缓存逻辑。
+const emptyCwd = join(sandbox, 'cwd')
+mkdirSync(emptyCwd, { recursive: true })
 writeFileSync(runner, `#!/usr/bin/env bash
 set -uo pipefail
+cd "${emptyCwd}"
 ${extractFn('dsh_installer_path')}
 ${extractFn('use_unverified_cache')}
 ${extractFn('cache_candidate_ok')}

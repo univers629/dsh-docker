@@ -4410,9 +4410,18 @@ install_execution_body() {
 run_install_execution() {
   local bin logfile summaryfile sentinel status
 
-  # 没有向导二进制（或不是 TTY）时按老样子直接输出：这里不该因为显示方式而失败。
+  # 先判断要不要 TUI，再决定去不去找二进制。
+  # 顺序很重要：dsh_installer_path 在缓存缺失时会联网下载，而 --non-interactive
+  # 根本用不到 TUI——为它去下载一个几 MB 的二进制既浪费又可能卡住（CI、受限网络下
+  # 表现为安装器挂起）。无终端时同样直接走普通输出。
+  if [ "${DSH_NO_EXEC_VIEW:-}" = 1 ] || [ "$UI_TUI" != true ] || [ "$INTERACTIVE" != true ]; then
+    install_execution_body
+    return $?
+  fi
+
+  # 只有真要显示 TUI 时才找二进制；找不到就退回普通输出，不因为显示方式而失败。
   bin="$(dsh_installer_path 2>/dev/null || true)"
-  if [ -z "$bin" ] || [ "${DSH_NO_EXEC_VIEW:-}" = 1 ] || [ "$UI_TUI" != true ]; then
+  if [ -z "$bin" ]; then
     install_execution_body
     return $?
   fi

@@ -30,19 +30,75 @@ assert.match(installSh, /--no-multi-user\) MULTI_USER_OVERRIDE=off ;;/)
 assert.match(installSh, /--register-gate=\*\)/, 'invite gate flag exists')
 assert.match(installSh, /--idle-timeout=\*\)/, 'idle timeout flag exists')
 assert.match(installSh, /--user-disk-quota=\*\)/, 'disk quota flag exists')
-assert.match(installSh, /configure_user_mode\(\) \{/, 'the user-mode wizard function exists')
-assert.match(installSh, /configure_user_mode "\$access_mode"/, 'the wizard function is invoked')
-// 访问保护方式是一页选择面板（不再是编号输入），多用户是其中一项。
-assert.match(installSh, /password\t多用户（开放注册 \+ 每实例独立容器）\t/, 'the access menu offers multi-user')
-assert.match(installSh, /password\) access_mode=password; MULTI_USER_OVERRIDE=on ;;/, 'choosing multi-user pins password mode')
+assert.match(installSh, /configure_user_mode\(\) \{/, 'the user-mode configuration function exists')
+assert.match(installSh, /configure_user_mode "\$access_mode"/, 'the function is invoked')
+// 访问保护与用户模式的页面现在定义在 Go 向导里（cmd/dsh-installer/pages.go），
+// install.sh 只负责按答案落配置。断言要落在正确的一侧。
+const pagesGo = read('cmd/dsh-installer/pages.go')
+assert.match(pagesGo, /\{"password", "多用户（开放注册 \+ 每实例独立容器）"/, '向导的访问保护页提供多用户')
+assert.match(pagesGo, /\{"on", "多用户"/, '向导的用户模式页提供多用户')
+assert.match(pagesGo, /\{"invite", "需要邀请码"/, '向导提供邀请码门槛')
+assert.match(pagesGo, /func idleTimeoutPage\(\) page/, '向导提供闲置阈值页')
+assert.match(pagesGo, /func diskQuotaPage\(\) page/, '向导提供磁盘配额页')
 assert.match(installSh, /COMPOSE_ARGS\++=\(-f docker-compose\.multiuser\.yml\)/, 'the multi-user overlay is applied')
 assert.match(installSh, /set_compose_env DSH_MULTI_USER "\$PENDING_MULTI_USER"/, 'the choice is persisted to .env')
 assert.match(installSh, /set_compose_env DSH_REGISTER_GATE/, 'the register gate is persisted')
 assert.match(installSh, /set_compose_env DSH_IDLE_TIMEOUT_SECONDS/, 'the idle timeout is persisted')
 assert.match(installSh, /set_compose_env DSH_USER_DISK_QUOTA_BYTES/, 'the disk quota is persisted')
 
+// 向导的答案键必须被 install.sh 接收：键名对不上时，用户在向导里选了多用户，
+// 执行阶段却按单管理员装配——而且没有任何报错。这条断言把两侧连起来。
+for (const [key, variable] of [
+  ['multi_user', 'MULTI_USER_OVERRIDE'],
+  ['register_gate', 'REGISTER_GATE_OVERRIDE'],
+  ['idle_timeout', 'IDLE_TIMEOUT_OVERRIDE'],
+  ['disk_quota', 'DISK_QUOTA_OVERRIDE'],
+  ['access', 'ACCESS_MODE_OVERRIDE'],
+]) {
+  assert.match(
+    installSh,
+    new RegExp(`^\\s*${key}\\) ${variable}="\\$value" ;;$`, 'm'),
+    `向导回传的 "${key}" 必须被解析到 ${variable}`,
+  )
+}
+
+// 向导完成后不得再回到交互提问：否则用户在向导里选完多用户，又要在终端里选一遍。
+// 断言「注册门槛」等提问页必须位于一个 return 之后的分支里，而不是仅看
+// DSH_WIZARD_DONE 是否出现过——函数里有多处该判断，只看存在性会漏掉这一处。
+const userModeFn = installSh.slice(
+  installSh.indexOf('configure_user_mode() {'),
+  installSh.indexOf('build_dsh_image() {'),
+)
+assert.ok(userModeFn.length > 0, '应能定位 configure_user_mode')
+
+const gatePageIdx = userModeFn.indexOf('ui_page_select "注册门槛"')
+assert.ok(gatePageIdx > 0, '应能找到注册门槛页')
+
+// 注册门槛之前必须存在「向导已完成 → return 0」这段完整结构：
+// 从 if [ "${DSH_WIZARD_DONE:-}" = true ] 到它自己的 fi，中间有 return 0。
+const gateSection = userModeFn.slice(0, gatePageIdx)
+const guardRe = /if \[ "\$\{DSH_WIZARD_DONE:-\}" = true \]; then([\s\S]*?)\n  fi\n/g
+let guarded = false
+for (const m of gateSection.matchAll(guardRe)) {
+  if (m[1].includes('return 0')) {
+    guarded = true
+    break
+  }
+}
+assert.ok(
+  guarded,
+  '「注册门槛」等提问页之前必须有「向导已完成 → return 0」的分支，否则向导问完还会再问一遍',
+)
+
+// 用户模式页本身也要在向导完成后跳过
+assert.match(
+  userModeFn,
+  /elif \[ "\$\{DSH_WIZARD_DONE:-\}" = true \]; then/,
+  '用户模式页本身也要在向导完成后跳过',
+)
+
 // password 模式必须叠加认证层：只设模式不部署网关，等于完全开放
-assert.match(installSh, /if \[ "\$PENDING_ACCESS_MODE" = password \]; then/, 'password mode forces the auth overlay')
+assert.match(installSh, /if \[ "\$PENDING_ACCESS_MODE" = password \] \|\| \[ "\$PENDING_MULTI_USER" = on \]; then/, 'password 与多用户都必须叠加认证层')
 assert.match(installSh, /COMPOSE_ARGS\+=\(--profile authgate -f docker-compose\.auth\.yml\)/, 'the single-admin entry is activated by profile')
 assert.match(installSh, /COMPOSE_ARGS\+=\(--profile multiuser\)/, 'the multi-user entry is activated by profile')
 
