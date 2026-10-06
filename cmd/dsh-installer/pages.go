@@ -5,7 +5,11 @@ package main
 // 结构：每个页面的 next 函数决定下一页，因此分支（例如「一键安装」跳过全部配置页）
 // 是自然表达，不需要预先把页面拼成数组。历史栈由 wizardModel 维护，Esc 即可回退。
 
-// actionPage 是第一页：选择操作，与 install.sh 的主菜单一一对应。
+// actionPage 是第一页：选择操作。
+//
+// 只列 6 项而不是把每个动作平铺：主菜单每多一项就多占一行，而 24 行终端（最常见的
+// 默认高度）里，10 项会把 11 行的品牌横幅整个挤掉——向导第一页反而看不到鲸鱼。
+// 频次低的动作收进子页（运行控制、查看、模型密钥），与 dpanel 主菜单的密度一致。
 func actionPage() page {
 	return page{
 		kind:  pageSelect,
@@ -13,14 +17,10 @@ func actionPage() page {
 		choices: []choice{
 			{"install", "安装 / 重新配置", "安装 DSH 或按新配置重建容器"},
 			{"update", "更新", "升级容器内的 DSH，或换成新镜像重建容器"},
-			{"start", "启动", "启动已有容器，不重建"},
-			{"stop", "停止", "停止容器，保留可写层与数据"},
-			{"restart", "重启", "重启容器，保留可写层与数据"},
-			{"logs", "查看日志", "跟随容器日志输出"},
-			{"status", "查看状态", "容器、健康检查与访问入口"},
+			{"run", "运行控制", "启动、停止、重启容器"},
+			{"view", "查看日志与状态", "跟随日志输出，或看容器、健康检查与访问入口"},
+			{"model", "模型密钥", "补填密钥，或打开密钥管理面板"},
 			{"delete", "卸载", "清理容器、镜像、挂载、网络与工程目录"},
-			{"model-key", "补填模型 API 密钥", "只新增密钥代理容器，不重建 dsh"},
-			{"key-panel", "模型密钥管理面板", "浏览器里填密钥、拉模型列表，不重建 dsh"},
 		},
 		apply: func(m *wizardModel, v string) bool {
 			m.answers["action"] = v
@@ -34,11 +34,79 @@ func actionPage() page {
 			case "update":
 				p := updateModePage()
 				return &p
+			case "run":
+				p := runControlPage()
+				return &p
+			case "view":
+				p := viewPage()
+				return &p
+			case "model":
+				p := modelKeyPage()
+				return &p
 			case "delete":
 				p := deleteScopePage()
 				return &p
 			}
-			// 其余动作没有后续页面：交给引擎执行即可。
+			p := confirmPage()
+			return &p
+		},
+	}
+}
+
+// runControlPage 汇总运行控制。这些动作各自一页没有意义（都是单步、无需配置），
+// 合在一起既省行数，也让主菜单只保留"要做什么"这一层。
+func runControlPage() page {
+	return page{
+		kind:  pageSelect,
+		title: "运行控制",
+		choices: []choice{
+			{"start", "启动", "启动已有容器，不重建"},
+			{"stop", "停止", "停止容器，保留可写层与数据"},
+			{"restart", "重启", "重启容器，保留可写层与数据"},
+		},
+		apply: func(m *wizardModel, v string) bool {
+			m.answers["action"] = v
+			return false
+		},
+		next: func(m *wizardModel) *page {
+			p := confirmPage()
+			return &p
+		},
+	}
+}
+
+func viewPage() page {
+	return page{
+		kind:  pageSelect,
+		title: "查看",
+		choices: []choice{
+			{"logs", "查看日志", "跟随容器日志输出"},
+			{"status", "查看状态", "容器、健康检查与访问入口"},
+		},
+		apply: func(m *wizardModel, v string) bool {
+			m.answers["action"] = v
+			return false
+		},
+		next: func(m *wizardModel) *page {
+			p := confirmPage()
+			return &p
+		},
+	}
+}
+
+func modelKeyPage() page {
+	return page{
+		kind:  pageSelect,
+		title: "模型密钥",
+		choices: []choice{
+			{"model-key", "补填模型 API 密钥", "只新增密钥代理容器，不重建 dsh"},
+			{"key-panel", "模型密钥管理面板", "浏览器里填密钥、拉模型列表，不重建 dsh"},
+		},
+		apply: func(m *wizardModel, v string) bool {
+			m.answers["action"] = v
+			return false
+		},
+		next: func(m *wizardModel) *page {
 			p := confirmPage()
 			return &p
 		},

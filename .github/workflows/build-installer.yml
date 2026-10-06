@@ -60,6 +60,16 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: cmd/dsh-installer/go.sum
 
+      - name: Vet and test
+        # 只在 amd64 那份跑一次：Go 的单测与架构无关，跑两遍纯属浪费。
+        if: matrix.goarch == 'amd64'
+        working-directory: cmd/dsh-installer
+        run: |
+          set -eu
+          test -z "$(gofmt -l .)" || { echo '以下文件未格式化：' >&2; gofmt -l . >&2; exit 1; }
+          go vet ./...
+          go test ./...
+
       - name: Build
         working-directory: cmd/dsh-installer
         env:

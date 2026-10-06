@@ -53,6 +53,8 @@ The wizard is a standalone Go binary, `dsh-installer`, built on Bubble Tea — t
 
 Interface and installation logic are separate: the wizard only collects answers (written to a `KEY=VALUE` file) and `install.sh` performs the installation. That keeps `curl | bash` (where the script has no path) working, keeps a single copy of the installation logic, and means nothing the wizard already asked is asked a second time in the terminal.
 
+The execution phase runs in the TUI too: pulling the image, starting the container, and the hardening checks scroll inside a fixed region, with status and actions below; `↑/↓` and `PgUp/PgDn` scroll back and `End` returns to the newest output. When it finishes, the access URL and key panel token stay pinned above the actions instead of scrolling away, and on failure the full log is printed once more along with its location on disk. Set `DSH_NO_EXEC_VIEW=1` to send the execution phase straight to the terminal instead.
+
 When the binary cannot be fetched the installer fails with repair instructions instead of falling back to a second interface, because two interfaces mean two experiences. On an offline or restricted network, point it at a mirror or pre-place the binary:
 
 ```sh

@@ -628,9 +628,22 @@ FAIL
   }
   [ -x "$bin" ] || { echo "[错误] $bin 不可执行。" >&2; exit 1; }
   answers="$(mktemp "${TMPDIR:-/tmp}/dsh-answers.XXXXXX")" || { echo "[错误] 无法创建临时文件。" >&2; exit 1; }
+  # 向导的 stdin 显式指向控制终端。
+  #
+  # Bubble Tea 自身会处理 stdin 非终端的情况（检测到就把输入切到 /dev/tty），所以
+  # 这里不是修 bug，而是两点明确的意图：
+  #   1. 不依赖框架的隐式回退——管道留给 bash，终端留给向导，归属写清楚；
+  #   2. 没有控制终端时立刻失败并给出无人值守的出路，而不是让向导在无 TTY 时报一句
+  #      难以理解的框架错误。
+  if [ ! -c /dev/tty ] || ! { : < /dev/tty; } 2>/dev/null; then
+    echo "[错误] 向导需要控制终端，但 /dev/tty 不可用。" >&2
+    echo "       在终端里运行不应出现这条提示；若通过 CI/管道调用，请改用无人值守参数：" >&2
+    echo "         bash install.sh install --non-interactive --access local --image-source prebuilt" >&2
+    exit 2
+  fi
   # 先执行再取退出码：`if ! cmd; then status=$?` 拿到的是取反后的 0，不是真实状态。
   local status=0
-  "$bin" --answers-file "$answers" --dir "$TARGET_DIR" || status=$?
+  "$bin" --answers-file "$answers" --dir "$TARGET_DIR" < /dev/tty || status=$?
   if [ "$status" != 0 ]; then
     rm -f "$answers"
     # 用户主动取消（3）：不是错误，干净退出，不打印额外信息。
@@ -951,6 +964,23 @@ ui_page_select() {
   local title="$1" default_index="$2"; shift 2
   local -a items=("$@")
   local index=0 i value label desc key
+  # 向导已经跑过，任何 bash 页面都不该再出现。走到这里说明有个调用点漏了守卫——
+  # 那会让用户在向导里答过的问题被再问一遍（曾经真实发生：多用户配置在向导之后
+  # 又弹出「注册门槛」整页）。这里不静默放过，而是取默认值并留下可被测试捕获的痕迹。
+  if [ "${DSH_WIZARD_DONE:-}" = true ]; then
+    echo "[警告] 向导已结束，跳过 bash 页面「$title」（调用点缺少 DSH_WIZARD_DONE 守卫）。" >&2
+    # default_index 既可能是下标也可能是选项值（调用点两种都有），两种都要认。
+    UI_VALUE="${items[0]%%$'\t'*}"
+    if [ "$default_index" -ge 0 ] 2>/dev/null && [ "$default_index" -lt "${#items[@]}" ]; then
+      UI_VALUE="${items[$default_index]%%$'\t'*}"
+    else
+      for ((i = 0; i < ${#items[@]}; i++)); do
+        if [ "${items[$i]%%$'\t'*}" = "$default_index" ]; then UI_VALUE="$default_index"; break; fi
+      done
+    fi
+    UI_BACK=false
+    return 0
+  fi
   # 默认项定位
   for ((i = 0; i < ${#items[@]}; i++)); do
     if [ "${items[$i]%%$'\t'*}" = "$default_index" ]; then index=$i; fi
@@ -2927,6 +2957,14 @@ configure_model_broker_from_answers() {
 }
 
 configure_model_broker() {
+  # 向导已经问过「是否启用密钥代理」与「是否启用管理面板」，答案在
+  # PENDING_MODEL_BROKER 里。这里必须**先**处理它再读 .env，否则下面那行
+  # 会把向导的答案整段覆盖掉——用户明明选了开启，装完却看到「本次不启用密钥代理」。
+  if [ "${DSH_WIZARD_DONE:-}" = true ]; then
+    configure_model_broker_from_answers
+    return 0
+  fi
+
   PENDING_MODEL_BROKER="$(get_compose_env DSH_MODEL_BROKER off)"
   case "$PENDING_MODEL_BROKER" in on|off) ;; *) PENDING_MODEL_BROKER=off ;; esac
 
@@ -2961,16 +2999,6 @@ configure_model_broker() {
 
   # 命令行已经把密钥给全了就不再追问：自动化和交互混用时不该被问答打断。
   if [ "${#BROKER_NAMES[@]}" -gt 0 ] || [ -n "$MODEL_KEYS_FILE" ]; then
-    return 0
-  fi
-
-  # 向导已经问过「是否启用密钥代理」与「是否启用管理面板」。走到这里若 INTERACTIVE
-  # 已被向导置 false，就不再重复提问，直接按向导的答案落配置：
-  #   broker on  → 保留已有 keys.json（有的话），或建空文件留给面板填
-  #   broker off → 关闭代理
-  # 密钥本身一律不在终端里收集，统一由密钥管理面板在浏览器里填。
-  if [ "${DSH_WIZARD_DONE:-}" = true ]; then
-    configure_model_broker_from_answers
     return 0
   fi
 
@@ -3107,7 +3135,7 @@ configure_dsh() {
 
   image_source="${IMAGE_SOURCE_OVERRIDE:-$(get_compose_env DSH_IMAGE_SOURCE prebuilt)}"
   case "$image_source" in prebuilt|build) ;; *) image_source=prebuilt ;; esac
-  if [ "$INTERACTIVE" = true ] && [ -z "$IMAGE_SOURCE_OVERRIDE" ]; then
+  if [ "$INTERACTIVE" = true ] && [ "${DSH_WIZARD_DONE:-}" != true ] && [ -z "$IMAGE_SOURCE_OVERRIDE" ]; then
     case "$image_source" in build) default_route=1 ;; *) default_route=0 ;; esac
     ui_next_page
     ui_page_select "Debian 13 镜像来源" "$default_route" \
@@ -3133,7 +3161,7 @@ configure_dsh() {
   else
     access_mode="${ACCESS_MODE_OVERRIDE:-$(get_compose_env DSH_ACCESS_MODE local)}"
   fi
-  if [ "$INTERACTIVE" = true ] && [ -z "$ACCESS_MODE_OVERRIDE" ]; then
+  if [ "$INTERACTIVE" = true ] && [ "${DSH_WIZARD_DONE:-}" != true ] && [ -z "$ACCESS_MODE_OVERRIDE" ]; then
     case "$access_mode" in local) default_route=0 ;; trusted-proxy) default_route=1 ;; basic) default_route=2 ;; password) default_route=3 ;; *) default_route=0 ;; esac
     ui_next_page
     ui_page_select "访问保护方式" "$default_route" \
@@ -3207,7 +3235,7 @@ configure_dsh() {
         network_external="${NETWORK_EXTERNAL_OVERRIDE:-false}"
         ;;
     esac
-  elif [ "$INTERACTIVE" = true ]; then
+  elif [ "$INTERACTIVE" = true ] && [ "${DSH_WIZARD_DONE:-}" != true ]; then
     default_route=0
     if DOCKER network inspect dpanel-local >/dev/null 2>&1 || [ "$network_external" = true ]; then
       default_route=1
@@ -3270,7 +3298,7 @@ configure_dsh() {
   if [ "$access_mode" = basic ]; then
     # 向导已经问过「新建还是保留」与账密：DSH_WIZARD_DONE 时不进任何提问分支，
     # 直接用 PENDING_BASIC_USER / PENDING_BASIC_PASSWORD 落盘。
-    if [ "$DSH_WIZARD_DONE" != true ] && [ -s data/auth/htpasswd ] && [ "$INTERACTIVE" = true ]; then
+    if [ "${DSH_WIZARD_DONE:-}" != true ] && [ -s data/auth/htpasswd ] && [ "$INTERACTIVE" = true ]; then
       prompt_yes_no "保留现有 Basic Auth 用户名和密码" y
       keep_auth="$PROMPT_RESULT"
     elif [ -s data/auth/htpasswd ] && [ -z "$PENDING_BASIC_PASSWORD" ]; then
@@ -3291,7 +3319,7 @@ configure_dsh() {
       case "$PENDING_BASIC_USER" in *[!A-Za-z0-9._-]*|'') echo "[错误] 用户名只允许字母、数字、点、下划线和连字符。" >&2; exit 2 ;; esac
     fi
     if [ "$keep_auth" != true ]; then
-      if [ "$DSH_WIZARD_DONE" = true ]; then
+      if [ "${DSH_WIZARD_DONE:-}" = true ]; then
         # 账密来自向导，只校验、不提问。
         case "$PENDING_BASIC_USER" in *[!A-Za-z0-9._-]*|'') echo "[错误] Basic Auth 用户名只允许字母、数字、点、下划线和连字符。" >&2; exit 2 ;; esac
         if [ "${#PENDING_BASIC_PASSWORD}" -lt 12 ]; then
@@ -3336,7 +3364,7 @@ configure_dsh() {
       echo "[错误] 容器 root 密码至少需要 12 个字符。" >&2
       exit 2
     fi
-  elif [ "$DSH_WIZARD_DONE" = true ]; then
+  elif [ "${DSH_WIZARD_DONE:-}" = true ]; then
     # 向导已经问过：给了密码就设置（ROOT_PASSWORD_OVERRIDE 已在上面赋给
     # PENDING_ROOT_PASSWORD），选了「不设置」则清空哈希。这里不再提问。
     if [ "${NO_ROOT_PASSWORD_ANSWER:-}" = true ] || [ -z "$PENDING_ROOT_PASSWORD" ]; then
@@ -3423,6 +3451,11 @@ configure_user_mode() {
     existing="$(get_compose_env DSH_MULTI_USER off)"
     if [ "$QUICK_INSTALL" = true ]; then
       multi_user="$existing"
+    elif [ "${DSH_WIZARD_DONE:-}" = true ]; then
+      # 向导已经问过用户模式。它没给答案有两种可能：选了「单管理员」，
+      # 或根本没进这个分支（访问保护不是 password）。两种情况都该按单管理员处理，
+      # 而不是回落到 bash 里再问一遍——那正是「向导走完又被弹一页」的来源。
+      multi_user="$existing"
     elif [ "$access_mode" = password ]; then
       ui_next_page
       ui_page_select "用户模式" 0 \
@@ -3446,6 +3479,16 @@ configure_user_mode() {
   # 多用户把访问保护方式固定为 password：认证只能有一个来源。
   if [ "$access_mode" != password ]; then
     echo "==> 多用户模式需要内置认证网关承担认证，访问保护方式已改为 password。"
+  fi
+
+  # 向导已经问过这三项，按答案落配置；不再画 bash 页面。
+  # 答案缺失（向导没进这个分支）时用安全默认值，而不是回落到提问。
+  if [ "${DSH_WIZARD_DONE:-}" = true ]; then
+    register_gate="${register_gate:-open}"
+    idle_timeout="${idle_timeout:-1800}"
+    user_disk_quota="${user_disk_quota:-5}"
+    echo "==> 多用户模式：注册门槛=${register_gate}，闲置停用=${idle_timeout}s，每用户配额=${user_disk_quota}GB。"
+    return 0
   fi
 
   if [ "$QUICK_INSTALL" = true ]; then
@@ -3722,6 +3765,10 @@ assert_dsh_hardening() {
   # 这种读不通的话，反而盖住了真正的故障原因。
   uid=""
   exec_err=""
+  # 打印一行进度再开始等：容器刚起来时 /run/dsh.pid 可能还没写，这里最长会轮询 2 分钟。
+  # 不提示的话，用户看到的是「正在启动 DSH...」之后长时间没有任何输出，像是脚本已经
+  # 结束或卡死了——这正是「跑完没日志」的观感来源之一。
+  echo "==> 正在等待容器内的 DSH 进程就绪（最多 2 分钟）..."
   for ((attempt = 0; attempt < 120; attempt++)); do
     uid="$(DOCKER exec dsh sh -c 'pid="$(sed -n 1p /run/dsh.pid 2>/dev/null)"; case "$pid" in ""|*[!0-9]*) exit 1 ;; esac; sed -n "s/^Uid:[[:space:]]*\([0-9]*\).*/\1/p" "/proc/$pid/status"' 2>/dev/null || true)"
     case "$uid" in
@@ -3729,6 +3776,10 @@ assert_dsh_hardening() {
       *[!0-9]*) exec_err="$uid"; uid="" ;;   # 运行时报错文本，不是 UID
       *) break ;;
     esac
+    # 每 15 秒给一次心跳，让人知道还在等而不是已经结束。
+    if [ $((attempt % 15)) -eq 14 ]; then
+      echo "    仍在等待容器就绪...（已 $((attempt + 1)) 秒）"
+    fi
     sleep 1
   done
   if [ -z "$uid" ]; then
@@ -4314,6 +4365,101 @@ case "$ACTION" in
   *) ui_term_restore ;;
 esac
 
+# 执行阶段的本体：拉镜像、写配置、起容器、自检、打印摘要。
+#
+# 与「怎么显示」分开：这个函数只负责做事并把过程写到 stdout，由 run_install_execution
+# 决定是让它直接输出到终端，还是收进 TUI 的滚动日志区。分开的好处是这个函数可以
+# 单独被测试或复用，而显示方式的改动不会碰到安装逻辑。
+install_execution_body() {
+  obtain_dsh_image
+  write_basic_auth
+  write_root_password
+  discover_broker_models "$PENDING_IMAGE"
+  write_broker_config
+  write_key_admin_token
+  write_egress_policy
+  seed_dsh_model_settings "$PENDING_IMAGE"
+  prepare_pending_env
+  echo "==> 正在启动 DSH..."
+  if ! compose_up_with_pending_env; then
+    echo "[错误] DSH 容器启动失败，原配置未被覆盖。" >&2
+    return 1
+  fi
+  mv "$PENDING_ENV_FILE" .env
+  PENDING_ENV_FILE=""
+  assert_dsh_hardening
+  assert_model_broker
+  assert_key_admin
+  # 面板地址与访问令牌必须在这里打印：它是浏览器里填密钥的唯一入口，
+  # 装完不告诉用户地址和令牌，密钥面板就等于不存在（密钥本体不在终端里收集，
+  # 全部在面板里填）。此前只在 model-key / key-panel 路径打印，install 漏了。
+  print_key_admin_access
+  assert_egress_isolation
+  # ./dsh.sh remove 之后重装是常见路径，那会留下失去标签的旧镜像和退出的旁路容器。
+  prune_project_leftovers
+  print_config_summary
+  print_quick_summary
+}
+
+# 执行阶段的外壳：有 Go 向导时把输出收进 TUI 的滚动日志区，没有就直接打印。
+#
+# 为什么要有这一层：执行阶段要几分钟（拉镜像、起容器、自检），直接输出到终端会让
+# 用户看到长时间滚动，分不清「还在跑」和「已经结束」；而访问地址、密钥面板令牌
+# 这类关键信息会被后续输出顶出屏幕，装完就找不到了。TUI 把它放进固定框架：
+# 上方滚动日志，下方是跑完后的摘要与操作项。
+run_install_execution() {
+  local bin logfile summaryfile sentinel status
+
+  # 没有向导二进制（或不是 TTY）时按老样子直接输出：这里不该因为显示方式而失败。
+  bin="$(dsh_installer_path 2>/dev/null || true)"
+  if [ -z "$bin" ] || [ "${DSH_NO_EXEC_VIEW:-}" = 1 ] || [ "$UI_TUI" != true ]; then
+    install_execution_body
+    return $?
+  fi
+
+  logfile="$(mktemp "${TMPDIR:-/tmp}/dsh-exec-XXXXXX.log")" || { install_execution_body; return $?; }
+  summaryfile="$(mktemp "${TMPDIR:-/tmp}/dsh-summary-XXXXXX.txt")" || summaryfile=""
+  sentinel="__DSH_EXEC_DONE__"
+
+  # 执行本体在后台跑，输出重定向进日志文件；TUI 只读这个文件。
+  # 用文件而不是管道：管道会占住 stdout，且执行结束后内容就没了；文件还能回看。
+  #
+  # 结束标记由这个子 shell 自己写：它才知道本体的退出码。不要试图在外层用
+  # `wait "$body_pid"`——子 shell 不是本体的父进程，wait 会立刻失败并让标记提前写上，
+  # TUI 就会在本体还在跑的时候显示「已完成」。
+  (
+    install_execution_body
+    rc=$?
+    if [ -n "$summaryfile" ]; then
+      # 关键信息从日志里摘出来，跑完后固定显示在操作区上方。
+      grep -E '模型密钥面板|访问令牌|本机入口|密钥代理:|访问保护:|多用户' "$logfile" 2>/dev/null > "$summaryfile" || true
+    fi
+    printf '%s:%s\n' "$sentinel" "$rc"
+  ) >>"$logfile" 2>&1 &
+  local body_pid=$!
+
+  # 退出向导前把终端还原：TUI 自己要进备用屏幕，两者不能同时占着。
+  ui_term_restore
+  "$bin" --watch-log "$logfile" --watch-summary-file "${summaryfile:-/dev/null}" \
+    --watch-sentinel "$sentinel" --watch-title "安装 DSH"
+  status=$?
+
+  wait "$body_pid" 2>/dev/null || true
+
+  # 失败时把日志完整打印出来：TUI 只滚动显示，出错细节可能已经滚出屏幕，
+  # 而这段输出会被用户复制到 issue 里。
+  if [ "$status" != 0 ]; then
+    echo
+    echo "[错误] 安装未完成（退出码 $status）。完整日志："
+    sed 's/^/    /' "$logfile" 2>/dev/null || true
+  fi
+  echo
+  echo "==> 执行日志已保存在 $logfile"
+  # 日志文件保留给用户排查（失败时上面已经完整打印过一遍）；摘要临时文件用完即删。
+  [ -n "$summaryfile" ] && rm -f "$summaryfile"
+  return "$status"
+}
+
 case "$ACTION" in
   install|configure)
     configure_dsh
@@ -4321,30 +4467,7 @@ case "$ACTION" in
     # 汇总成一张表，让人在执行前看一眼再决定。放在这里是因为此时配置已经问完、但还
     # 没有写任何文件或创建任何容器——答「否」就等于什么都没发生。
     confirm_install_plan
-    obtain_dsh_image
-    write_basic_auth
-    write_root_password
-    discover_broker_models "$PENDING_IMAGE"
-    write_broker_config
-    write_key_admin_token
-    write_egress_policy
-    seed_dsh_model_settings "$PENDING_IMAGE"
-    prepare_pending_env
-    echo "==> 正在启动 DSH..."
-    if ! compose_up_with_pending_env; then
-      echo "[错误] DSH 容器启动失败，原配置未被覆盖。" >&2
-      exit 1
-    fi
-    mv "$PENDING_ENV_FILE" .env
-    PENDING_ENV_FILE=""
-    assert_dsh_hardening
-    assert_model_broker
-    assert_key_admin
-    assert_egress_isolation
-    # ./dsh.sh remove 之后重装是常见路径，那会留下失去标签的旧镜像和退出的旁路容器。
-    prune_project_leftovers
-    print_config_summary
-    print_quick_summary
+    run_install_execution
     ;;
   upgrade) upgrade_dsh ;;
   model-key) add_model_key ;;

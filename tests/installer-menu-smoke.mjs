@@ -116,7 +116,9 @@ const missingBin = spawnSync(bash, ['-c',
   'menu-smoke', msys(installScript), msys(proj)], { encoding: 'utf8' })
 assert.notEqual(missingBin.status, 0, '缺少向导二进制时必须失败')
 
-// 7) 执行前的确认摘要页仍要存在（结构断言，不触发真实安装）。
+// 7) 执行前的确认摘要页仍要存在，且必须排在镜像/容器动作之前。
+//    执行阶段现在被包进 run_install_execution（它负责把输出收进 TUI 日志视图），
+//    所以断言的是「确认页 → 执行外壳」，再由外壳进到实际动作。
 assert.match(
   installSh,
   /confirm_install_plan\(\) \{/,
@@ -124,8 +126,21 @@ assert.match(
 )
 assert.match(
   installSh,
-  /confirm_install_plan\n\s*obtain_dsh_image/,
+  /confirm_install_plan\n\s*run_install_execution/,
   'the confirmation page must run after configuration and before any image or container work',
+)
+// 执行外壳必须调用执行本体；否则安装什么都不会发生。
+assert.match(installSh, /^install_execution_body\(\) \{$/m, 'install.sh 必须定义执行本体')
+assert.match(
+  installSh,
+  /run_install_execution\(\) \{[\s\S]{0,3000}install_execution_body/,
+  '执行外壳必须调用执行本体',
+)
+// 拉镜像这一步必须在执行本体里，而不是绕过它直接出现在主流程。
+assert.match(
+  installSh,
+  /^install_execution_body\(\) \{[\s\S]{0,400}obtain_dsh_image/m,
+  '拉取镜像必须发生在执行本体内',
 )
 assert.match(
   pagesGo,

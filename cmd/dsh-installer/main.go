@@ -33,6 +33,9 @@ const usageText = `用法：dsh-installer [选项]
   --dir PATH            工程目录（默认 ./dsh-docker）
   --dry-run             打印将执行的 install.sh 命令，不写答案（调试用）
   --menu                只显示主菜单第一页（调试用）
+  --watch-log PATH      进入执行视图：滚动显示该日志文件，直到出现结束标记
+  --watch-title TEXT    执行视图的标题
+  --watch-sentinel TEXT 结束标记前缀（形如 __DSH_EXEC_DONE__，后面跟退出码）
   -h, --help            显示本帮助
   -v, --version         显示版本
 `
@@ -54,6 +57,12 @@ func main() {
 		}
 		fmt.Fprintln(os.Stderr, "[错误] "+err.Error())
 		os.Exit(2)
+	}
+
+	// --watch-log 是执行阶段的视图：固定区域内滚动显示安装日志，完成后给出操作项。
+	// 它与向导是两个独立模式（向导收集配置，它显示执行进度），所以在这里分流。
+	if opts.watchLog != "" {
+		os.Exit(runExecView(opts))
 	}
 
 	// WithAltScreen：整个向导占用备用屏幕缓冲，退出后终端恢复原样。
@@ -125,12 +134,27 @@ type options struct {
 	answersFile string
 	dryRun      bool
 	menuOnly    bool
+
+	// 执行视图（--watch-log 模式）
+	watchLog         string
+	watchTitle       string
+	watchSentinel    string
+	watchSummary     []string
+	watchSummaryFile string
 }
 
 func parseArgs(argv []string) (options, error) {
-	opts := options{dir: "dsh-docker"}
+	opts := options{dir: "dsh-docker", watchSentinel: "__DSH_EXEC_DONE__"}
 	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
+		// next 取出该选项的值；缺值时由调用方报错。
+		next := func() (string, bool) {
+			if i+1 >= len(argv) {
+				return "", false
+			}
+			i++
+			return argv[i], true
+		}
 		switch {
 		case arg == "-h" || arg == "--help":
 			return opts, errHelp
@@ -141,26 +165,89 @@ func parseArgs(argv []string) (options, error) {
 		case arg == "--menu":
 			opts.menuOnly = true
 		case arg == "--dir":
-			if i+1 >= len(argv) {
+			v, ok := next()
+			if !ok {
 				return opts, errors.New("--dir 缺少值")
 			}
-			i++
-			opts.dir = argv[i]
+			opts.dir = v
 		case strings.HasPrefix(arg, "--dir="):
 			opts.dir = strings.TrimPrefix(arg, "--dir=")
 		case arg == "--answers-file":
-			if i+1 >= len(argv) {
+			v, ok := next()
+			if !ok {
 				return opts, errors.New("--answers-file 缺少值")
 			}
-			i++
-			opts.answersFile = argv[i]
+			opts.answersFile = v
 		case strings.HasPrefix(arg, "--answers-file="):
 			opts.answersFile = strings.TrimPrefix(arg, "--answers-file=")
+		case arg == "--watch-log":
+			v, ok := next()
+			if !ok {
+				return opts, errors.New("--watch-log 缺少值")
+			}
+			opts.watchLog = v
+		case strings.HasPrefix(arg, "--watch-log="):
+			opts.watchLog = strings.TrimPrefix(arg, "--watch-log=")
+		case arg == "--watch-title":
+			v, ok := next()
+			if !ok {
+				return opts, errors.New("--watch-title 缺少值")
+			}
+			opts.watchTitle = v
+		case arg == "--watch-sentinel":
+			v, ok := next()
+			if !ok {
+				return opts, errors.New("--watch-sentinel 缺少值")
+			}
+			opts.watchSentinel = v
+		case arg == "--watch-summary":
+			v, ok := next()
+			if !ok {
+				return opts, errors.New("--watch-summary 缺少值")
+			}
+			opts.watchSummary = append(opts.watchSummary, v)
+		case arg == "--watch-summary-file":
+			v, ok := next()
+			if !ok {
+				return opts, errors.New("--watch-summary-file 缺少值")
+			}
+			opts.watchSummaryFile = v
 		default:
 			return opts, fmt.Errorf("未知参数：%s", arg)
 		}
 	}
 	return opts, nil
+}
+
+// runExecView 显示执行阶段的日志视图，返回进程退出码。
+//
+// 日志用文件而不是管道传递：管道会占住 stdout/stderr，且执行结束后内容就没了；
+// 文件让视图可以随时回看，也让 install.sh 的退出码语义保持干净（它照常写自己的
+// 退出码，视图只负责看）。结束由日志里的标记行表示，而不是靠文件 EOF——
+// install.sh 可能在写入标记后还有收尾动作。
+func runExecView(opts options) int {
+	model := newExecViewModel(execViewOptions{
+		logPath:     opts.watchLog,
+		sentinel:    opts.watchSentinel,
+		title:       opts.watchTitle,
+		summary:     opts.watchSummary,
+		summaryPath: opts.watchSummaryFile,
+	})
+	final, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "[错误] 日志视图初始化失败："+err.Error())
+		return 1
+	}
+	result, ok := final.(execViewModel)
+	if !ok {
+		return 1
+	}
+	if result.quitMsg != "" {
+		fmt.Fprintln(os.Stderr, result.quitMsg)
+	}
+	// 视图退出码跟随被执行命令：视图本身不判断成功，它只把结果透出去，
+	// 免得「装失败了但视图退 0」这种误导。
+	return result.code
 }
 
 // itoa 供页面构造参数时使用。
