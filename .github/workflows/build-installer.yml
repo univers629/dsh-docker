@@ -101,13 +101,18 @@ jobs:
         run: |
           set -eu
           tag="v${VERSION}"
+          # 说明写文件而不是内联字符串：release notes 里有空行，塞进 run 的
+          # 字面块标量会因缩进被截断（第 111 行那次报错就是这么来的）。
+          cat > NOTES.md <<'NOTES'
+          安装向导的终端界面二进制（Linux amd64 / arm64）。
+
+          install.sh 会在运行时自动下载到 ~/.cache/dsh-docker/；拿不到时回退到内置的
+          bash 向导，所以不下载这一份也能完成安装，只是界面由纯 shell 渲染。
+          NOTES
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
           else
             gh release create "$tag" dist/* \
               --title "dsh-installer ${VERSION}" \
-              --notes "安装向导的终端界面二进制（Linux amd64 / arm64）。
-
-install.sh 会在运行时自动下载到 ~/.cache/dsh-docker/；拿不到时回退到内置的
-bash 向导，所以不下载这一份也能完成安装，只是界面由纯 shell 渲染。"
+              --notes-file NOTES.md
           fi
