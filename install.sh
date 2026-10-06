@@ -4698,6 +4698,19 @@ run_install_execution() {
   "$bin" "${ui_args[@]}" < /dev/tty
   status=$?
 
+  # 退出码 2 是参数错误。最常见的原因是版本错配：install.sh 取自 main 分支，而
+  # 二进制来自 Release——Release 若还是旧提交构建的，就不认识本次新传的参数
+  #（例如 --run-gate），只会回一句「未知参数」。
+  #
+  # 清缓存解决不了：缓存名里的摘要取自 Release 自己的 SHA256SUMS，描述的正是那个
+  # 旧二进制，清掉也只会重新下载到同一份。要换二进制只能重新发布（Actions 的
+  # build-installer），或直接用 DSH_INSTALLER_BIN 指一份匹配的。
+  if [ "$status" = 2 ]; then
+    echo "[错误] 向导程序不认识本次传入的参数，通常是二进制与脚本版本不一致。" >&2
+    echo "       这份二进制来自 Release，若它落后于脚本，请重新发布安装器，" >&2
+    echo "       或指定一份匹配的二进制：DSH_INSTALLER_BIN=/path/to/dsh-installer bash install.sh" >&2
+  fi
+
   # 界面半路失败时不会去放行（例如向导还没确认就 Ctrl+C 了），这里补一次，
   # 否则 wait 会永远挂住——执行体现在正阻塞在门闸上。
   #
