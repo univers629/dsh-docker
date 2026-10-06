@@ -476,6 +476,34 @@ DSH_INSTALLER_BASE="${DSH_INSTALLER_BASE:-https://github.com/univers629/dsh-dock
 # 这一段是踩过坑的——早先缓存名只由版本号与架构决定，同一版本号下重发二进制后，
 # 旧缓存会永远命中，用户拿到的是上一版向导却以为是新的。按内容寻址后，
 # 只要发布物变了，缓存名就变，旧文件自然失效。
+# 拿不到向导二进制时的修复指引。
+#
+# 单独成函数是因为有两条入口需要它：交互路径（向导是唯一入口，给不出就没法继续）
+# 与命令行安装路径（退回普通输出也能装，但用户会想看图形界面）。同一份文案两处
+# 各写一遍必然会漂移。
+dsh_installer_missing_help() {
+  cat >&2 <<'FAIL'
+[错误] 无法获取安装向导（dsh-installer）。
+
+它负责向导的全部交互页面，安装器不再内置第二套界面。请按以下任一方式处理：
+
+  1. 确认能访问 GitHub Releases，然后重试：
+       https://github.com/univers629/dsh-docker/releases
+
+  2. 若使用镜像源，指定它的地址前缀后重试：
+       DSH_INSTALLER_BASE=https://<你的镜像>/releases/download bash install.sh
+
+  3. 离线或受限网络下，先在有网机器下载对应架构的二进制放到缓存目录：
+       ~/.cache/dsh-docker/dsh-installer-0.1.0-<amd64|arm64>
+     再用 DSH_INSTALLER_BIN 指向任意路径：
+       DSH_INSTALLER_BIN=/path/to/dsh-installer bash install.sh
+
+  4. 不需要交互时用无人值守参数，它不依赖向导：
+       bash install.sh install --non-interactive --access local --image-source prebuilt
+       bash install.sh install --quick
+FAIL
+}
+
 dsh_installer_path() {
   local arch cache manifest want dest url got
   if [ -n "${DSH_INSTALLER_BIN:-}" ] && [ -x "$DSH_INSTALLER_BIN" ]; then
@@ -595,62 +623,14 @@ use_unverified_cache() {
   fi
   return 1
 }
-# 用 dsh-installer 跑向导，并把答案读进当前 shell 的 _OVERRIDE 变量。
+# 把向导回传的答案读进当前 shell 的 _OVERRIDE 变量。
 #
-# 答案经临时文件中转：界面占用备用屏幕，写 stdout 会与画面互相干扰；退出向导、
-# 终端复原之后再读文件，两个阶段互不影响。
-#
-# 拿不到二进制时打印修复指引并以非零结束——没有第二套界面可退。
-dsh_installer_run() {
-  local bin answers key value
-  bin="$(dsh_installer_path)" || {
-    cat >&2 <<'FAIL'
-[错误] 无法获取安装向导（dsh-installer）。
-
-它负责向导的全部交互页面，安装器不再内置第二套界面。请按以下任一方式处理：
-
-  1. 确认能访问 GitHub Releases，然后重试：
-       https://github.com/univers629/dsh-docker/releases
-
-  2. 若使用镜像源，指定它的地址前缀后重试：
-       DSH_INSTALLER_BASE=https://<你的镜像>/releases/download bash install.sh
-
-  3. 离线或受限网络下，先从有网机器下载对应架构的二进制放到缓存目录：
-       ~/.cache/dsh-docker/dsh-installer-0.1.0-<amd64|arm64>
-     再用 DSH_INSTALLER_BIN 指向任意路径：
-       DSH_INSTALLER_BIN=/path/to/dsh-installer bash install.sh
-
-  4. 不需要交互时用无人值守参数，它不依赖向导：
-       bash install.sh install --non-interactive --access local --image-source prebuilt
-       bash install.sh install --quick
-FAIL
-    exit 1
-  }
-  [ -x "$bin" ] || { echo "[错误] $bin 不可执行。" >&2; exit 1; }
-  answers="$(mktemp "${TMPDIR:-/tmp}/dsh-answers.XXXXXX")" || { echo "[错误] 无法创建临时文件。" >&2; exit 1; }
-  # 向导的 stdin 显式指向控制终端。
-  #
-  # Bubble Tea 自身会处理 stdin 非终端的情况（检测到就把输入切到 /dev/tty），所以
-  # 这里不是修 bug，而是两点明确的意图：
-  #   1. 不依赖框架的隐式回退——管道留给 bash，终端留给向导，归属写清楚；
-  #   2. 没有控制终端时立刻失败并给出无人值守的出路，而不是让向导在无 TTY 时报一句
-  #      难以理解的框架错误。
-  if [ ! -c /dev/tty ] || ! { : < /dev/tty; } 2>/dev/null; then
-    echo "[错误] 向导需要控制终端，但 /dev/tty 不可用。" >&2
-    echo "       在终端里运行不应出现这条提示；若通过 CI/管道调用，请改用无人值守参数：" >&2
-    echo "         bash install.sh install --non-interactive --access local --image-source prebuilt" >&2
-    exit 2
-  fi
-  # 先执行再取退出码：`if ! cmd; then status=$?` 拿到的是取反后的 0，不是真实状态。
-  local status=0
-  "$bin" --answers-file "$answers" --dir "$TARGET_DIR" < /dev/tty || status=$?
-  if [ "$status" != 0 ]; then
-    rm -f "$answers"
-    # 用户主动取消（3）：不是错误，干净退出，不打印额外信息。
-    [ "$status" = 3 ] && exit 0
-    echo "[错误] 向导异常退出（退出码 $status）。" >&2
-    exit 1
-  fi
+# 单独成函数而不是内联在向导调用处：向导与执行视图现在是**同一个** Go 程序，
+# bash 不再有机会「等程序退出之后再读文件」——答案文件在向导确认那一刻就写好了，
+# 但读取它的时机取决于是否真的会进执行阶段（见 run_install_execution）。
+dsh_installer_read_answers() {
+  local answers="$1" key value line
+  [ -f "$answers" ] || return 1
   # 逐行读入 KEY=VALUE。值里可能有空格，所以只按第一个 = 切分。
   while IFS= read -r line; do
     key="${line%%=*}"
@@ -680,7 +660,6 @@ FAIL
       trusted_proxy_ack) [ "$value" = yes ] && TRUSTED_PROXY_ACK=true ;;
     esac
   done < "$answers"
-  rm -f "$answers"
   # 向导已完成：后续的交互原语一律不再提问（见各处 DSH_WIZARD_DONE 判断）。
   # 这一步是「向导是唯一入口」的关键——否则 bash 会把问过的问题再问一遍。
   DSH_WIZARD_DONE=true
@@ -693,6 +672,7 @@ FAIL
   fi
   return 0
 }
+
 # ---------------------------------------------------------------- 翻页向导（bash 兜底）
 #
 # 向导占用终端的**备用屏幕缓冲**（alternate screen buffer），与 dpanel 的安装器同一种
@@ -1384,14 +1364,13 @@ elif command -v sudo >/dev/null 2>&1 && sudo docker container inspect dsh >/dev/
   INSTALL_AVAILABLE=false
 fi
 
+# 交互路径的向导**不在这里**启动。原因：向导与执行视图现在是同一个 Go 程序，
+# 而它启动的后台执行子 shell 需要用到本文件后半段定义的那些函数
+#（install_prepare_body / install_execute_body 等）。bash 是边读边执行的，
+# 在这一点上 fork 出的子 shell 还看不到后面才定义的函数，所以整段挪到脚本末尾
+#（见 run_guided_session）。这里只留下判定：走到这里且 ACTION 仍为空，说明是
+# 交互路径——前面的「无终端」守卫已经排除了无 TTY 的情况。
 if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
-  # 向导交给 dsh-installer（Go + Bubble Tea，与 dpanel 安装器同一 TUI 框架）：
-  # 它承担全部交互页面，收集完答案写成 KEY=VALUE 文件，本脚本读入后执行安装。
-  # 这里不套「失败就回退」的分支：向导是唯一入口，拿不到二进制时
-  # dsh_installer_run 会打印修复指引并直接结束进程。
-  dsh_installer_run
-  # 答案已就位（ACTION 与各 _OVERRIDE 均已设置）。这里不能 exit：
-  # 安装逻辑在本文件后半段。
   DSH_ANSWER_CONFIRMED=true
 fi
 
@@ -1955,7 +1934,12 @@ prune_project_keep() {
   return "$status"
 }
 
-if [ "$ACTION" = delete ]; then
+# 卸载：清掉本工程产生的容器、卷、网络与源码目录，但保留用户数据。
+#
+# 包成函数是因为它有两条调用路径：命令行直接指定（ACTION=delete）在向导之前就能
+# 判断，而向导里选「卸载」要等向导跑完才知道。两条路径的清理动作必须完全一致，
+# 所以只能有一份实现。
+handle_delete_action() {
   if [ ! -f "$TARGET_DIR/docker-compose.yml" ] && [ -f docker-compose.yml ] && [ -f Dockerfile ] && [ -f install.sh ]; then
     TARGET_DIR="."
   fi
@@ -1968,18 +1952,33 @@ if [ "$ACTION" = delete ]; then
   fi
   delete_project
   exit 0
+}
+
+if [ "$ACTION" = delete ]; then
+  handle_delete_action
 fi
 
+# 进入工程目录：维护类动作（启动、停止、密钥面板…）要对 dsh.sh 与 .env 操作，
+# 必须在工程目录里跑。
+#
+# 幂等，因为两条路径都要用它：命令行直接在参数里给出动作，能在脚本中段就进；
+# 交互路径要等向导给出答案才知道是什么动作，只能在脚本末尾补一次。
+# install/configure 不在这里进：它们的取源码与 cd 属于安装过程，要收进执行视图的
+# 滚动日志（见 install_prepare_body）。delete 也不进：它有自己的目录判定。
+DSH_PROJECT_ENTERED=false
+enter_project() {
+  [ "$DSH_PROJECT_ENTERED" = true ] && return 0
+  require_project
+  cd "$TARGET_DIR" || return 1
+  chmod +x dsh.sh 2>/dev/null || true
+  DSH_PROJECT_ENTERED=true
+}
+
 case "$ACTION" in
-  # 取源码、进入工程目录、组装配置都属于安装过程，它们的输出统一收进执行视图的
-  # 滚动日志（见 install_execution_phase）。在这里做会让同一次安装被切成两段体验：
-  # 先是一段裸输出（克隆进度），再进 TUI。
   install|configure) ;;
-  *)
-    require_project
-    cd "$TARGET_DIR"
-    chmod +x dsh.sh 2>/dev/null || true
-    ;;
+  '') ;;
+  delete) ;;
+  *) enter_project || exit $? ;;
 esac
 
 set_compose_env() {
@@ -4520,24 +4519,94 @@ write_exec_summary() {
   } > "$summaryfile" 2>/dev/null || true
 }
 
-# 执行阶段的外壳：有 Go 向导时把输出收进 TUI 的滚动日志区，没有就直接打印。
+# 执行阶段的外壳：把执行本体放到后台跑，再由 Go 界面承载向导与日志。
 #
-# 为什么要有这一层：执行阶段要几分钟（拉镜像、起容器、自检），直接输出到终端会让
-# 用户看到长时间滚动，分不清「还在跑」和「已经结束」；而访问地址、密钥面板令牌
-# 这类关键信息会被后续输出顶出屏幕，装完就找不到了。TUI 把它放进固定框架：
-# 上方滚动日志，下方是跑完后的摘要与操作项。
+# 为什么要后台跑：向导与执行视图现在是**同一个** Go 程序（见 cmd/dsh-installer/root.go），
+# 它启动时向导还没有答案，无从启动执行；而执行又必须在用户确认之后才开始。所以
+# 执行体先进后台阻塞着，等 Go 在向导确认后打开 FIFO 放行——那是「答案已落盘」与
+# 「开始执行」之间的同步点，用 FIFO 而不是信号或轮询，是为了让顺序由内核保证。
+#
+# 参数：
+#   --prepared        调用方已经跑过准备阶段（命令行路径要在确认页之前完成它）
+#   --guided          本次带向导：Go 需要 --run-gate，答案文件由 Go 写
+#   --answers PATH    向导写答案的文件（--guided 时必给）
+#   --already-released 门闸已经放行过（调用方自己写的），Go 直接进执行视图
+# 后台执行体：等门闸 → 读答案 → 准备 → 执行 → 写结束标记与摘要。
+#
+# 为什么由它自己读答案：答案文件在**界面**里写（向导确认那一刻），而本函数所在的
+# 子 shell 是界面启动之前就 fork 好的——父 shell 那时还没有答案可读。门闸放行后
+# 文件必然已就位，此时读最合适；顺带把 DSH_WIZARD_DONE 也设在子 shell 里，
+# configure_dsh 等函数据此跳过提问（否则向导问过的问题会被再问一遍）。
+#
+# 结束标记与摘要都必须在 EXIT trap 里写：函数内部有 exit（例如取源码失败）、
+# 脚本开头是 set -e，都会跳过正文末尾的语句。界面靠标记判断收尾、不靠 EOF，
+# 漏写会让它一直等下去。
+dsh_exec_body() {
+  local answers="$1" gate="$2" already_prepared="$3"
+  trap 'rc=$?; printf "%s:%s\n" "$sentinel" "$rc"; write_exec_summary "$rc"' EXIT
+  # 等界面放行。读不到（写端提前消失）时不阻塞，直接往下走。
+  if [ -n "$gate" ]; then
+    read -r _ < "$gate" || true
+  fi
+  # 只有向导路径才有答案文件。命令行路径的答案来自 argv，父 shell 已经把它解析成
+  # 各种 _OVERRIDE 变量了，本子 shell 直接继承；这里若去读一个空文件，反而会把
+  # DSH_WIZARD_DONE 置成 true，让 install_execute_body 里的提问全部静默跳过。
+  if [ -n "$answers" ]; then
+    dsh_installer_read_answers "$answers" || true
+  fi
+  # 只有安装与重配有「执行」这件事。其余动作（启动、停止、卸载、密钥面板…）
+  # 由主 shell 在界面退出后处理，这里立刻收工。
+  case "${ACTION:-}" in
+    install|configure) ;;
+    *) return 0 ;;
+  esac
+  if [ "$already_prepared" != true ]; then
+    install_prepare_body || exit $?
+  fi
+  install_execute_body
+}
+
+# 执行阶段的外壳：执行本体在后台等门闸，界面由 Go 承载（可能含向导）。
+#
+# 参数：
+#   --prepared   调用方已跑过准备阶段（命令行路径要在确认页之前完成它）
+#   --guided     本次带向导，门闸交由界面在确认后放行
+#   --answers=P  答案文件（--guided 时界面写它，子 shell 读它）
 run_install_execution() {
-  local bin logfile summaryfile sentinel status
-  # --prepared 表示调用方已经跑过准备阶段（取源码、装配配置）：命令行路径下
-  # 准备阶段必须在确认页之前完成，所以不能再跑一遍。
-  local already_prepared=false
-  [ "${1:-}" = "--prepared" ] && already_prepared=true
+  local bin logfile summaryfile sentinel status answers gate=""
+  local already_prepared=false guided=false
+  for arg in "$@"; do
+    case "$arg" in
+      --prepared) already_prepared=true ;;
+      --guided) guided=true ;;
+      --answers=*) answers="${arg#--answers=}" ;;
+    esac
+  done
 
   # 先判断要不要 TUI，再决定去不去找二进制。
   # 顺序很重要：dsh_installer_path 在缓存缺失时会联网下载，而 --non-interactive
   # 根本用不到 TUI——为它去下载一个几 MB 的二进制既浪费又可能卡住（CI、受限网络下
   # 表现为安装器挂起）。无终端时同样直接走普通输出。
   if [ "${DSH_NO_EXEC_VIEW:-}" = 1 ] || [ "$UI_TUI" != true ] || [ "$INTERACTIVE" != true ]; then
+    if [ "$guided" = true ]; then
+      # 向导仍然要跑（Go 界面自己会进备用屏幕，TERM=dumb 时它会退化成最简渲染），
+      # 只是执行阶段不留视图：这样「不显示执行视图」的开关只影响显示，不影响交互。
+      # 没有 --watch-log，界面收完答案就退出，随后由 bash 正常执行安装。
+      bin="$(dsh_installer_path 2>/dev/null || true)"
+      if [ -n "$bin" ]; then
+        "$bin" --answers-file "$answers" --dir "$TARGET_DIR" < /dev/tty || {
+          status=$?
+          [ "$status" = 3 ] && exit 0
+          return "$status"
+        }
+        dsh_installer_read_answers "$answers" || true
+      fi
+      if [ "$already_prepared" != true ]; then
+        install_prepare_body || return $?
+      fi
+      install_execute_body
+      return $?
+    fi
     if [ "$already_prepared" != true ]; then
       install_prepare_body || return $?
     fi
@@ -4545,9 +4614,17 @@ run_install_execution() {
     return $?
   fi
 
-  # 只有真要显示 TUI 时才找二进制；找不到就退回普通输出，不因为显示方式而失败。
+  # 只有真要显示 TUI 时才找二进制。
+  #
+  # 向导路径下找不到就**失败**，不像执行视图那样退回普通输出：向导是唯一入口，
+  # 没有它就没有答案，退回普通输出也无从继续（无终端守卫已排除无人值守场景）。
   bin="$(dsh_installer_path 2>/dev/null || true)"
   if [ -z "$bin" ]; then
+    if [ "$guided" = true ]; then
+      # 向导是唯一入口：没有它就收集不到答案，退回普通输出也无从继续。
+      dsh_installer_missing_help
+      return 1
+    fi
     if [ "$already_prepared" != true ]; then
       install_prepare_body || return $?
     fi
@@ -4564,57 +4641,115 @@ run_install_execution() {
   }
   summaryfile="$(mktemp "${TMPDIR:-/tmp}/dsh-summary-XXXXXX.txt")" || summaryfile=""
   sentinel="__DSH_EXEC_DONE__"
+  # dsh_exec_body 在子 shell 里要用到这两个名字，导出给它是显式声明依赖。
+  export sentinel summaryfile logfile
 
-  # 执行本体在后台跑，输出重定向进日志文件；TUI 只读这个文件。
-  # 用文件而不是管道：管道会占住 stdout，且执行结束后内容就没了；文件还能回看。
+  # 门闸是「答案已落盘」与「开始执行」之间的同步点，用 FIFO 而不是信号或轮询，
+  # 是为了让顺序由内核保证：写端打开会一直阻塞到有读端，所以执行体必然在答案
+  # 写好之后才开始读它。
   #
-  # 结束标记必须无条件写上，所以用 EXIT trap 而不是在末尾 printf：
-  #   - 被调用的函数里有 exit（例如 fetch_project 失败时）；
-  #   - 脚本开头是 set -e，任何一条命令失败都会中断子 shell。
-  # 这两种情况都会跳过末尾的 printf，而 TUI 靠标记判断收尾、不靠 EOF，
-  # 漏写就会让它一直等下去。
-  (
-    # 结束标记与摘要都必须在 EXIT trap 里写：函数内部有 exit（例如取源码失败）、
-    # 脚本开头是 set -e，都会跳过正文末尾的语句。TUI 靠标记判断收尾、不靠 EOF，
-    # 漏写会让它一直等下去。
-    trap 'rc=$?; printf "%s:%s\n" "$sentinel" "$rc"; write_exec_summary "$rc"' EXIT
-    # 准备与执行两段一起收进滚动日志：取源码、装配配置同属安装过程，
-    # 拆到外面会让一次安装先出现一段裸输出、再进日志视图——两段体验。
-    # --prepared 时调用方已经做过准备阶段（命令行路径要在确认页之前完成它）。
-    if [ "$already_prepared" != true ]; then
-      install_prepare_body || exit $?
-    fi
-    install_execute_body
-  ) >>"$logfile" 2>&1 &
+  # 用 mktemp -u 再 mkfifo，而不是 mktemp：mktemp 建的是普通文件，写进去不阻塞，
+  # 也就起不到同步作用。
+  gate="$(mktemp -u "${TMPDIR:-/tmp}/dsh-exec-gate-XXXXXX")"
+  if ! mkfifo "$gate" 2>/dev/null; then
+    echo "[错误] 无法创建执行门闸（$gate）。" >&2
+    rm -f "$logfile" "$summaryfile"
+    return 1
+  fi
+
+  # 执行本体在后台跑，输出重定向进日志文件；界面只读这个文件。
+  # 用文件而不是管道：管道会占住 stdout，且执行结束后内容就没了；文件还能回看。
+  ( dsh_exec_body "${answers:-}" "$gate" "$already_prepared" ) >>"$logfile" 2>&1 &
   local body_pid=$!
 
-  # 退出向导前把终端还原：TUI 自己要进备用屏幕，两者不能同时占着。
-  ui_term_restore
-  "$bin" --watch-log "$logfile" --watch-summary-file "${summaryfile:-/dev/null}" \
-    --watch-sentinel "$sentinel" --watch-title "安装 DSH"
+  # 命令行路径没有向导，门闸没人会开，所以由 bash 自己放行。放在后台启动**之后**：
+  # 先开写端会在没有读端时阻塞在这里，而执行体还没起来。
+  if [ "$guided" != true ]; then
+    printf '\n' > "$gate" 2>/dev/null || true
+  fi
+
+  # 向导与执行视图在同一个程序里，全程只进出一次备用屏幕。
+  #
+  # --run-gate 只在带向导时传：界面靠它判断「这里有向导要翻」。命令行路径没有向导，
+  # 门闸由上面那行 bash 自己放行，界面一进来就该是执行视图——多传一个门闸会让它
+  # 以为要先翻页，于是停在一个空的向导首页上等输入。
+  local -a ui_args=(--dir "$TARGET_DIR")
+  if [ "$guided" = true ]; then
+    ui_args+=(--answers-file "$answers" --run-gate "$gate")
+  fi
+  ui_args+=(--watch-log "$logfile" \
+    --watch-summary-file "${summaryfile:-/dev/null}" \
+    --watch-sentinel "$sentinel" --watch-title "安装 DSH")
+
+  "$bin" "${ui_args[@]}" < /dev/tty
   status=$?
 
+  # 界面半路失败时不会去放行（例如向导还没确认就 Ctrl+C 了），这里补一次，
+  # 否则 wait 会永远挂住——执行体现在正阻塞在门闸上。
+  printf '\n' > "$gate" 2>/dev/null || true
   wait "$body_pid" 2>/dev/null || true
+  rm -f "$gate"
 
-  # 失败时把日志完整打印出来：TUI 只滚动显示，出错细节可能已经滚出屏幕，
-  # 而这段输出会被用户复制到 issue 里。这是唯一需要落在画面之外的输出——
-  # 它必须能被整体复制，且比 TUI 的回看更方便。
-  if [ "$status" != 0 ]; then
-    echo
-    echo "[错误] 安装未完成（退出码 $status）。完整日志："
-    sed 's/^/    /' "$logfile" 2>/dev/null || true
-  fi
+  # 失败时不再往终端打整段日志：那些内容已经在执行视图的滚动区里给用户看过，
+  # 而备用屏幕退出时会整屏还原，现在再打一遍既重复又是「跑到终端行里」的输出。
+
   # 摘要临时文件用完即删（日志文件保留，供用户回看或上报）。
   [ -n "$summaryfile" ] && rm -f "$summaryfile"
   return "$status"
 }
 
+# 交互路径的完整会话：先把界面需要的答案/日志/门闸备齐，再起一次 Go 程序，
+# 由它承载「翻页向导 → 原地切到执行视图」的全过程。
+#
+# 为什么整段放在脚本末尾：后台执行子 shell 要用到 install_prepare_body 等函数，
+# 而 bash 是边读边执行的，脚本中途 fork 出的子 shell 看不到后面才定义的函数。
+run_guided_session() {
+  local answers status
+  # 向导的 stdin 显式指向控制终端。
+  #
+  # Bubble Tea 自身会处理 stdin 非终端的情况（检测到就把输入切到 /dev/tty），所以
+  # 这里不是修 bug，而是两点明确的意图：
+  #   1. 不依赖框架的隐式回退——管道留给 bash，终端留给向导，归属写清楚；
+  #   2. 没有控制终端时立刻失败并给出无人值守的出路，而不是让向导在无 TTY 时报一句
+  #      难以理解的框架错误。
+  if [ ! -c /dev/tty ] || ! { : < /dev/tty; } 2>/dev/null; then
+    echo "[错误] 向导需要控制终端，但 /dev/tty 不可用。" >&2
+    echo "       在终端里运行不应出现这条提示；若通过 CI/管道调用，请改用无人值守参数：" >&2
+    echo "         bash install.sh install --non-interactive --access local --image-source prebuilt" >&2
+    exit 2
+  fi
+
+  answers="$(mktemp "${TMPDIR:-/tmp}/dsh-answers.XXXXXX")" || { echo "[错误] 无法创建临时文件。" >&2; exit 1; }
+
+  run_install_execution --guided --answers="$answers"
+  status=$?
+
+  if [ "$status" != 0 ]; then
+    rm -f "$answers"
+    # 用户主动取消（3）：不是错误，干净退出，不打印额外信息。
+    [ "$status" = 3 ] && exit 0
+    echo "[错误] 安装向导异常退出（退出码 $status）。" >&2
+    exit 1
+  fi
+
+  # 答案读回当前 shell：界面里选的是维护类动作（卸载、启动、密钥面板…）时，
+  # 它们由紧随其后的主分派处理。
+  dsh_installer_read_answers "$answers" || true
+  rm -f "$answers"
+}
+
+# 交互路径的入口。位置在这里（而不是脚本中段）是因为它拉起的后台执行体依赖
+# 上面那些函数的定义，见 run_guided_session 的注释。
+if [ "${DSH_ANSWER_CONFIRMED:-}" = true ]; then
+  run_guided_session
+fi
+
 case "$ACTION" in
   install|configure)
     if [ "${DSH_WIZARD_DONE:-}" = true ]; then
-      # 向导路径：用户已经在那边的确认页上确认过，配置答案也已经在答案文件里。
-      # 取源码、装配配置、执行全部收进同一个滚动日志——它们同属一次安装。
-      run_install_execution
+      # 向导路径：界面里已经跑完执行视图（准备与执行都在它的滚动日志里）。
+      # 这里什么都不做——再跑一遍等于装两次。
+      :
     else
       # 命令行路径：没有向导，需要自己先装配配置才能把摘要展示给人看，
       # 所以准备阶段要在确认页之前跑，之后再执行。
@@ -4623,15 +4758,24 @@ case "$ACTION" in
       run_install_execution --prepared
     fi
     ;;
-  upgrade) upgrade_dsh ;;
-  model-key) add_model_key ;;
-  key-panel) manage_key_admin ;;
-  update) ./dsh.sh update ;;
-  start) ./dsh.sh start ;;
-  stop) ./dsh.sh stop ;;
-  restart) ./dsh.sh restart ;;
-  logs) exec ./dsh.sh logs ;;
-  status) ./dsh.sh status ;;
+  '') ;;
+  delete) handle_delete_action ;;
+  *)
+    # 维护类动作。走到这里才进工程目录：命令行路径在脚本中段已经进过（幂等，
+    # 这里直接返回），而向导路径此刻才第一次知道要做什么动作。
+    enter_project || exit $?
+    case "$ACTION" in
+      upgrade) upgrade_dsh ;;
+      model-key) add_model_key ;;
+      key-panel) manage_key_admin ;;
+      update) ./dsh.sh update ;;
+      start) ./dsh.sh start ;;
+      stop) ./dsh.sh stop ;;
+      restart) ./dsh.sh restart ;;
+      logs) exec ./dsh.sh logs ;;
+      status) ./dsh.sh status ;;
+    esac
+    ;;
 esac
 
 # 收尾横幅。

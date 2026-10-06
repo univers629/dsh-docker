@@ -66,17 +66,25 @@ assert.match(installSh, /delete_confirmed\) DSH_DELETE_CONFIRMED=1/, 'install.sh
 assert.match(installSh, /DSH_WIZARD_DONE=true/, 'install.sh 必须在读入答案后标记向导已完成')
 
 // 4) 拿不到向导二进制时，报错要给出可执行的修复方式，而不是静默回退。
-const installerFn = installSh.slice(
-  installSh.indexOf('dsh_installer_run()'),
-  installSh.indexOf('dsh_installer_run()') + 4000,
+//    指引由 dsh_installer_missing_help 统一提供，两条入口（交互路径 / 命令行安装）
+//    都调它——同一份文案写两遍必然漂移。
+const helpFn = installSh.slice(
+  installSh.indexOf('dsh_installer_missing_help()'),
+  installSh.indexOf('dsh_installer_missing_help()') + 2000,
 )
-assert.match(installerFn, /无法获取安装向导/, '拿不到二进制时必须明确报错')
-assert.match(installerFn, /DSH_INSTALLER_BASE/, '报错必须给出镜像源覆盖方式')
-assert.match(installerFn, /DSH_INSTALLER_BIN/, '报错必须给出本地二进制的指定方式')
-assert.match(installerFn, /--non-interactive/, '报错必须给出无人值守的出路')
-assert.match(installerFn, /--quick/, '报错必须给出快速安装的出路')
-// 不再有「回退到 bash 向导」的分支：成功路径直接调用，不套 if/else 兜底。
-assert.match(installSh, /^\s+dsh_installer_run$/m, '向导调用不应再包在回退分支里')
+assert.match(helpFn, /无法获取安装向导/, '拿不到二进制时必须明确报错')
+assert.match(helpFn, /DSH_INSTALLER_BASE/, '报错必须给出镜像源覆盖方式')
+assert.match(helpFn, /DSH_INSTALLER_BIN/, '报错必须给出本地二进制的指定方式')
+assert.match(helpFn, /--non-interactive/, '报错必须给出无人值守的出路')
+assert.match(helpFn, /--quick/, '报错必须给出快速安装的出路')
+// 两条入口都必须调用它，而不是自己另写一段。
+assert.match(
+  installSh,
+  /if \[ "\$guided" = true \]; then\n\s+#[^\n]*\n\s+dsh_installer_missing_help/,
+  '执行外壳在带向导且拿不到二进制时必须给出修复指引',
+)
+// 不再有「回退到 bash 向导」的分支：交互路径通过一个入口函数进入，不套 if/else 兜底。
+assert.match(installSh, /^\s+run_guided_session$/m, '交互路径必须通过 run_guided_session 进入')
 
 // 5) 无终端、无显式动作时仍然拒绝，并给出两条出路。
 //    这一条不依赖向导二进制：守卫在向导之前就短路了。
@@ -132,10 +140,13 @@ assert.match(
   'the confirmation page must run after preparation and before any image or container work',
 )
 // 向导路径：用户已确认过，准备与执行一起进滚动日志。
+//
+// 切换发生在 Go 侧（root.go 的 updateWizard → startExec），所以 install.sh 这边
+// 的形态是「什么都不做」——执行已经在界面里跑完了，再跑一遍等于装两次。
 assert.match(
   installSh,
-  /if \[ "\$\{DSH_WIZARD_DONE:-\}" = true \]; then[\s\S]{0,300}run_install_execution\n/,
-  '向导路径应跳过确认页，直接进执行视图',
+  /if \[ "\$\{DSH_WIZARD_DONE:-\}" = true \]; then[\s\S]{0,400}\n\s+:\n/,
+  '向导路径必须跳过 bash 侧的执行（界面里已经跑过）',
 )
 
 // 两段本体都必须存在，且各自包含该做的动作。
@@ -151,12 +162,24 @@ assert.match(
   /^install_execute_body\(\) \{[\s\S]{0,600}obtain_dsh_image/m,
   '拉取镜像必须发生在执行本体内',
 )
-// 执行外壳两种模式下都要跑到这两段。
+// 执行外壳两种模式下都要跑到这两段。它们现在由 dsh_exec_body 调用——外壳负责起
+// 后台执行体与界面，执行体负责等门闸后干这些活，两者分开才能让「等确认」不挡着界面。
+assert.match(installSh, /^dsh_exec_body\(\) \{$/m, 'install.sh 必须定义后台执行体')
 assert.match(
   installSh,
-  /run_install_execution\(\) \{[\s\S]{0,4000}install_prepare_body[\s\S]{0,400}install_execute_body/,
-  '执行外壳必须调用准备与执行两段本体',
+  /^dsh_exec_body\(\) \{[\s\S]{0,1500}install_prepare_body[\s\S]{0,400}install_execute_body/m,
+  '后台执行体必须调用准备与执行两段本体',
 )
+// 后台执行体必须由执行外壳在后台起起来（否则界面起来时没人跑安装）。
+assert.match(
+  installSh,
+  /dsh_exec_body [^\n]*\) >>"\$logfile" 2>&1 &/,
+  '执行外壳必须把执行体放到后台并重定向进日志文件',
+)
+// 门闸：等确认，且只在带向导时由界面放行。
+assert.match(installSh, /mkfifo "\$gate"/, '执行外壳必须用 FIFO 作门闸')
+assert.match(installSh, /read -r _ < "\$gate"/, '后台执行体必须等门闸放行才开始')
+assert.match(installSh, /--run-gate "\$gate"/, '带向导时必须把门闸路径交给界面')
 assert.match(
   pagesGo,
   /\{"yes", "是", "执行当前操作"\}/,

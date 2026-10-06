@@ -23,21 +23,21 @@ var version = "dev"
 
 const usageText = `用法：dsh-installer [选项]
 
-不带选项时打开分页向导，逐页收集安装配置。答案写到 --answers-file 指定的文件
-（默认 stdout），每行一个 KEY=VALUE；install.sh 读入后继续执行安装。
-
-界面占用终端的备用屏幕，答案写文件而不是 stdout，两者互不干扰。
+不带选项时打开分页向导，逐页收集安装配置；确认后界面原地切到执行视图，
+在页面内滚动显示安装日志。全程只进出一次备用屏幕。
 
 选项：
-  --answers-file PATH   把答案写到该文件（默认 stdout）
-  --dir PATH            工程目录（默认 ./dsh-docker）
-  --dry-run             打印将执行的 install.sh 命令，不写答案（调试用）
-  --menu                只显示主菜单第一页（调试用）
-  --watch-log PATH      进入执行视图：滚动显示该日志文件，直到出现结束标记
-  --watch-title TEXT    执行视图的标题
-  --watch-sentinel TEXT 结束标记前缀（形如 __DSH_EXEC_DONE__，后面跟退出码）
-  -h, --help            显示本帮助
-  -v, --version         显示版本
+  --answers-file PATH     把答案写到该文件（默认 stdout）
+  --dir PATH              工程目录（默认 ./dsh-docker）
+  --run-gate PATH         向导确认后打开该 FIFO 放行后台执行子 shell
+  --dry-run               打印将执行的 install.sh 命令，不写答案（调试用）
+  --menu                  只显示主菜单第一页（调试用）
+  --watch-log PATH        执行视图读取的日志文件
+  --watch-title TEXT      执行视图的标题
+  --watch-sentinel TEXT   结束标记前缀（形如 __DSH_EXEC_DONE__，后面跟退出码）
+  --watch-summary-file PATH  执行结束后读取的关键信息文件
+  -h, --help              显示本帮助
+  -v, --version           显示版本
 `
 
 // exitCancelled 表示用户主动取消（Ctrl+C 或确认页答「否」）。
@@ -59,56 +59,42 @@ func main() {
 		os.Exit(2)
 	}
 
-	// --watch-log 是执行阶段的视图：固定区域内滚动显示安装日志，完成后给出操作项。
-	// 它与向导是两个独立模式（向导收集配置，它显示执行进度），所以在这里分流。
-	if opts.watchLog != "" {
-		os.Exit(runExecView(opts))
-	}
-
-	// WithAltScreen：整个向导占用备用屏幕缓冲，退出后终端恢复原样。
-	// 这是 dpanel 安装器的行为：界面不会滚进 scrollback。
-	program := tea.NewProgram(newWizard(opts), tea.WithAltScreen())
+	// WithAltScreen：向导与执行视图共用一个 tea.Program，整场安装只进出一次备用屏幕。
+	// 分两次调用做不到——第一次退出必然还原备用屏幕，第二次再进入就是两进两出，
+	// 中间那段输出还会漏到备用屏幕之外的终端行里。
+	program := tea.NewProgram(newRootModel(opts), tea.WithAltScreen())
 
 	final, err := program.Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "[错误] 界面初始化失败："+err.Error())
 		os.Exit(1)
 	}
-	result, ok := final.(wizardModel)
+	result, ok := final.(rootModel)
 	if !ok {
 		fmt.Fprintln(os.Stderr, "[错误] 界面状态异常。")
 		os.Exit(1)
 	}
-	if result.aborted {
-		fmt.Fprintln(os.Stderr, "已取消，未做任何改动。")
-		os.Exit(exitCancelled)
-	}
 
-	answers := result.answers
-	if answers["action"] == "" {
-		fmt.Fprintln(os.Stderr, "已取消，未做任何改动。")
-		os.Exit(exitCancelled)
-	}
-
+	// --dry-run 只在调试时用：把将要执行的命令打出来就结束，不碰答案文件、不放行执行体。
 	if opts.dryRun {
-		args := result.commandArgs()
-		fmt.Println(strings.Join(append([]string{"install.sh"}, args...), " "))
+		fmt.Println(strings.Join(append([]string{"install.sh"}, result.wizard.commandArgs()...), " "))
 		os.Exit(0)
 	}
 
-	// 答案写文件而不是 stdout：界面占用备用屏幕，两者分开可避免互相干扰，
-	// 也让 install.sh 能在向导退出、终端复原之后再把文件读回来。
-	out := os.Stdout
-	if opts.answersFile != "" {
-		file, err := os.Create(opts.answersFile)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "[错误] 无法写入答案文件："+err.Error())
-			os.Exit(1)
-		}
-		defer file.Close()
-		out = file
+	if result.err != nil {
+		fmt.Fprintln(os.Stderr, "[错误] "+result.err.Error())
+		os.Exit(1)
 	}
-	emitAnswers(out, answers)
+
+	// 退出备用屏幕之后，整屏已经还原。这里只补一句日志路径——摘要、访问地址、
+	// 失败原因都由执行视图在页面里展示过了，再打一遍既重复又已经滚过去。
+	if result.quitMsg != "" {
+		fmt.Fprintln(os.Stderr, result.quitMsg)
+	}
+
+	if result.code != 0 {
+		os.Exit(result.code)
+	}
 }
 
 // emitAnswers 输出 KEY=VALUE，按 key 排序保证可重复。
@@ -135,7 +121,12 @@ type options struct {
 	dryRun      bool
 	menuOnly    bool
 
-	// 执行视图（--watch-log 模式）
+	// runGate 是 FIFO 路径。向导确认后打开它的写端即可放行后台执行子 shell，
+	// 那个子 shell 正阻塞在同一 FIFO 的读端上。用 FIFO 而不是信号或轮询：
+	// 它是内核里的同步点，天然保证「答案落盘」先于「执行开始」。
+	runGate string
+
+	// 执行阶段（与向导共用同一个 tea.Program）
 	watchLog         string
 	watchTitle       string
 	watchSentinel    string
@@ -180,6 +171,14 @@ func parseArgs(argv []string) (options, error) {
 			opts.answersFile = v
 		case strings.HasPrefix(arg, "--answers-file="):
 			opts.answersFile = strings.TrimPrefix(arg, "--answers-file=")
+		case arg == "--run-gate":
+			v, ok := next()
+			if !ok {
+				return opts, errors.New("--run-gate 缺少值")
+			}
+			opts.runGate = v
+		case strings.HasPrefix(arg, "--run-gate="):
+			opts.runGate = strings.TrimPrefix(arg, "--run-gate=")
 		case arg == "--watch-log":
 			v, ok := next()
 			if !ok {
@@ -217,42 +216,6 @@ func parseArgs(argv []string) (options, error) {
 		}
 	}
 	return opts, nil
-}
-
-// runExecView 显示执行阶段的日志视图，返回进程退出码。
-//
-// 日志用文件而不是管道传递：管道会占住 stdout/stderr，且执行结束后内容就没了；
-// 文件让视图可以随时回看，也让 install.sh 的退出码语义保持干净（它照常写自己的
-// 退出码，视图只负责看）。结束由日志里的标记行表示，而不是靠文件 EOF——
-// install.sh 可能在写入标记后还有收尾动作。
-//
-// 刻意**不用**备用屏幕（与向导相反）：安装结束时用户最需要的是「这一轮给了我什么」
-// ——访问地址、密钥面板令牌、日志路径。备用屏幕会在退出时整屏还原，把这些连同
-// 日志一起抹掉，于是只能退回到「再打到画面之外」，而那已经滚过去了。
-// 留在主屏幕上，最后一帧（日志末尾 + 摘要 + 操作项）就是终端的最后内容。
-func runExecView(opts options) int {
-	model := newExecViewModel(execViewOptions{
-		logPath:     opts.watchLog,
-		sentinel:    opts.watchSentinel,
-		title:       opts.watchTitle,
-		summary:     opts.watchSummary,
-		summaryPath: opts.watchSummaryFile,
-	})
-	final, err := tea.NewProgram(model).Run()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "[错误] 日志视图初始化失败："+err.Error())
-		return 1
-	}
-	result, ok := final.(execViewModel)
-	if !ok {
-		return 1
-	}
-	if result.quitMsg != "" {
-		fmt.Fprintln(os.Stderr, result.quitMsg)
-	}
-	// 视图退出码跟随被执行命令：视图本身不判断成功，它只把结果透出去，
-	// 免得「装失败了但视图退 0」这种误导。
-	return result.code
 }
 
 // itoa 供页面构造参数时使用。

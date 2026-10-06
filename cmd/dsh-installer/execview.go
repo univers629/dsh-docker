@@ -56,7 +56,10 @@ type execViewModel struct {
 	cursor int
 	// quitMsg 是退出后要打印到终端的内容（例如日志路径），由调用方决定。
 	quitMsg string
-	err     error
+	// quit 表示这个模型要求结束程序。父模型（rootModel）需要它：Bubble Tea 不会
+	// 把子模型返回的 tea.Quit 告诉父模型，父模型只能自己看标志位才知道该跟着退出。
+	quit bool
+	err  error
 }
 
 const execViewMaxLines = 5000
@@ -179,6 +182,7 @@ func (m execViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			m.quitMsg = "已中断显示；安装进程可能仍在后台运行。"
+			m.quit = true
 			return m, tea.Quit
 		case tea.KeyUp:
 			if m.done {
@@ -236,9 +240,11 @@ func (m execViewModel) doneOptions() []string {
 func (m execViewModel) applyOption() (tea.Model, tea.Cmd) {
 	switch m.cursor {
 	case 0:
+		m.quit = true
 		return m, tea.Quit
 	case 1:
 		m.quitMsg = "完整日志： " + m.opts.logPath
+		m.quit = true
 		return m, tea.Quit
 	}
 	return m, nil

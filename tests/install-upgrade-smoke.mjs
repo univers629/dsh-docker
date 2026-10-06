@@ -15,7 +15,10 @@ const installSh = await readFile(join(repoRoot, 'install.sh'), 'utf8')
 const installPs1 = await readFile(join(repoRoot, 'install.ps1'), 'utf8')
 
 // 两侧都要有这个动作，且都必须走 --no-build --force-recreate（镜像已经在上一步拉好/构建好）。
-assert.match(installSh, /^  upgrade\) upgrade_dsh ;;$/m)
+//
+// 缩进比早先深一层：维护类动作现在包在「先进入工程目录」的外层 case 里，
+// 因为交互路径要等向导给出动作之后才知道该不该进目录。
+assert.match(installSh, /^\s+upgrade\) upgrade_dsh ;;$/m)
 assert.match(installPs1, /^    'upgrade' \{ Invoke-DshUpgrade \}$/m)
 assert.match(installSh, /up -d --no-build --force-recreate --remove-orphans/)
 assert.match(installPs1, /'up','-d','--no-build','--force-recreate','--remove-orphans'/)
