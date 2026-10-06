@@ -75,27 +75,38 @@ assert.match(
 )
 
 // —— 2) 动态：PTY 里数备用屏幕的进出次数 ——
+//
+// 这一段需要 Linux + python3 + 已构建的 dsh-installer。任一缺失都只跑静态层，
+// 但必须把「动态层没跑」这件事显式说出来：否则一条什么都没验证的断言会打印 ok，
+// 读日志的人会以为备用屏幕的行为已经被覆盖。用 DYNAMIC-SKIPPED 标记，
+// run-offline.mjs 会把它汇总出来。
 
-const helper = join(root, 'tests', 'helpers', 'alt-screen-count.py')
-if (!existsSync(helper) || process.platform === 'win32') {
-  console.log('installer single-program smoke: ok (static only; PTY probe needs Linux)')
+/** 只跑完静态层就退出，并留下可汇总的标记。 */
+function staticOnly(reason) {
+  console.log(`installer single-program smoke: ok (static only)`)
+  console.log(`DYNAMIC-SKIPPED: installer-single-program: ${reason}`)
   process.exit(0)
 }
 
-// 优先用环境变量指定的二进制（全量套件会传），否则用仓库内构建产物。
+const helper = join(root, 'tests', 'helpers', 'alt-screen-count.py')
+if (process.platform === 'win32') {
+  staticOnly('PTY 探针只能在 Linux 上跑（Windows 没有 pty.fork）')
+}
+if (!existsSync(helper)) {
+  staticOnly(`缺少探针脚本 ${helper}`)
+}
+
 const binary = process.env.DSH_INSTALLER_BIN || join(root, 'cmd', 'dsh-installer', 'dsh-installer')
 if (!existsSync(binary)) {
-  console.log(`installer single-program smoke: ok (static only; no binary at ${binary})`)
-  process.exit(0)
+  staticOnly(`未构建 dsh-installer（${binary} 不存在）——先跑 go build 才有动态层`)
 }
 
 const probe = spawnSync('python3', [helper, binary], { encoding: 'utf8', timeout: 180000 })
 if (probe.error || probe.status !== 0) {
-  // 没有 python3 / 没有 pty 时跳过动态层而不是失败：静态层已经覆盖了结构契约，
-  // 动态层由 Linux 全量套件兜住。
-  const detail = probe.error?.message ?? `${probe.stdout ?? ''}${probe.stderr ?? ''}`
-  console.log(`installer single-program smoke: ok (static only; PTY probe unavailable: ${detail.trim()})`)
-  process.exit(0)
+  // 探针本身跑不起来（没有 python3、容器里没有 /dev/tty 等）时只跑静态层。
+  // 这仍然要显式标记：探针失败与「界面确实只进出一次」是两件事。
+  const detail = (probe.error?.message ?? `${probe.stdout ?? ''}${probe.stderr ?? ''}`).trim()
+  staticOnly(`探针不可用：${detail.slice(0, 200)}`)
 }
 
 const out = probe.stdout.trim()
