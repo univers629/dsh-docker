@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 // 运行身份与隔离的静态守卫：容器以非 root 的 dsh 账户运行 DSH，root 只留给
 // PID 1、Nginx 主进程和特权代理；apt 依然可用，但必须经过白名单代理。
@@ -589,5 +591,27 @@ assert.match(files.installSh, /label=dsh\.created-by=dsh-docker-installer/)
 assert.match(files.installPs1, /label=dsh\.created-by=dsh-docker-installer/)
 assert.match(files.installSh, /{{ len \.Containers }}/)
 assert.match(files.installPs1, /{{ len \.Containers }}/)
+
+// 启动链判定的行为测试：静态断言只能证明代码里出现了 is_read_only，
+// 证明不了它在真实组合下的结论。这里加载真函数，在三种场景上跑一遍。
+//
+// 要覆盖的组合正是真实部署遇到的那个：compose 把 ./bin/dsh-supervisor 以 :ro 挂进来，
+// 挂载源属主跟着 clone 的人走（非 root 用户 → 1000:1000 0775），容器里 uid 1000
+// 恰好是 dsh。只看 stat 会判失败，而它是只读挂载，实际写不动。
+//
+// 反面同样要覆盖：同样的属主与权限位但**不是**只读挂载时必须判失败，
+// 否则这个修复就把判定放宽成了永远通过。
+const logicHelper = fileURLToPath(new URL('./helpers/boot-chain-logic.py', import.meta.url))
+if (process.platform === 'win32' || !existsSync(logicHelper)) {
+  console.log('DYNAMIC-SKIPPED: boot-chain-logic: 需要 python3 与 POSIX 属主语义，只在 Linux 上跑')
+} else {
+  const logic = spawnSync('python3', [logicHelper], { encoding: 'utf8', timeout: 60000 })
+  const detail = `${logic.stdout ?? ''}${logic.stderr ?? ''}`.trim()
+  assert.equal(
+    logic.status,
+    0,
+    `启动链判定的行为测试未通过（只读挂载应豁免、可写路径仍须失败）：\n${detail.slice(-1200)}`,
+  )
+}
 
 console.log('least-privilege runtime smoke: ok')
