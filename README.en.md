@@ -47,14 +47,6 @@ Both commands open the paged wizard: it asks page by page about image source, ac
 
 The container root password is stored only as a sha512crypt hash in `data/secret/root.hash` and the Basic Auth password only as a bcrypt hash in `data/auth/htpasswd`; neither is written to `.env`. Nothing in this flow uses a privileged container, mounts a Docker socket, or grants host root.
 
-### How the wizard is implemented
-
-The wizard is a standalone Go binary, `dsh-installer`, downloaded to `~/.cache/dsh-docker/` during installation. Interface and installation logic are separate: the wizard only collects answers and `install.sh` performs the installation, which keeps `curl | bash` (where the script has no path) working and means nothing the wizard already asked is asked a second time in the terminal.
-
-The whole run — fetching the project source through to the post-install checks — scrolls inside a single region; `↑/↓` and `PgUp/PgDn` scroll back and `End` returns to the newest output. Failure reasons wrap in full instead of being cut off. When it finishes, the access URL, key panel token and log file path stay on screen rather than scrolling away.
-
-For unattended runs, which do not need the wizard at all: `install.sh install --non-interactive ...` or `install.sh install --quick`.
-
 ### Building behind a restricted network
 
 If the official Debian and npm mirrors are unreliable, build against local mirrors instead. The build arguments come from the Dockerfile, so the installer needs no changes:
