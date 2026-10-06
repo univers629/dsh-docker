@@ -1690,6 +1690,70 @@ detach_delete() {
   exit "$status"
 }
 
+# 清理多用户的每用户实例资源。
+#
+# 这些资源由 dsh-instances 在运行时创建，不带 Docker 标签，只能按命名规则识别。
+# 规则与 bin/dsh-instances.mjs / dsh-instances-policy.mjs 保持一致：
+#   容器  dsh-u<N>                 （N 从 1 起，instanceName）
+#   卷    dsh-user-<uid>-home / -workspace   （uid 从 100000 起，volumePrefix）
+#   网络  dsh-instances-net-u<N>   （instanceNetworkName）
+#
+# 严格用「锚定的数字后缀」匹配，避免误伤宿主上名字相近的别的资源：
+# 例如 `dsh-u1-test` 或别的项目的 `dsh-userdata` 都不该被选中。
+# 前缀可用环境变量覆盖（与 dsh-instances 一致），这里同样尊重它们。
+cleanup_user_instances() {
+  local network_prefix volume_prefix ids id name num rest uid
+
+  network_prefix="${DSH_INSTANCE_NETWORK:-dsh-instances-net}"
+  volume_prefix="${DSH_INSTANCE_VOLUME_PREFIX:-dsh-user}"
+
+  # 1) 实例容器：dsh-u 后跟纯数字。先停再删，避免运行中的实例继续写数据。
+  #    用 --format 列出「ID 名字」：-q 与 --format 同用会互相覆盖，只留一个。
+  ids="$(DOCKER container ls -a --format '{{.ID}} {{.Names}}' 2>/dev/null || true)"
+  while IFS=' ' read -r id name; do
+    [ -n "$id" ] || continue
+    num="${name#dsh-u}"
+    # 必须以 dsh-u 开头、且剩余部分是纯数字（排除 dsh-u 自身与 dsh-u1-xxx 这类）
+    case "$name" in
+      dsh-u*) case "$num" in ''|*[!0-9]*) continue ;; esac ;;
+      *) continue ;;
+    esac
+    DOCKER container rm -f "$id" >/dev/null 2>&1 || true
+  done <<< "$ids"
+
+  # 2) 实例数据卷：<prefix>-<uid>-home / -workspace，uid 是纯数字。
+  ids="$(DOCKER volume ls --format '{{.Name}}' 2>/dev/null || true)"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case "$name" in
+      "${volume_prefix}"-*) ;;
+      *) continue ;;
+    esac
+    rest="${name#"${volume_prefix}"-}"
+    uid="${rest%%-*}"
+    case "$uid" in ''|*[!0-9]*) continue ;; esac
+    # 后缀必须是 home 或 workspace，其余（例如别人的 dsh-user-data）不动。
+    case "$rest" in
+      *-home|*-workspace) ;;
+      *) continue ;;
+    esac
+    DOCKER volume rm -f "$name" >/dev/null 2>&1 || true
+  done <<< "$ids"
+
+  # 3) 每实例网络：<prefix>-u<N>。必须没有容器还接着，否则删不掉（那是正确行为：
+  #    有东西在用就不该强拆）。清完实例容器后通常已经空出来。
+  ids="$(DOCKER network ls --format '{{.ID}} {{.Name}}' 2>/dev/null || true)"
+  while IFS=' ' read -r id name; do
+    [ -n "$id" ] || continue
+    num="${name#"${network_prefix}"-u}"
+    case "$name" in
+      "${network_prefix}"-u*) case "$num" in ''|*[!0-9]*) continue ;; esac ;;
+      *) continue ;;
+    esac
+    DOCKER network rm "$id" >/dev/null 2>&1 || true
+  done <<< "$ids"
+}
+
 delete_project() {
   local project_name=dsh-docker image_refs ref ids id target_abs network_ids network_project container_ids
   local container_name
@@ -1769,6 +1833,18 @@ delete_project() {
       DOCKER network rm "$container_name" >/dev/null 2>&1 || true
     fi
   done
+
+  # 多用户的每用户实例：容器 dsh-u<N>、卷 dsh-user-<uid>-{home,workspace}、
+  # 网络 dsh-instances-net-u<N>。
+  #
+  # 这些资源是 dsh-instances 在运行时动态创建的，**不带任何 Docker 标签**，
+  # 所以上面所有按 compose 项目标签做的过滤都抓不到它们。不显式清理的话，
+  # 「卸载」会留下一堆孤儿容器和卷，用户的文件仍在磁盘上占空间。
+  #
+  # 只按我们自己的命名规则匹配（dsh-u<数字>、dsh-user-<数字>-*、dsh-instances-net-u<数字>），
+  # 不做通配删除：宿主上别的项目不该被碰到。
+  cleanup_user_instances
+
   DOCKER builder prune -af
 
   if [ -d "$TARGET_DIR" ]; then

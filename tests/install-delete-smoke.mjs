@@ -11,6 +11,13 @@ const functionStart = install.indexOf('delete_project() {')
 const functionEnd = install.indexOf('\nif [ "$ACTION" = delete ]', functionStart)
 assert.ok(functionStart >= 0 && functionEnd > functionStart, 'cannot locate Linux delete function')
 const deleteFunction = install.slice(functionStart, functionEnd)
+// delete_project 还依赖 cleanup_user_instances（清理每用户实例资源）。
+// 它定义在 delete_project 之前，所以按「从它自己的定义到 delete_project 结束」
+// 取一段，把依赖一起带进 harness，而不是在 harness 里塞一个假的替身——
+// 那样会测不出真实的命名规则边界。
+const cleanupStart = install.indexOf('cleanup_user_instances() {')
+assert.ok(cleanupStart >= 0 && cleanupStart < functionStart, 'cannot locate cleanup_user_instances')
+const cleanupFunction = install.slice(cleanupStart, functionStart)
 const bash = process.platform === 'win32'
   ? [String.raw`C:\Program Files\Git\bin\bash.exe`, String.raw`C:\Program Files\Git\usr\bin\bash.exe`].find(existsSync)
   : 'bash'
@@ -50,6 +57,7 @@ DOCKER() {
   if [ "\${1:-}" = network ] && [ "\${2:-}" = ls ]; then printf '%s\\n' net-project; fi
   if [ "\${1:-}" = network ] && [ "\${2:-}" = inspect ]; then printf '%s\\n' dsh-docker; fi
 }
+${cleanupFunction}
 ${deleteFunction}
 delete_project
 `
