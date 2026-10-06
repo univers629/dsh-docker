@@ -222,3 +222,78 @@ func TestExecViewMissingFileIsNotFatal(t *testing.T) {
 		t.Fatal("文件不存在时不该判定为完成")
 	}
 }
+
+func TestWrapWidthPreservesContent(t *testing.T) {
+	// 折行不能丢字符：错误信息被截断会让用户看不到真正原因。
+	long := "validating /home/debian/dsh-docker/docker-compose.isolated.yml: service \"dsh\" refers to undefined network dsh-internal"
+	segs := wrapWidth(long, 40)
+
+	var joined string
+	for _, s := range segs {
+		if w := runewidth.StringWidth(s); w > 40 {
+			t.Fatalf("折行后仍有超宽段（%d 列）：%q", w, s)
+		}
+		joined += s
+	}
+	if joined != long {
+		t.Fatalf("折行丢失内容：\n原文 %q\n拼接 %q", long, joined)
+	}
+}
+
+func TestWrapWidthHandlesCJK(t *testing.T) {
+	// 中文占两列：按 rune 数切会让每段实际宽度翻倍、溢出边框。
+	segs := wrapWidth("正在等待容器内的 DSH 进程就绪，这一步最长需要两分钟", 20)
+	for _, s := range segs {
+		if w := runewidth.StringWidth(s); w > 20 {
+			t.Fatalf("中文折行超宽（%d 列）：%q", w, s)
+		}
+	}
+}
+
+func TestExecViewLongLineDoesNotPushActionsOffScreen(t *testing.T) {
+	// 一条很长的日志折行后会占多行。若日志区仍按「逻辑行」计数，实际高度会超出
+	// 终端，把下方的摘要与操作项顶出可见区域。
+	long := strings.Repeat("x", 2000)
+	path := writeLog(t, long+"\n"+sentinelForTest+":0\n")
+	m := newExecViewModel(execViewOptions{
+		logPath:  path,
+		sentinel: sentinelForTest,
+		summary:  []string{"本机入口: http://127.0.0.1:3080"},
+	})
+	m.width, m.height = 80, 24
+	m = m.readMore()
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) > 24 {
+		t.Fatalf("视图超过终端高度：%d 行 > 24", len(lines))
+	}
+	for _, want := range []string{"已完成", "本机入口", "退出"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("长日志把 %q 顶出了可见区域：\n%s", want, view)
+		}
+	}
+}
+
+func TestExecViewShowsFailureReasonInFull(t *testing.T) {
+	// compose 校验失败的提示很长，必须完整显示而不是被截断。
+	reason := "validating /home/debian/dsh-docker/docker-compose.isolated.yml: service \"dsh\" refers to undefined network dsh-internal"
+	path := writeLog(t, reason+"\n"+sentinelForTest+":1\n")
+	m := newExecViewModel(execViewOptions{logPath: path, sentinel: sentinelForTest})
+	m.width, m.height = 100, 30
+	m = m.readMore()
+
+	// 逐行比对「去掉换行后的内容」而不是整段包含：折行会插入换行，
+	// 原本连续的短语可能被拆到两行，用整段包含判断会误报。
+	view := m.View()
+	if !strings.Contains(strings.ReplaceAll(view, "\n", ""), "undefined network") {
+		t.Fatalf("失败原因被截断，缺少 \"undefined network\"：\n%s", view)
+	}
+	if !strings.Contains(view, "失败") {
+		t.Fatalf("退出码非 0 时必须显示失败状态：\n%s", view)
+	}
+	// 折行后不得超出终端高度，否则摘要与操作项会被顶出可见区域。
+	if lines := strings.Count(strings.TrimRight(view, "\n"), "\n") + 1; lines > 30 {
+		t.Fatalf("视图超过终端高度：%d 行 > 30", lines)
+	}
+}

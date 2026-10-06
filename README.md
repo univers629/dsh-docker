@@ -51,7 +51,7 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | i
 
 向导是一个独立的 Go 二进制 `dsh-installer`，安装时自动下载到 `~/.cache/dsh-docker/`。界面与安装逻辑分离：向导只负责收集答案，安装仍由 `install.sh` 执行，因此 `curl | bash`（脚本没有文件路径）也能用。向导问过的内容不会再在终端里问第二遍。
 
-执行阶段（拉镜像、起容器、加固自检）在一个固定区域内滚动显示，`↑/↓` 与 `PgUp/PgDn` 可以回看，`End` 回到最新。跑完后访问地址、密钥面板令牌固定在操作区上方，不会被后续输出顶出屏幕；失败时会把完整日志打印一遍并告知日志文件位置。
+从取工程源码到装完自检，整个过程都在同一个滚动区域里显示，`↑/↓` 与 `PgUp/PgDn` 可以回看，`End` 回到最新。失败原因会完整折行显示，不会被截断。结束后访问地址、密钥面板令牌、日志文件路径留在屏幕上，不会被后续输出顶走。
 
 不需要交互时用无人值守参数，它不依赖向导：`install.sh install --non-interactive ...` 或 `install.sh install --quick`。
 

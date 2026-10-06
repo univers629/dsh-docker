@@ -1971,24 +1971,16 @@ if [ "$ACTION" = delete ]; then
 fi
 
 case "$ACTION" in
-  install|configure) fetch_project ;;
-  *) require_project ;;
+  # 取源码、进入工程目录、组装配置都属于安装过程，它们的输出统一收进执行视图的
+  # 滚动日志（见 install_execution_phase）。在这里做会让同一次安装被切成两段体验：
+  # 先是一段裸输出（克隆进度），再进 TUI。
+  install|configure) ;;
+  *)
+    require_project
+    cd "$TARGET_DIR"
+    chmod +x dsh.sh 2>/dev/null || true
+    ;;
 esac
-
-if [ "$ACTION" = install ] || [ "$ACTION" = configure ]; then
-  if container_exists; then
-    echo "[错误] dsh 容器已经存在；为保护容器内 apt 软件和系统修改，安装器不会隐式重建它。" >&2
-    echo "       使用 ./dsh.sh start|restart 管理现有容器；如需全新系统，请明确执行 ./dsh.sh remove 后再安装。" >&2
-    echo >&2
-    echo "       要更新、卸载或做其它维护，进主菜单选：" >&2
-    echo "         curl -fsSL https://raw.githubusercontent.com/univers629/dsh-docker/main/install.sh | bash -s -- --menu" >&2
-    echo "       已在本工程目录时也可以直接：./install.sh --menu" >&2
-    exit 1
-  fi
-fi
-
-cd "$TARGET_DIR"
-chmod +x dsh.sh 2>/dev/null || true
 
 set_compose_env() {
   local key="$1" value="$2" file="${3:-.env}" temporary
@@ -4441,12 +4433,32 @@ case "$ACTION" in
   *) ui_term_restore ;;
 esac
 
-# 执行阶段的本体：拉镜像、写配置、起容器、自检、打印摘要。
+# 准备阶段：取源码、进入工程目录、装配配置。
 #
-# 与「怎么显示」分开：这个函数只负责做事并把过程写到 stdout，由 run_install_execution
-# 决定是让它直接输出到终端，还是收进 TUI 的滚动日志区。分开的好处是这个函数可以
-# 单独被测试或复用，而显示方式的改动不会碰到安装逻辑。
-install_execution_body() {
+# 单独成函数是因为两条路径对它的位置要求不同：
+#   向导路径：向导已经问完并确认过，这三步与执行阶段连续放进同一个滚动日志；
+#   命令行路径：确认页要展示配置结果，所以必须先做完这几步再确认。
+# 留在主流程里会让向导路径的同一次安装被切成两段体验——先是一段裸输出的克隆进度，
+# 再进滚动日志视图。
+install_prepare_body() {
+  # 容器已存在时不做隐式重建：容器里可能装着 apt 装过的工具链与手工修改，重建会
+  # 全部丢掉。这条判断放在最前，避免克隆完才发现装不了。
+  if container_exists; then
+    echo "[错误] dsh 容器已经存在；为保护容器内 apt 软件和系统修改，安装器不会隐式重建它。"
+    echo "       使用 ./dsh.sh start|restart 管理现有容器；如需全新系统，请明确执行 ./dsh.sh remove 后再安装。"
+    echo "       要更新、卸载或做其它维护，重新运行安装命令，在主菜单里选「更新」或「卸载」。"
+    return 1
+  fi
+
+  fetch_project
+  cd "$TARGET_DIR" || { echo "[错误] 无法进入工程目录：$TARGET_DIR"; return 1; }
+  chmod +x dsh.sh 2>/dev/null || true
+  # 装配 PENDING_* 与 COMPOSE_ARGS。向导已经把答案交过来了，这一步不再提问。
+  configure_dsh
+}
+
+# 执行阶段：拉镜像、写配置、起容器、自检、打印摘要。
+install_execute_body() {
   obtain_dsh_image
   write_basic_auth
   write_root_password
@@ -4477,6 +4489,28 @@ install_execution_body() {
   print_quick_summary
 }
 
+# 生成执行视图完成后固定显示的内容（写入 summary 文件）。
+#
+# 由 EXIT trap 调用，所以成功与失败都会写：失败路径上函数会直接 exit，
+# 放在正文末尾的写法会被跳过，用户就看不到「装到哪一步失败的」。
+#
+# 内容包含三部分：从日志里摘出的关键信息（面板地址、令牌等只有跑完才知道）、
+# 访问入口、以及日志文件路径。输出到页面之外的信息越少越好——TUI 退出后画面就没了，
+# 打在页外的东西用户往往已经滚过。
+write_exec_summary() {
+  local rc="$1"
+  [ -n "$summaryfile" ] || return 0
+  {
+    grep -E '模型密钥面板|访问令牌|密钥代理:|访问保护:|多用户模式|出站模式' "$logfile" 2>/dev/null || true
+    if [ "$rc" = 0 ]; then
+      printf '本机入口: http://%s:%s\n' "${PENDING_BIND_HOST:-127.0.0.1}" "${DSH_HOST_PORT:-3080}"
+    else
+      printf '安装未完成（退出码 %s）\n' "$rc"
+    fi
+    printf '完整日志: %s\n' "$logfile"
+  } > "$summaryfile" 2>/dev/null || true
+}
+
 # 执行阶段的外壳：有 Go 向导时把输出收进 TUI 的滚动日志区，没有就直接打印。
 #
 # 为什么要有这一层：执行阶段要几分钟（拉镜像、起容器、自检），直接输出到终端会让
@@ -4485,41 +4519,63 @@ install_execution_body() {
 # 上方滚动日志，下方是跑完后的摘要与操作项。
 run_install_execution() {
   local bin logfile summaryfile sentinel status
+  # --prepared 表示调用方已经跑过准备阶段（取源码、装配配置）：命令行路径下
+  # 准备阶段必须在确认页之前完成，所以不能再跑一遍。
+  local already_prepared=false
+  [ "${1:-}" = "--prepared" ] && already_prepared=true
 
   # 先判断要不要 TUI，再决定去不去找二进制。
   # 顺序很重要：dsh_installer_path 在缓存缺失时会联网下载，而 --non-interactive
   # 根本用不到 TUI——为它去下载一个几 MB 的二进制既浪费又可能卡住（CI、受限网络下
   # 表现为安装器挂起）。无终端时同样直接走普通输出。
   if [ "${DSH_NO_EXEC_VIEW:-}" = 1 ] || [ "$UI_TUI" != true ] || [ "$INTERACTIVE" != true ]; then
-    install_execution_body
+    if [ "$already_prepared" != true ]; then
+      install_prepare_body || return $?
+    fi
+    install_execute_body
     return $?
   fi
 
   # 只有真要显示 TUI 时才找二进制；找不到就退回普通输出，不因为显示方式而失败。
   bin="$(dsh_installer_path 2>/dev/null || true)"
   if [ -z "$bin" ]; then
-    install_execution_body
+    if [ "$already_prepared" != true ]; then
+      install_prepare_body || return $?
+    fi
+    install_execute_body
     return $?
   fi
 
-  logfile="$(mktemp "${TMPDIR:-/tmp}/dsh-exec-XXXXXX.log")" || { install_execution_body; return $?; }
+  logfile="$(mktemp "${TMPDIR:-/tmp}/dsh-exec-XXXXXX.log")" || {
+    if [ "$already_prepared" != true ]; then
+      install_prepare_body || return $?
+    fi
+    install_execute_body
+    return $?
+  }
   summaryfile="$(mktemp "${TMPDIR:-/tmp}/dsh-summary-XXXXXX.txt")" || summaryfile=""
   sentinel="__DSH_EXEC_DONE__"
 
   # 执行本体在后台跑，输出重定向进日志文件；TUI 只读这个文件。
   # 用文件而不是管道：管道会占住 stdout，且执行结束后内容就没了；文件还能回看。
   #
-  # 结束标记由这个子 shell 自己写：它才知道本体的退出码。不要试图在外层用
-  # `wait "$body_pid"`——子 shell 不是本体的父进程，wait 会立刻失败并让标记提前写上，
-  # TUI 就会在本体还在跑的时候显示「已完成」。
+  # 结束标记必须无条件写上，所以用 EXIT trap 而不是在末尾 printf：
+  #   - 被调用的函数里有 exit（例如 fetch_project 失败时）；
+  #   - 脚本开头是 set -e，任何一条命令失败都会中断子 shell。
+  # 这两种情况都会跳过末尾的 printf，而 TUI 靠标记判断收尾、不靠 EOF，
+  # 漏写就会让它一直等下去。
   (
-    install_execution_body
-    rc=$?
-    if [ -n "$summaryfile" ]; then
-      # 关键信息从日志里摘出来，跑完后固定显示在操作区上方。
-      grep -E '模型密钥面板|访问令牌|本机入口|密钥代理:|访问保护:|多用户' "$logfile" 2>/dev/null > "$summaryfile" || true
+    # 结束标记与摘要都必须在 EXIT trap 里写：函数内部有 exit（例如取源码失败）、
+    # 脚本开头是 set -e，都会跳过正文末尾的语句。TUI 靠标记判断收尾、不靠 EOF，
+    # 漏写会让它一直等下去。
+    trap 'rc=$?; printf "%s:%s\n" "$sentinel" "$rc"; write_exec_summary "$rc"' EXIT
+    # 准备与执行两段一起收进滚动日志：取源码、装配配置同属安装过程，
+    # 拆到外面会让一次安装先出现一段裸输出、再进日志视图——两段体验。
+    # --prepared 时调用方已经做过准备阶段（命令行路径要在确认页之前完成它）。
+    if [ "$already_prepared" != true ]; then
+      install_prepare_body || exit $?
     fi
-    printf '%s:%s\n' "$sentinel" "$rc"
+    install_execute_body
   ) >>"$logfile" 2>&1 &
   local body_pid=$!
 
@@ -4532,27 +4588,31 @@ run_install_execution() {
   wait "$body_pid" 2>/dev/null || true
 
   # 失败时把日志完整打印出来：TUI 只滚动显示，出错细节可能已经滚出屏幕，
-  # 而这段输出会被用户复制到 issue 里。
+  # 而这段输出会被用户复制到 issue 里。这是唯一需要落在画面之外的输出——
+  # 它必须能被整体复制，且比 TUI 的回看更方便。
   if [ "$status" != 0 ]; then
     echo
     echo "[错误] 安装未完成（退出码 $status）。完整日志："
     sed 's/^/    /' "$logfile" 2>/dev/null || true
   fi
-  echo
-  echo "==> 执行日志已保存在 $logfile"
-  # 日志文件保留给用户排查（失败时上面已经完整打印过一遍）；摘要临时文件用完即删。
+  # 摘要临时文件用完即删（日志文件保留，供用户回看或上报）。
   [ -n "$summaryfile" ] && rm -f "$summaryfile"
   return "$status"
 }
 
 case "$ACTION" in
   install|configure)
-    configure_dsh
-    # 确认摘要页（对齐 dpanel 安装器第 7 页「确认是否执行」）：把这一轮收集到的选择
-    # 汇总成一张表，让人在执行前看一眼再决定。放在这里是因为此时配置已经问完、但还
-    # 没有写任何文件或创建任何容器——答「否」就等于什么都没发生。
-    confirm_install_plan
-    run_install_execution
+    if [ "${DSH_WIZARD_DONE:-}" = true ]; then
+      # 向导路径：用户已经在那边的确认页上确认过，配置答案也已经在答案文件里。
+      # 取源码、装配配置、执行全部收进同一个滚动日志——它们同属一次安装。
+      run_install_execution
+    else
+      # 命令行路径：没有向导，需要自己先装配配置才能把摘要展示给人看，
+      # 所以准备阶段要在确认页之前跑，之后再执行。
+      install_prepare_body || exit $?
+      confirm_install_plan
+      run_install_execution --prepared
+    fi
     ;;
   upgrade) upgrade_dsh ;;
   model-key) add_model_key ;;
@@ -4565,9 +4625,27 @@ case "$ACTION" in
   status) ./dsh.sh status ;;
 esac
 
-echo
-echo "==================================================="
-echo "  操作完成：$ACTION"
-echo "  本机入口: http://127.0.0.1:3080"
-echo "  再次运行同一条安装命令即可管理或重新配置"
-echo "==================================================="
+# 收尾横幅。
+#
+# install/configure 在向导路径下不打印：那次的结局（入口地址、日志路径、失败原因）
+# 已经由执行视图固定显示在操作区上方，TUI 退出后再打一遍只会重复，而且画面已经
+# 滚过去了。其它动作（升级、启动、卸载、密钥面板…）没有视图，仍在这里给出总结。
+case "$ACTION" in
+  install|configure)
+    [ "${DSH_WIZARD_DONE:-}" = true ] || {
+      echo
+      echo "==================================================="
+      echo "  操作完成：$ACTION"
+      echo "  本机入口: http://127.0.0.1:3080"
+      echo "  再次运行同一条安装命令即可管理或重新配置"
+      echo "==================================================="
+    }
+    ;;
+  *)
+    echo
+    echo "==================================================="
+    echo "  操作完成：$ACTION"
+    echo "  再次运行同一条安装命令即可管理或重新配置"
+    echo "==================================================="
+    ;;
+esac

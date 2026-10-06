@@ -244,11 +244,22 @@ func (m execViewModel) applyOption() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// logHeight 是日志区可用的行数：总高度减去标题、状态、操作区与留白。
+// logHeight 是日志区可用的行数：总高度减去标题、摘要、操作区与留白。
+//
+// 摘要按折行后的实际行数计算：一条很长的摘要（例如带完整 URL 的入口地址）会占多行，
+// 只数条数会让总高度超出终端，把操作项顶出屏幕。
 func (m execViewModel) logHeight() int {
 	h := m.height - 6
 	if m.done {
-		h -= len(m.allSummary()) + 2
+		summaryRows := 0
+		for _, line := range m.allSummary() {
+			segs := wrapWidth(line, m.width-4)
+			if len(segs) == 0 {
+				segs = []string{""}
+			}
+			summaryRows += len(segs)
+		}
+		h -= summaryRows + 2
 	}
 	if h < 3 {
 		h = 3
@@ -276,28 +287,39 @@ func (m execViewModel) View() string {
 	head += cursorStyle.Render("[" + state + "]")
 	b.WriteString(head + "\n\n")
 
-	// 日志区：固定高度，超出的部分按 scroll/follow 截取
+	// 日志区：固定高度。
+	//
+	// 按「显示行」而不是「逻辑行」取窗口：一条很长的日志（例如 compose 的校验错误）
+	// 折行后会占好几行，只数逻辑行会让实际高度超出预算，把下方的摘要与操作项顶出屏幕。
 	lh := m.logHeight()
+	rows := make([]string, 0, len(m.lines))
+	for _, line := range m.lines {
+		segs := wrapWidth(line, m.width-2)
+		if len(segs) == 0 {
+			segs = []string{""}
+		}
+		rows = append(rows, segs...)
+	}
 	start := 0
 	if m.follow {
-		if len(m.lines) > lh {
-			start = len(m.lines) - lh
+		if len(rows) > lh {
+			start = len(rows) - lh
 		}
 	} else {
 		start = m.scroll
-		if start > len(m.lines)-lh {
-			start = len(m.lines) - lh
+		if start > len(rows)-lh {
+			start = len(rows) - lh
 		}
 		if start < 0 {
 			start = 0
 		}
 	}
 	end := start + lh
-	if end > len(m.lines) {
-		end = len(m.lines)
+	if end > len(rows) {
+		end = len(rows)
 	}
 	for i := start; i < end; i++ {
-		b.WriteString(truncateWidth(m.lines[i], m.width-2) + "\n")
+		b.WriteString(rows[i] + "\n")
 	}
 	// 补空行，保持框高稳定（否则内容少时下方的操作项会跳动）
 	for i := end - start; i < lh; i++ {
@@ -307,7 +329,9 @@ func (m execViewModel) View() string {
 	if m.done {
 		b.WriteString("\n")
 		for _, line := range m.allSummary() {
-			b.WriteString(descStyle.Render("  "+truncateWidth(line, m.width-4)) + "\n")
+			for _, seg := range wrapWidth(line, m.width-4) {
+				b.WriteString(descStyle.Render("  "+seg) + "\n")
+			}
 		}
 		b.WriteString("\n")
 		for i, opt := range m.doneOptions() {
@@ -352,6 +376,40 @@ func truncateWidth(s string, max int) string {
 		w += rw
 	}
 	return string(out) + "…"
+}
+
+// wrapWidth 按显示宽度折行，返回若干段。
+//
+// 日志区用折行而不是截断：错误信息（compose 校验失败、容器启动失败的原因）
+// 通常是一整行很长的文本，截断会把它掐在半句，用户看不到真正原因。
+// 按显示宽度而不是字节数切分，否则含中文的行会溢出边框。
+func wrapWidth(s string, max int) []string {
+	if max <= 1 {
+		return []string{s}
+	}
+	if s == "" {
+		return []string{""}
+	}
+	var out []string
+	var cur []rune
+	w := 0
+	for _, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if w+rw > max && len(cur) > 0 {
+			out = append(out, string(cur))
+			cur = cur[:0]
+			w = 0
+		}
+		cur = append(cur, r)
+		w += rw
+	}
+	if len(cur) > 0 {
+		out = append(out, string(cur))
+	}
+	if len(out) == 0 {
+		out = []string{""}
+	}
+	return out
 }
 
 // stripANSI 去掉 ANSI 转义序列：日志里可能带颜色，直接按宽度排版会算错。

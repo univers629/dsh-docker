@@ -51,7 +51,7 @@ The container root password is stored only as a sha512crypt hash in `data/secret
 
 The wizard is a standalone Go binary, `dsh-installer`, downloaded to `~/.cache/dsh-docker/` during installation. Interface and installation logic are separate: the wizard only collects answers and `install.sh` performs the installation, which keeps `curl | bash` (where the script has no path) working and means nothing the wizard already asked is asked a second time in the terminal.
 
-The execution phase — pulling the image, starting the container, the hardening checks — scrolls inside a fixed region; `↑/↓` and `PgUp/PgDn` scroll back and `End` returns to the newest output. When it finishes the access URL and key panel token stay pinned above the actions, and on failure the full log is printed once more along with its location on disk.
+The whole run — fetching the project source through to the post-install checks — scrolls inside a single region; `↑/↓` and `PgUp/PgDn` scroll back and `End` returns to the newest output. Failure reasons wrap in full instead of being cut off. When it finishes, the access URL, key panel token and log file path stay on screen rather than scrolling away.
 
 For unattended runs, which do not need the wizard at all: `install.sh install --non-interactive ...` or `install.sh install --quick`.
 

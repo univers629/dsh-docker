@@ -225,6 +225,11 @@ func parseArgs(argv []string) (options, error) {
 // 文件让视图可以随时回看，也让 install.sh 的退出码语义保持干净（它照常写自己的
 // 退出码，视图只负责看）。结束由日志里的标记行表示，而不是靠文件 EOF——
 // install.sh 可能在写入标记后还有收尾动作。
+//
+// 刻意**不用**备用屏幕（与向导相反）：安装结束时用户最需要的是「这一轮给了我什么」
+// ——访问地址、密钥面板令牌、日志路径。备用屏幕会在退出时整屏还原，把这些连同
+// 日志一起抹掉，于是只能退回到「再打到画面之外」，而那已经滚过去了。
+// 留在主屏幕上，最后一帧（日志末尾 + 摘要 + 操作项）就是终端的最后内容。
 func runExecView(opts options) int {
 	model := newExecViewModel(execViewOptions{
 		logPath:     opts.watchLog,
@@ -233,7 +238,7 @@ func runExecView(opts options) int {
 		summary:     opts.watchSummary,
 		summaryPath: opts.watchSummaryFile,
 	})
-	final, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
+	final, err := tea.NewProgram(model).Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "[错误] 日志视图初始化失败："+err.Error())
 		return 1

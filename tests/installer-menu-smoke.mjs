@@ -116,31 +116,46 @@ const missingBin = spawnSync(bash, ['-c',
   'menu-smoke', msys(installScript), msys(proj)], { encoding: 'utf8' })
 assert.notEqual(missingBin.status, 0, '缺少向导二进制时必须失败')
 
-// 7) 执行前的确认摘要页仍要存在，且必须排在镜像/容器动作之前。
-//    执行阶段现在被包进 run_install_execution（它负责把输出收进 TUI 日志视图），
-//    所以断言的是「确认页 → 执行外壳」，再由外壳进到实际动作。
+// 7) 确认摘要页仍要存在，且必须排在镜像/容器动作之前。
+//    安装被拆成两段函数：准备（取源码、装配配置）与执行（拉镜像、起容器、自检）。
+//    拆开是因为两条路径对准备阶段的位置要求不同：向导路径下它与执行阶段连续，
+//    一起收进滚动日志；命令行路径下必须先准备好才能把摘要展示给人看。
 assert.match(
   installSh,
   /confirm_install_plan\(\) \{/,
   'install.sh must define a pre-execution confirmation summary page',
 )
+// 命令行路径：准备 → 确认 → 执行。
 assert.match(
   installSh,
-  /confirm_install_plan\n\s*run_install_execution/,
-  'the confirmation page must run after configuration and before any image or container work',
+  /install_prepare_body \|\| exit \$\?\n\s*confirm_install_plan\n\s*run_install_execution --prepared/,
+  'the confirmation page must run after preparation and before any image or container work',
 )
-// 执行外壳必须调用执行本体；否则安装什么都不会发生。
-assert.match(installSh, /^install_execution_body\(\) \{$/m, 'install.sh 必须定义执行本体')
+// 向导路径：用户已确认过，准备与执行一起进滚动日志。
 assert.match(
   installSh,
-  /run_install_execution\(\) \{[\s\S]{0,3000}install_execution_body/,
-  '执行外壳必须调用执行本体',
+  /if \[ "\$\{DSH_WIZARD_DONE:-\}" = true \]; then[\s\S]{0,300}run_install_execution\n/,
+  '向导路径应跳过确认页，直接进执行视图',
 )
-// 拉镜像这一步必须在执行本体里，而不是绕过它直接出现在主流程。
+
+// 两段本体都必须存在，且各自包含该做的动作。
+assert.match(installSh, /^install_prepare_body\(\) \{$/m, 'install.sh 必须定义准备本体')
+assert.match(installSh, /^install_execute_body\(\) \{$/m, 'install.sh 必须定义执行本体')
 assert.match(
   installSh,
-  /^install_execution_body\(\) \{[\s\S]{0,400}obtain_dsh_image/m,
+  /^install_prepare_body\(\) \{[\s\S]{0,1600}fetch_project/m,
+  '取工程源码必须发生在准备本体内',
+)
+assert.match(
+  installSh,
+  /^install_execute_body\(\) \{[\s\S]{0,600}obtain_dsh_image/m,
   '拉取镜像必须发生在执行本体内',
+)
+// 执行外壳两种模式下都要跑到这两段。
+assert.match(
+  installSh,
+  /run_install_execution\(\) \{[\s\S]{0,4000}install_prepare_body[\s\S]{0,400}install_execute_body/,
+  '执行外壳必须调用准备与执行两段本体',
 )
 assert.match(
   pagesGo,
