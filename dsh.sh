@@ -82,8 +82,8 @@ AUTH_ENABLED=false
 MULTI_USER_ENABLED=false
 EGRESS_ENABLED=false
 
-# 旁路容器去重：isolated 与 multiuser 都会带 dsh-ingress，重复的服务名会让 up 的参数
-# 列表里出现同一项。
+# 旁路容器去重：多个叠加层可能都提到同一个服务，重复的服务名会让 up/stop 的参数列表里
+# 出现同一项。
 add_sidecars() {
   local service
   for service in "$@"; do
