@@ -307,6 +307,33 @@ assert.ok(bootChainCheck.length > 0, 'verifier 必须包含 check_boot_chain')
 assert.match(bootChainCheck, /os\.lstat\(/)
 assert.match(bootChainCheck, /S_IWOTH/)
 assert.doesNotMatch(bootChainCheck, /os\.access\(/)
+
+// 只看属主与权限位还不够：./bin/dsh-supervisor 是宿主绑定挂载（compose 里带 :ro），
+// 属主与权限位来自宿主文件——谁 clone 的就是谁。非 root 用户 clone 时是 1000:1000 0775，
+// 容器里 uid 1000 恰好是 dsh，纯 stat 判定就会在正常部署上报「属主是 dsh、组可写」，
+// 而实际连 unlink 都被只读挂载挡住。所以判定必须排除只读挂载的路径。
+assert.match(
+  files.verifier,
+  /def read_only_mounts\(\)/,
+  'verifier 必须解析 /proc/self/mountinfo 以识别只读挂载',
+)
+assert.match(files.verifier, /\/proc\/self\/mountinfo/, 'read_only_mounts 必须读 mountinfo')
+assert.match(
+  files.verifier,
+  /def is_read_only\(/,
+  'verifier 必须把「路径或其祖先目录是只读挂载」也算作不可写',
+)
+assert.match(
+  bootChainCheck,
+  /is_read_only\(/,
+  'check_boot_chain 必须在判权限位之前排除只读挂载的路径',
+)
+// 祖先目录也要判：只读挂载的粒度是目录，整个 /usr/local/bin 挂成 ro 时下面的文件同样写不动。
+const readOnlyHelper = files.verifier.slice(
+  files.verifier.indexOf('def is_read_only('),
+  files.verifier.indexOf('def check_boot_chain():'),
+)
+assert.match(readOnlyHelper, /os\.path\.dirname\(/, 'is_read_only 必须逐级向上检查祖先目录')
 // 以 root 跑自检时必须先降权再探 apt，否则测的是真实 apt 而不是特权代理这条链路。
 assert.match(files.verifier, /SETPRIV/)
 

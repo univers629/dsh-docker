@@ -34,15 +34,28 @@ const composeFiles = [
   'docker-compose.multiuser.yml',
 ]
 const mounted = new Set()
+const notReadOnly = []
 for (const file of composeFiles) {
   let text
   try { text = readFileSync(join(root, file), 'utf8') } catch { continue }
   // 形如 `- ./bin/dsh-supervisor:/usr/local/bin/dsh-supervisor:ro`
-  for (const m of text.matchAll(/^\s*-\s+\.\/([^:\s]+):[^:\s]+/gm)) {
-    if (m[1].startsWith('bin/')) mounted.add(m[1])
+  for (const m of text.matchAll(/^\s*-\s+\.\/([^:\s]+):([^:\s]+)(:([^\s#]+))?/gm)) {
+    if (!m[1].startsWith('bin/')) continue
+    mounted.add(m[1])
+    // 必须带 :ro。挂载源在宿主机上，属主与权限位跟着 clone 的人走——非 root 用户
+    // clone 时是 1000:1000 0775，容器里 uid 1000 恰好是 dsh，等于把启动链交给运行账户。
+    // 只读挂载是这里唯一挡住写入（含 unlink）的机制，掉了就只剩权限位，而权限位不可控。
+    if (m[4] !== 'ro') notReadOnly.push(`${file}: ${m[1]} -> ${m[2]}`)
   }
 }
 assert.ok(mounted.size > 0, 'expected to find at least one ./bin/... bind mount in the compose files')
+
+assert.deepEqual(
+  notReadOnly,
+  [],
+  'bin/ 下的挂载必须带 :ro：挂载源的属主随 clone 者变化，容器里的运行账户可能正是它，' +
+    '只读挂载才是拦住写入的那一层。缺 :ro 的挂载：\n' + notReadOnly.join('\n'),
+)
 
 for (const rel of mounted) {
   assert.equal(

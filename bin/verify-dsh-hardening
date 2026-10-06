@@ -396,22 +396,70 @@ def run_account():
     return entry.pw_uid, entry.pw_gid
 
 
+def read_only_mounts():
+    """返回以只读方式挂载的路径集合（取自 /proc/self/mountinfo 的第 5、6 列）。
+
+    为什么必须看这个：./bin/dsh-supervisor 是宿主机的绑定挂载（compose 里带 :ro），
+    它的属主与权限位来自宿主文件——宿主机上谁 clone 的就是谁。非 root 用户 clone 时
+    文件是 1000:1000 0775，容器里 uid 1000 恰好是 dsh，只看 stat 就会判成
+    「属主是 dsh、组可写」，而它其实是只读挂载，连 unlink 都会被 EBUSY 挡住。
+    判定必须落到「实际能不能写」，否则会在正常部署上报假失败、把安装卡住。
+    """
+    mounts = set()
+    try:
+        with open("/proc/self/mountinfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.split()
+                # 格式：id parent major:minor root mountpoint options [optional...] - fstype src opts
+                if len(fields) < 6:
+                    continue
+                mountpoint = fields[4]
+                options = fields[5].split(",")
+                if "ro" in options:
+                    mounts.add(mountpoint)
+    except OSError:
+        return mounts
+    return mounts
+
+
+def is_read_only(path, read_only_mounts):
+    """路径自身或其任一祖先目录是只读挂载时返回 True。
+
+    只看路径自身不够：只读挂载的粒度是目录，`/usr/local/bin` 整个挂成 ro 时，
+    它下面的文件同样写不动、也 unlink 不掉。祖先目录也要一起判。
+    """
+    current = os.path.realpath(path)
+    while True:
+        if current in read_only_mounts:
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
 def check_boot_chain():
-    """启动链文件必须是 root 独占写。"""
-    # 这里刻意用属主与权限位判定，而不是 os.access：docker exec 默认就是容器 root，
+    """启动链文件必须对运行账户不可写。"""
+    # 判定用属主与权限位，而不是 os.access：docker exec 默认就是容器 root，
     # root 带着 DAC_OVERRIDE，os.access 会一律报可写，结论就随调用身份漂移了。
     # 看 stat 则无论以谁的身份跑都得到同一个答案。
+    #
+    # 但只看 stat 会漏掉一种同样安全的情况：路径本身是只读挂载。那种情况下
+    # 权限位长什么样都不重要——写入与 unlink 都由内核拒绝。所以先取只读挂载集合。
     try:
         run_uid, run_gid = run_account()
     except KeyError:
         record("boot-chain-immutable", False, f"镜像里没有运行账户 {RUN_USER}")
         return
+    read_only = read_only_mounts()
     problems = []
     for path in BOOT_CHAIN_PATHS:
         try:
             info = os.lstat(path)
         except OSError as error:
             problems.append(f"{path}（无法读取：{error.strerror}）")
+            continue
+        if is_read_only(path, read_only):
             continue
         mode = stat.S_IMODE(info.st_mode)
         if info.st_uid == run_uid:
@@ -425,7 +473,7 @@ def check_boot_chain():
     record(
         "boot-chain-immutable",
         not problems,
-        f"{len(BOOT_CHAIN_PATHS)} 个启动链路径均为 root 独占写，{RUN_USER} 删不掉也改不了"
+        f"{len(BOOT_CHAIN_PATHS)} 个启动链路径对 {RUN_USER} 均为只读（root 独占写或只读挂载）"
         if not problems
         else f"可被 {RUN_USER} 改写的启动链路径：" + "，".join(problems),
     )
