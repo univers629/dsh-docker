@@ -97,6 +97,10 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 这个作业不 checkout：它只需要上一步下载的产物，为发布而拉整个仓库是浪费。
+          # 但 gh 默认从当前目录的 git remote 推断仓库，没有 .git 就会在跑任何子命令
+          # 之前先报 "not a git repository"。GH_REPO 直接告诉它目标仓库。
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -eu
@@ -109,6 +113,8 @@ jobs:
           install.sh 会在运行时自动下载到 ~/.cache/dsh-docker/；拿不到时回退到内置的
           bash 向导，所以不下载这一份也能完成安装，只是界面由纯 shell 渲染。
           NOTES
+          # 上传清单：先列出来再传，便于在日志里核对到底发布了哪些文件。
+          ls -l dist
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
           else
