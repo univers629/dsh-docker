@@ -1,12 +1,11 @@
 // 回归测试：放行门闸在读端已消失时不得阻塞。
 //
-// 现场（真实部署）：用户选「卸载」，向导确认后界面退出，命令行**永久卡住**，
-// 只能 Ctrl+C 或关掉终端。
+// 触发路径：向导里选「卸载」，界面确认后放行门闸并退出。卸载属于维护动作，
+// dsh_exec_body 判定不需要执行、立刻 return，读端随之关闭；bash 的收尾补放行
+// 于是落在「无读端」状态上。
 //
-// 原因：门闸是个 FIFO。向 FIFO 写数据时，写端的 open() 会阻塞到有读端出现。
-// 向导路径下，界面放行一次后执行体就读完并关闭了读端（卸载属于维护动作，
-// dsh_exec_body 判定不需要执行会立刻 return），界面退出后 bash 的收尾补放行
-// 正好落在「无读端」状态上——`printf '\n' > "$gate"` 于是永久挂起。
+// 原因：门闸是个 FIFO。向 FIFO 写数据时，写端的 open() 会阻塞到有读端出现，
+// 无读端时永久挂起——`printf '\n' > "$gate"` 就是这么卡住的。
 //
 // 修法：gate_release 用 `exec 9<>` 以读写方式打开（O_RDWR），进程自身即读端，
 // 因此不会阻塞；有读端时行为不变（照样写入那一行）。
@@ -83,7 +82,7 @@ if [ ! -f "$work/got" ]; then
 fi
 echo "NORMAL_OK"
 
-# 场景 2：读端已消失（用户遇到的挂死场景）
+# 场景 2：读端已消失（卸载路径走到的状态）
 g2="$work/gone"; mkfifo "$g2"
 ( read -r _ < "$g2" || true ) &
 sleep 0.2
@@ -113,7 +112,7 @@ rm -rf "$work"
   }
 
   assert.match(out, /NORMAL_OK/, `有读端时必须送达那一行：\n${out}`)
-  assert.match(out, /NO_READER_OK/, `无读端时不得阻塞（这正是用户遇到的挂死）：\n${out}`)
+  assert.match(out, /NO_READER_OK/, `无读端时不得阻塞（卸载路径走到的状态，阻塞即挂死）：\n${out}`)
   assert.match(out, /SAFE_OK/, `非法输入必须安全返回：\n${out}`)
 } finally {
   rmSync(work, { recursive: true, force: true })

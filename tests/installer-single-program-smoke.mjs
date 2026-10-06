@@ -156,7 +156,7 @@ if (existsSync(leakHelper)) {
 // —— 4) 动态：向导里取消时干净退出 ——
 //
 // 取消路径有个容易漏的坑：Go 在向导阶段被 Ctrl+C 时不会去放行门闸，而后台执行
-// 子 shell 正阻塞在门闸上。若 bash 侧不补一次放行，wait 会永远挂住——用户看到
+// 子 shell 正阻塞在门闸上。若 bash 侧不补一次放行，wait 会永远挂住，表现为
 // 「取消了但命令不返回」。这里断言退出码是 3（exitCancelled）。
 const cancelHelper = join(root, 'tests', 'helpers', 'cancel-check.py')
 if (existsSync(cancelHelper)) {
