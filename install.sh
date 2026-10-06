@@ -4566,6 +4566,20 @@ dsh_exec_body() {
   install_execute_body
 }
 
+# 放行门闸：往 FIFO 写一行，让阻塞在 read 上的执行体继续。
+#
+# 用 `exec 9<>` 而不是 `printf > "$gate"`：后者的写端 open() 在没有读端时会**永久
+# 阻塞**，而补放行恰恰发生在这种状态——执行体可能已经读完并退出（例如它判定本轮
+# 不需要执行、直接 return，用户选「卸载」就是这种情况），此时 FIFO 已无读端，
+# 整个安装脚本就卡死在这一行上。以读写方式打开则不阻塞：进程自身就是读端。
+gate_release() {
+  local gate="${1:-}"
+  [ -n "$gate" ] && [ -p "$gate" ] || return 0
+  exec 9<>"$gate" 2>/dev/null || return 0
+  printf '\n' >&9 2>/dev/null || true
+  exec 9>&- 2>/dev/null || true
+}
+
 # 执行阶段的外壳：执行本体在后台等门闸，界面由 Go 承载（可能含向导）。
 #
 # 参数：
@@ -4665,7 +4679,7 @@ run_install_execution() {
   # 命令行路径没有向导，门闸没人会开，所以由 bash 自己放行。放在后台启动**之后**：
   # 先开写端会在没有读端时阻塞在这里，而执行体还没起来。
   if [ "$guided" != true ]; then
-    printf '\n' > "$gate" 2>/dev/null || true
+    gate_release "$gate"
   fi
 
   # 向导与执行视图在同一个程序里，全程只进出一次备用屏幕。
@@ -4686,7 +4700,11 @@ run_install_execution() {
 
   # 界面半路失败时不会去放行（例如向导还没确认就 Ctrl+C 了），这里补一次，
   # 否则 wait 会永远挂住——执行体现在正阻塞在门闸上。
-  printf '\n' > "$gate" 2>/dev/null || true
+  #
+  # 必须用 gate_release 而不是 `printf > "$gate"`：执行体可能**已经**读完并退出了
+  #（例如它判定本轮不需要执行、直接 return），此时 FIFO 没有读端，
+  # 普通写端 open() 会永久阻塞，整个安装就卡死在这里。
+  gate_release "$gate"
   wait "$body_pid" 2>/dev/null || true
   rm -f "$gate"
 
