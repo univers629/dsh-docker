@@ -49,18 +49,9 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | i
 
 ### 向导的实现
 
-向导是一个独立的 Go 二进制 `dsh-installer`，用 Bubble Tea 承载界面（与 dpanel 安装器同一 TUI 框架）：占用终端的备用屏幕缓冲，翻页时只重绘变化的行，退出后终端恢复原样。安装时自动下载到 `~/.cache/dsh-docker/`，由 [.github/workflows/build-installer.yml](.github/workflows/build-installer.yml) 构建并发布到 GitHub Release。
+向导是一个独立的 Go 二进制 `dsh-installer`，安装时自动下载到 `~/.cache/dsh-docker/`。界面与安装逻辑分离：向导只负责收集答案，安装仍由 `install.sh` 执行，因此 `curl | bash`（脚本没有文件路径）也能用。向导问过的内容不会再在终端里问第二遍。
 
-界面与安装逻辑分离：向导只负责收集答案（写成一份 `KEY=VALUE` 文件），安装仍由 `install.sh` 执行。这样 `curl | bash`（脚本没有文件路径）也能用，且安装逻辑只有一份。向导问过的内容不会再在终端里问第二遍。
-
-执行阶段同样在 TUI 里：拉镜像、起容器、加固自检的过程在一个固定区域内滚动显示，上方是日志、下方是状态与操作项，`↑/↓` 与 `PgUp/PgDn` 可以回看，`End` 回到最新。跑完后访问地址、密钥面板令牌这些关键信息固定在操作区上方，不会被后续输出顶出屏幕；失败时会额外把完整日志打印一遍，并告诉你日志文件的位置。设置 `DSH_NO_EXEC_VIEW=1` 可以让执行阶段回到直接输出到终端的旧行为。
-
-拿不到二进制时安装器直接报错并给出修复方式，**不提供第二套界面**：两套界面意味着两套体验。离线或受限网络时可指定镜像源，或预先放好二进制：
-
-```sh
-DSH_INSTALLER_BASE=https://<你的镜像>/releases/download bash install.sh
-DSH_INSTALLER_BIN=/path/to/dsh-installer bash install.sh
-```
+执行阶段（拉镜像、起容器、加固自检）在一个固定区域内滚动显示，`↑/↓` 与 `PgUp/PgDn` 可以回看，`End` 回到最新。跑完后访问地址、密钥面板令牌固定在操作区上方，不会被后续输出顶出屏幕；失败时会把完整日志打印一遍并告知日志文件位置。
 
 不需要交互时用无人值守参数，它不依赖向导：`install.sh install --non-interactive ...` 或 `install.sh install --quick`。
 

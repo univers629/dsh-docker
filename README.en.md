@@ -49,18 +49,9 @@ The container root password is stored only as a sha512crypt hash in `data/secret
 
 ### How the wizard is implemented
 
-The wizard is a standalone Go binary, `dsh-installer`, built on Bubble Tea — the same TUI framework the dpanel installer uses. It takes over the terminal's alternate screen buffer and redraws only the lines that changed; the original screen is restored on exit. It is downloaded to `~/.cache/dsh-docker/` during installation and is built and published to GitHub Releases by [.github/workflows/build-installer.yml](.github/workflows/build-installer.yml).
+The wizard is a standalone Go binary, `dsh-installer`, downloaded to `~/.cache/dsh-docker/` during installation. Interface and installation logic are separate: the wizard only collects answers and `install.sh` performs the installation, which keeps `curl | bash` (where the script has no path) working and means nothing the wizard already asked is asked a second time in the terminal.
 
-Interface and installation logic are separate: the wizard only collects answers (written to a `KEY=VALUE` file) and `install.sh` performs the installation. That keeps `curl | bash` (where the script has no path) working, keeps a single copy of the installation logic, and means nothing the wizard already asked is asked a second time in the terminal.
-
-The execution phase runs in the TUI too: pulling the image, starting the container, and the hardening checks scroll inside a fixed region, with status and actions below; `↑/↓` and `PgUp/PgDn` scroll back and `End` returns to the newest output. When it finishes, the access URL and key panel token stay pinned above the actions instead of scrolling away, and on failure the full log is printed once more along with its location on disk. Set `DSH_NO_EXEC_VIEW=1` to send the execution phase straight to the terminal instead.
-
-When the binary cannot be fetched the installer fails with repair instructions instead of falling back to a second interface, because two interfaces mean two experiences. On an offline or restricted network, point it at a mirror or pre-place the binary:
-
-```sh
-DSH_INSTALLER_BASE=https://<your-mirror>/releases/download bash install.sh
-DSH_INSTALLER_BIN=/path/to/dsh-installer bash install.sh
-```
+The execution phase — pulling the image, starting the container, the hardening checks — scrolls inside a fixed region; `↑/↓` and `PgUp/PgDn` scroll back and `End` returns to the newest output. When it finishes the access URL and key panel token stay pinned above the actions, and on failure the full log is printed once more along with its location on disk.
 
 For unattended runs, which do not need the wizard at all: `install.sh install --non-interactive ...` or `install.sh install --quick`.
 
