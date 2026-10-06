@@ -468,12 +468,16 @@ prompt_secret() {
 DSH_INSTALLER_VERSION="0.1.0"
 DSH_INSTALLER_BASE="${DSH_INSTALLER_BASE:-https://github.com/univers629/dsh-docker/releases/download}"
 
-# 把 dsh-installer 放到缓存目录并打印它的路径；拿不到就返回非零（调用方回退）。
+# 把 dsh-installer 放到缓存目录并打印它的路径。
 #
-# 查找顺序：显式路径 → 工程内已构建的产物 → 缓存 → 下载。最后一个失败即回退，
-# 不做重试：这条路径本来就是「有则更好」，不该拖慢安装。
+# 查找顺序：显式路径 → 工程内构建产物 → 缓存 → 下载。
+#
+# 缓存按「内容摘要」寻址而不是按版本号：文件名里带上发布清单里的 SHA256 前缀。
+# 这一段是踩过坑的——早先缓存名只由版本号与架构决定，同一版本号下重发二进制后，
+# 旧缓存会永远命中，用户拿到的是上一版向导却以为是新的。按内容寻址后，
+# 只要发布物变了，缓存名就变，旧文件自然失效。
 dsh_installer_path() {
-  local arch url dest cache
+  local arch cache manifest want dest url got
   if [ -n "${DSH_INSTALLER_BIN:-}" ] && [ -x "$DSH_INSTALLER_BIN" ]; then
     printf '%s' "$DSH_INSTALLER_BIN"
     return 0
@@ -486,26 +490,111 @@ dsh_installer_path() {
   case "$(uname -m)" in
     x86_64|amd64) arch=amd64 ;;
     aarch64|arm64) arch=arm64 ;;
-    *) return 1 ;;
+    *) arch="" ;;
   esac
   cache="${XDG_CACHE_HOME:-$HOME/.cache}/dsh-docker"
-  dest="$cache/dsh-installer-$DSH_INSTALLER_VERSION-$arch"
-  if [ -x "$dest" ]; then
+  mkdir -p "$cache" 2>/dev/null || true
+
+  # 先取发布清单，拿到这份二进制应有的 SHA256。
+  # 拿不到清单（离线、镜像源没放）时退回「版本号+架构」命名，并允许离线使用。
+  manifest=""
+  want=""
+  if command -v curl >/dev/null 2>&1; then
+    manifest="$(curl -fsSL --max-time 30 "$DSH_INSTALLER_BASE/v$DSH_INSTALLER_VERSION/SHA256SUMS" 2>/dev/null || true)"
+    if [ -n "$manifest" ]; then
+      # SHA256SUMS 的格式是 "<hash>  <文件名>"（两空格），所以文件名是第 2 列。
+      # tr -d '\r' 去掉行尾 CR：某些环境（Windows 上的 Git Bash、被中间设备改写的
+      # 响应）会在行尾带 \r，它会被并进哈希值，导致校验必然失败。
+      want="$(printf '%s\n' "$manifest" | tr -d '\r' | awk -v f="dsh-installer-linux-$arch" '$2 == f { print $1 }')"
+    fi
+  fi
+
+  if [ -n "$want" ]; then
+    # 内容寻址：文件名里带摘要前缀（12 位足以区分），发布物一变缓存名就变。
+    dest="$cache/dsh-installer-$DSH_INSTALLER_VERSION-$arch-$(printf '%s' "$want" | cut -c1-12)"
+    if cache_candidate_ok "$dest"; then
+      printf '%s' "$dest"
+      return 0
+    fi
+    url="$DSH_INSTALLER_BASE/v$DSH_INSTALLER_VERSION/dsh-installer-linux-$arch"
+    if ! curl -fsSL --max-time 120 "$url" -o "$dest.tmp" 2>/dev/null; then
+      rm -f "$dest.tmp"
+      return 1
+    fi
+    # 校验：下载到的东西必须与清单一致，否则说明发布物被替换或传输损坏。
+    # 用重定向而不是传路径：GNU sha256sum 在文件名含反斜杠时会给整行加 `\` 转义
+    # 前缀，那样 awk 取到的「哈希」会多一个字符而使校验永远失败。从 stdin 读时
+    # 文件名恒为 `-`，不触发转义。
+    got="$(sha256sum < "$dest.tmp" 2>/dev/null | awk '{print $1}')"
+    if [ -z "$got" ] || [ "$got" != "$want" ]; then
+      rm -f "$dest.tmp"
+      echo "[错误] 向导二进制校验失败：期望 $want，实际 ${got:-（无法计算）}。" >&2
+      echo "       可能是下载被中间设备改写，或镜像源上的文件与 SHA256SUMS 不同步。" >&2
+      return 1
+    fi
+    chmod +x "$dest.tmp" 2>/dev/null || { rm -f "$dest.tmp"; return 1; }
+    mv -f "$dest.tmp" "$dest"
     printf '%s' "$dest"
     return 0
   fi
-  command -v curl >/dev/null 2>&1 || return 1
-  local url="$DSH_INSTALLER_BASE/v$DSH_INSTALLER_VERSION/dsh-installer-linux-$arch"
-  mkdir -p "$cache" 2>/dev/null || return 1
-  if ! curl -fsSL --max-time 60 "$url" -o "$dest.tmp" 2>/dev/null; then
-    rm -f "$dest.tmp"
-    return 1
+
+  # 拿不到清单（离线、镜像源没放 SHA256SUMS）。
+  # 优先级：先尝试下载一份新的，失败再用缓存。
+  # 反过来（先用缓存）会让陈旧缓存永远胜出——用户的网络明明是通的，却因为磁盘上
+  # 那份旧文件而一直看到上一版界面，而且无从发现。新的下载即使没校验，
+  # 也比「确定过时的缓存」更接近用户要的东西。
+  command -v curl >/dev/null 2>&1 || {
+    # 连 curl 都没有，只能看缓存。
+    use_unverified_cache "$cache" "$DSH_INSTALLER_VERSION" "$arch"
+    return $?
+  }
+  dest="$cache/dsh-installer-$DSH_INSTALLER_VERSION-$arch"
+  url="$DSH_INSTALLER_BASE/v$DSH_INSTALLER_VERSION/dsh-installer-linux-$arch"
+  if curl -fsSL --max-time 120 "$url" -o "$dest.tmp" 2>/dev/null; then
+    chmod +x "$dest.tmp" 2>/dev/null || { rm -f "$dest.tmp"; return 1; }
+    mv -f "$dest.tmp" "$dest"
+    echo "[注意] 已下载向导但无法校验（拿不到 SHA256SUMS）。" >&2
+    printf '%s' "$dest"
+    return 0
   fi
-  chmod +x "$dest.tmp" 2>/dev/null || { rm -f "$dest.tmp"; return 1; }
-  mv -f "$dest.tmp" "$dest"
-  printf '%s' "$dest"
+  rm -f "$dest.tmp"
+  use_unverified_cache "$cache" "$DSH_INSTALLER_VERSION" "$arch"
 }
 
+# 判断缓存里的候选是否可用。
+#
+# 不只看 -x：Windows 上（Git Bash、WSL 挂载的 NTFS 卷）文件的可执行位由扩展名
+# 决定，无扩展名的文件永远不是 -x，会让缓存判定恒假。这里用「是普通文件且非空」
+# 作为判据——真正的可执行性在调用前由 chmod 保证（下载后立刻 chmod +x）。
+cache_candidate_ok() {
+  local f="$1"
+  [ -f "$f" ] || return 1
+  [ -s "$f" ] || return 1
+  case "$f" in
+    *.tmp) return 1 ;;
+  esac
+  return 0
+}
+
+# 在拿不到 SHA256SUMS 时退回本地缓存，并明确告知未经校验。
+# 单独成函数：这条降级路径要在「下载失败」和「没有 curl」两处使用。
+use_unverified_cache() {
+  local cache="$1" version="$2" arch="$3" candidate=""
+  # 内容寻址的缓存（带摘要后缀）优先于旧命名：前者的内容至少被校验过一次。
+  for candidate in "$cache/dsh-installer-$version-$arch"-*; do
+    cache_candidate_ok "$candidate" || continue
+    echo "[注意] 使用缓存的向导 $candidate（未校验：拿不到 SHA256SUMS）。" >&2
+    printf '%s' "$candidate"
+    return 0
+  done
+  candidate="$cache/dsh-installer-$version-$arch"
+  if cache_candidate_ok "$candidate"; then
+    echo "[注意] 使用缓存的向导 $candidate（未校验：拿不到 SHA256SUMS）。" >&2
+    printf '%s' "$candidate"
+    return 0
+  fi
+  return 1
+}
 # 用 dsh-installer 跑向导，并把答案读进当前 shell 的 _OVERRIDE 变量。
 #
 # 答案经临时文件中转：界面占用备用屏幕，写 stdout 会与画面互相干扰；退出向导、
