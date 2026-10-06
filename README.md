@@ -37,7 +37,7 @@ Windows PowerShell（需要 Docker Desktop 并切换到 Linux containers）：
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-两条命令都进入分页向导：逐页选择镜像来源、访问保护方式、出站模式、模型密钥等，最后一页是执行前的确认摘要，答「否」时这一轮不写任何文件。常用参数：
+两条命令都进入分页向导：逐页选择镜像来源、访问保护方式、出站模式、密钥代理与密钥管理面板等，最后一页是执行前的确认摘要，答「否」时这一轮不写任何文件。模型密钥本身不在终端里填写，统一在密钥管理面板的浏览器界面完成。常用参数：
 
 - `install --quick`：一键安装（Basic Auth + 随机账密 + 关闭密钥代理），零提问，装完打印访问地址与凭据。
 - `install --non-interactive`：无人值守，不提问、不生成随机凭据，配置取自参数与安全默认值。
@@ -47,16 +47,20 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | i
 
 容器 root 密码只以 sha512crypt 哈希写入 `data/secret/root.hash`，Basic Auth 密码只以 bcrypt 哈希写入 `data/auth/htpasswd`，两者都不写入 `.env`。安装过程不使用特权容器、不挂载 Docker socket、不授予宿主机 root。
 
-### 向导的两种实现
+### 向导的实现
 
-向导有两套实现，页面序列与最终参数完全一致：
+向导是一个独立的 Go 二进制 `dsh-installer`，用 Bubble Tea 承载界面（与 dpanel 安装器同一 TUI 框架）：占用终端的备用屏幕缓冲，翻页时只重绘变化的行，退出后终端恢复原样。安装时自动下载到 `~/.cache/dsh-docker/`，由 [.github/workflows/build-installer.yml](.github/workflows/build-installer.yml) 构建并发布到 GitHub Release。
 
-1. `dsh-installer`：Go 二进制，用 Bubble Tea 承载界面（与 dpanel 安装器同一 TUI 框架）。界面占用终端的备用屏幕缓冲，翻页时只重绘变化的行，不整屏刷新；退出后终端恢复原样。安装时自动下载到 `~/.cache/dsh-docker/`。
-2. `install.sh` 内置的 bash 实现：同一套页面的纯 shell 版本。
+界面与安装逻辑分离：向导只负责收集答案（写成一份 `KEY=VALUE` 文件），安装仍由 `install.sh` 执行。这样 `curl | bash`（脚本没有文件路径）也能用，且安装逻辑只有一份。向导问过的内容不会再在终端里问第二遍。
 
-拿不到二进制时（离线、受限网络、架构不支持）自动回退到第 2 套，安装照常完成，只是渲染由 bash 完成。二进制由 [.github/workflows/build-installer.yml](.github/workflows/build-installer.yml) 构建并发布到 GitHub Release，可用 `DSH_INSTALLER_BASE` 指向自己的镜像源。
+拿不到二进制时安装器直接报错并给出修复方式，**不提供第二套界面**：两套界面意味着两套体验。离线或受限网络时可指定镜像源，或预先放好二进制：
 
-界面与安装逻辑分离：向导只负责收集答案，安装仍由 `install.sh` 执行。这样 `curl | bash`（脚本没有文件路径）也能用，且安装逻辑只有一份。
+```sh
+DSH_INSTALLER_BASE=https://<你的镜像>/releases/download bash install.sh
+DSH_INSTALLER_BIN=/path/to/dsh-installer bash install.sh
+```
+
+不需要交互时用无人值守参数，它不依赖向导：`install.sh install --non-interactive ...` 或 `install.sh install --quick`。
 
 ### 受限网络下构建镜像
 

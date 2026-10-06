@@ -1,8 +1,14 @@
-// 回归：已有部署上必须能进主菜单做维护（更新/删除），而不是撞上"容器已存在"就死路。
+// 回归：向导是唯一入口，且它的页面定义必须完整。
 //
-// 为什么必须这样测：无 TTY 的 curl|bash 直灌默认走一键安装，那时主菜单根本不出现；
-// 而服务器上的旧部署正是这个场景——用户想更新或卸载，却只看到"容器已经存在"的报错。
-// --menu 是显式入口，必须即使没有 TTY 也能进入交互，且菜单要标出"安装"当前走不通。
+// 历史背景：主菜单曾在 install.sh 里用 bash 实现，--menu 可以靠管道喂数字驱动它。
+// 那个实现已被删除——向导现在全部由 dsh-installer（Go + Bubble Tea）承担，
+// install.sh 拿不到二进制时直接报错退出，不再有第二套界面。
+//
+// 因此这里断言的是新的契约：
+//   1. 页面（主菜单、更新分层、安装方式、删除确认、确认摘要）都在 Go 里定义且齐全
+//   2. install.sh 不再含任何 bash 版菜单/问答
+//   3. 拿不到向导二进制时报错信息要给出可执行的修复方式
+//   4. 无终端且无显式动作时仍然拒绝，并给出无人值守的两条出路
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
@@ -18,11 +24,65 @@ const bash = process.platform === 'win32'
   : 'bash'
 assert.ok(bash, 'bash is required for the menu smoke test')
 
+const installSh = readFileSync(installScript, 'utf8')
+const pagesGo = readFileSync(join(root, 'cmd', 'dsh-installer', 'pages.go'), 'utf8')
+const installPs1 = readFileSync(join(root, 'install.ps1'), 'utf8')
+
+// 1) 主菜单与各分支页必须在 Go 里齐备。
+const goPages = [
+  ['actionPage', '主菜单'],
+  ['updateModePage', '更新分层'],
+  ['installModePage', '安装方式（一键/手动）'],
+  ['deleteScopePage', '删除数据范围'],
+  ['deleteConfirmPage', '删除确认'],
+  ['confirmPage', '执行前确认摘要'],
+  ['accessModePage', '访问保护方式'],
+  ['egressPage', '出站模式'],
+  ['proxyLocationPage', '反向代理位置'],
+  ['rootPasswordPage', '容器 root 密码'],
+]
+for (const [fn, label] of goPages) {
+  assert.match(pagesGo, new RegExp(`func ${fn}\\(\\) page`), `向导缺少页面：${label}（${fn}）`)
+}
+// 主菜单的动作必须与 install.sh 支持的 ACTION 取值一一对应。
+for (const action of ['install', 'update', 'start', 'stop', 'restart', 'logs', 'status', 'delete', 'model-key', 'key-panel']) {
+  assert.ok(pagesGo.includes(`{"${action}"`), `主菜单缺少动作：${action}`)
+}
+
+// 2) 删除确认是显式的选择项，且默认光标停在「取消」——不可逆操作不该被回车误触。
+assert.match(pagesGo, /deleteConfirmPage/, '向导必须有删除确认页')
+const deletePage = pagesGo.slice(pagesGo.indexOf('func deleteConfirmPage'))
+const cancelIdx = deletePage.indexOf('{"no", "取消"')
+const confirmIdx = deletePage.indexOf('{"yes", "确认删除"')
+assert.ok(cancelIdx >= 0 && confirmIdx >= 0, '删除确认页必须同时提供「取消」与「确认删除」')
+assert.ok(cancelIdx < confirmIdx, '「取消」必须排在第一位，使默认光标落在取消上')
+
+// 3) install.sh 不应再含 bash 版菜单与手输确认。
+for (const gone of ['ui_page_select "选择操作"', 'ui_page_select "安装方式"', 'ui_page_select "更新哪一层"', '请输入 DELETE 继续']) {
+  assert.ok(!installSh.includes(gone), `install.sh 不该再有 bash 版界面：${gone}`)
+}
+// 删除确认改为由向导回传 delete_confirmed。
+assert.match(installSh, /delete_confirmed\) DSH_DELETE_CONFIRMED=1/, 'install.sh 必须接受向导的删除确认')
+assert.match(installSh, /DSH_WIZARD_DONE=true/, 'install.sh 必须在读入答案后标记向导已完成')
+
+// 4) 拿不到向导二进制时，报错要给出可执行的修复方式，而不是静默回退。
+const installerFn = installSh.slice(
+  installSh.indexOf('dsh_installer_run()'),
+  installSh.indexOf('dsh_installer_run()') + 4000,
+)
+assert.match(installerFn, /无法获取安装向导/, '拿不到二进制时必须明确报错')
+assert.match(installerFn, /DSH_INSTALLER_BASE/, '报错必须给出镜像源覆盖方式')
+assert.match(installerFn, /DSH_INSTALLER_BIN/, '报错必须给出本地二进制的指定方式')
+assert.match(installerFn, /--non-interactive/, '报错必须给出无人值守的出路')
+assert.match(installerFn, /--quick/, '报错必须给出快速安装的出路')
+// 不再有「回退到 bash 向导」的分支：成功路径直接调用，不套 if/else 兜底。
+assert.match(installSh, /^\s+dsh_installer_run$/m, '向导调用不应再包在回退分支里')
+
+// 5) 无终端、无显式动作时仍然拒绝，并给出两条出路。
+//    这一条不依赖向导二进制：守卫在向导之前就短路了。
 const sandbox = await mkdtemp(join(tmpdir(), 'dsh-menu-smoke-'))
 const mockBin = join(sandbox, 'bin')
 await mkdir(mockBin)
-
-// docker 桩：让"容器已存在"成立，且不真的调 docker
 await writeFile(join(mockBin, 'docker'), `#!/bin/sh
 case "\${1:-}" in
   compose) exit 0 ;;
@@ -34,33 +94,11 @@ exit 0
 `)
 await chmod(join(mockBin, 'docker'), 0o755)
 
-// 工程目录：避免走到 fetch_project（它会去拉远端源码）
 const proj = join(sandbox, 'proj')
 await mkdir(proj)
 await writeFile(join(proj, 'docker-compose.yml'), 'services: {}\n')
-
-const run = (args, input) => spawnSync(bash, ['-c', `export PATH="${mockBin}:$PATH"; exec "$1" "$@"`, 'menu-smoke', installScript, ...args], {
-  input: input ?? '',
-  encoding: 'utf8',
-})
 const msys = (p) => p.replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`).replaceAll('\\', '/')
 
-// 1) --menu 必须画出主菜单，更新与删除都可选
-const withMenu = spawnSync(bash, ['-c',
-  `export PATH="${msys(mockBin)}:$PATH"; exec "$1" --menu --dir "$2" <<'EOF'\n2\n1\nEOF`,
-  'menu-smoke', msys(installScript), msys(proj)], { encoding: 'utf8' })
-const menuOut = `${withMenu.stdout}${withMenu.stderr}`
-assert.match(menuOut, /选择操作/, 'the main menu page must be shown with --menu')
-assert.match(menuOut, /更新/, 'the menu must offer update')
-assert.match(menuOut, /卸载/, 'the menu must offer uninstall')
-assert.match(menuOut, /安装/, 'the menu must offer install')
-assert.match(menuOut, /更新哪一层|只更新容器内的 DSH/, 'choosing update must reach the update submenu')
-
-// 2) 有容器时，菜单里要说明"安装"当前不可用，而不是让人选了才报错
-assert.match(menuOut, /安装（当前不可用/, 'the menu must mark install unavailable while a container exists')
-
-// 3) 没有终端、也没有显式动作时必须报错，并指出两条出路。
-//    旧契约（无 TTY ⇒ 隐式一键安装）已废弃：默认动作是显示向导。
 const noMenu = spawnSync(bash, ['-c',
   `export PATH="${msys(mockBin)}:$PATH"; exec "$1" --dir "$2" </dev/null`,
   'menu-smoke', msys(installScript), msys(proj)], { encoding: 'utf8' })
@@ -70,23 +108,15 @@ assert.match(errOut, /--quick/, 'the error must offer the quick-install escape h
 assert.match(errOut, /--non-interactive/, 'the error must offer the unattended escape hatch')
 assert.equal(noMenu.status, 2, 'the guard exits non-zero')
 
-// 3b) 有终端（--menu）时才进主菜单；容器已存在时该页把「安装」标注为不可用。
-//     容器存在守卫本身仍由安装路径执行，这里断言的是它在菜单里被提前说明。
-assert.match(menuOut, /容器已存在/, 'the menu must say why install is unavailable')
-
-// 4) 安装分支里必须能选「一键安装」与「手动配置」——一键不再是靠 TTY 隐式决定的
-const installPage = spawnSync(bash, ['-c',
-  `export PATH="${msys(mockBin)}:$PATH"; exec "$1" --menu --dir "$2" <<'EOF'\n1\n1\nEOF`,
+// 6) 有终端但拿不到向导二进制时，也必须失败并说明原因（不静默回退）。
+//    这里用 DSH_INSTALLER_BIN 指向不存在的路径来模拟。
+const missingBin = spawnSync(bash, ['-c',
+  `export PATH="${msys(mockBin)}:$PATH"; export DSH_INSTALLER_BIN=/nonexistent/dsh-installer; ` +
+  `exec "$1" --dir "$2" </dev/null`,
   'menu-smoke', msys(installScript), msys(proj)], { encoding: 'utf8' })
-const installOut = `${installPage.stdout}${installPage.stderr}`
-assert.match(installOut, /安装方式|一键安装/, 'the install branch must offer a quick-install page')
-assert.match(installOut, /手动配置/, 'the install branch must offer manual configuration')
+assert.notEqual(missingBin.status, 0, '缺少向导二进制时必须失败')
 
-// 5) 执行前的确认摘要页必须存在（对齐 dpanel 安装器第 7 页「确认是否执行」）。
-//    这条断言的是「配置问完、写盘之前会停下来让人看一眼」，所以只检查结构，
-//    不触发真实安装。
-const installSh = readFileSync(installScript, 'utf8')
-const installPs1 = readFileSync(join(root, 'install.ps1'), 'utf8')
+// 7) 执行前的确认摘要页仍要存在（结构断言，不触发真实安装）。
 assert.match(
   installSh,
   /confirm_install_plan\(\) \{/,
@@ -98,8 +128,8 @@ assert.match(
   'the confirmation page must run after configuration and before any image or container work',
 )
 assert.match(
-  installSh,
-  /"yes\t是\t执行当前操作"/,
+  pagesGo,
+  /\{"yes", "是", "执行当前操作"\}/,
   'the confirmation page must offer an explicit yes/no choice',
 )
 assert.match(

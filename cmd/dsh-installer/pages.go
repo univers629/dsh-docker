@@ -77,8 +77,41 @@ func deleteScopePage() page {
 			return false
 		},
 		next: func(m *wizardModel) *page {
-			p := confirmPage()
+			p := deleteConfirmPage()
 			return &p
+		},
+	}
+}
+
+// deleteConfirmPage 是不可逆操作的最终闸门：用选择项而非手输单词。
+//
+// 早先这一步在 install.sh 里要求手输 DELETE。放进向导后改成显式的两项选择：
+// 默认光标停在「取消」，所以回车不会误删；要删除必须主动按 ↑ 移到「确认删除」。
+func deleteConfirmPage() page {
+	return page{
+		kind:  pageConfirm,
+		title: "确认删除",
+		choices: []choice{
+			{"no", "取消", "不执行删除，退出向导"},
+			{"yes", "确认删除", "按上面选的范围立即清理，不可恢复"},
+		},
+		summary: func(m *wizardModel) []string {
+			scope := "全部删除"
+			if m.answers["delete_keep"] == "1" {
+				scope = "保留会话、工作目录和插件"
+			}
+			return []string{
+				"数据范围: " + scope,
+				"将删除: dsh 容器、DSH 镜像、本项目 Compose 挂载和网络、全局 Docker 构建缓存",
+			}
+		},
+		apply: func(m *wizardModel, v string) bool {
+			if v != "yes" {
+				m.aborted = true
+				return true
+			}
+			m.answers["delete_confirmed"] = "yes"
+			return true
 		},
 	}
 }
@@ -141,10 +174,101 @@ func accessModePage() page {
 			return false
 		},
 		next: func(m *wizardModel) *page {
-			if m.answers["access"] == "password" {
+			switch m.answers["access"] {
+			case "trusted-proxy":
+				// 这个模式的边界必须让人确认过：容器内没有任何认证，
+				// 直连源站 IP 即可绕过外层入口。
+				p := trustedProxyAckPage()
+				return &p
+			case "basic":
+				p := basicAuthPage()
+				return &p
+			case "password":
 				p := userModePage()
 				return &p
 			}
+			p := egressPage()
+			return &p
+		},
+	}
+}
+
+// trustedProxyAckPage 是 trusted-proxy 模式的风险确认。
+//
+// 默认光标停在「返回改选」：这个模式的默认结局是「无锁」，不该因为一路回车而选中。
+func trustedProxyAckPage() page {
+	return page{
+		kind:  pageConfirm,
+		title: "确认 trusted-proxy 的风险",
+		choices: []choice{
+			{"back", "返回改选其它模式", "改用 basic 或 local，容器内保留一道认证"},
+			{"ack", "我已了解并继续", "外层认证之外另有不依赖 IP/Host 的防护"},
+		},
+		summary: func(m *wizardModel) []string {
+			return []string{
+				"容器内不做认证：直连源站 IP 不经过 Cloudflare Access，等于没有锁",
+				"源站 IP 通常会被 Shodan / Censys 按证书信息索引，应按「已公开」设计防护",
+				"DSH_TRUSTED_HOSTS 只是 cookie 绑定键，不是访问白名单",
+				"自检: curl -k -i -H \"Host: <你的域名>\" https://<源站IP>/  返回 200 即为可绕过",
+			}
+		},
+		apply: func(m *wizardModel, v string) bool {
+			if v == "ack" {
+				m.answers["trusted_proxy_ack"] = "yes"
+			}
+			return false
+		},
+		next: func(m *wizardModel) *page {
+			if m.answers["trusted_proxy_ack"] != "yes" {
+				p := accessModePage()
+				return &p
+			}
+			p := egressPage()
+			return &p
+		},
+	}
+}
+
+// basicAuthPage 收集 Basic Auth 用户名与密码。
+//
+// 用户名与密码分两页，密码页用掩码输入；两页都校验，避免把不合规的值交给
+// install.sh 再报一次错（那会把用户困在一次注定失败的安装里）。
+func basicAuthPage() page {
+	return page{
+		kind:        pageInput,
+		title:       "Basic Auth 用户名",
+		label:       "用户名（字母、数字、点、下划线、连字符）",
+		placeholder: "默认 dsh",
+		apply: func(m *wizardModel, v string) bool {
+			if v == "" {
+				v = "dsh"
+			}
+			m.answers["basic_user"] = v
+			return false
+		},
+		next: func(m *wizardModel) *page {
+			p := basicPasswordPage()
+			return &p
+		},
+	}
+}
+
+func basicPasswordPage() page {
+	return page{
+		kind:  pageSecret,
+		title: "Basic Auth 密码",
+		label: "密码（至少 12 个字符）",
+		validate: func(v string) string {
+			if len([]rune(v)) < 12 {
+				return "密码至少需要 12 个字符。"
+			}
+			return ""
+		},
+		apply: func(m *wizardModel, v string) bool {
+			m.answers["basic_password"] = v
+			return false
+		},
+		next: func(m *wizardModel) *page {
 			p := egressPage()
 			return &p
 		},
@@ -249,6 +373,28 @@ func egressPage() page {
 			return false
 		},
 		next: func(m *wizardModel) *page {
+			if m.answers["egress"] == "allowlist" {
+				p := egressAllowPage()
+				return &p
+			}
+			p := modelBrokerPage()
+			return &p
+		},
+	}
+}
+
+// egressAllowPage 收集 allowlist 模式下的额外放行域名。
+func egressAllowPage() page {
+	return page{
+		kind:        pageInput,
+		title:       "额外放行的域名",
+		label:       "逗号分隔，支持 *.example.com",
+		placeholder: "留空表示只用内置白名单（覆盖 Debian、npm、PyPI、GitHub、ghcr.io 等）",
+		apply: func(m *wizardModel, v string) bool {
+			m.answers["egress_allow"] = v
+			return false
+		},
+		next: func(m *wizardModel) *page {
 			p := modelBrokerPage()
 			return &p
 		},
@@ -307,6 +453,35 @@ func proxyLocationPage() page {
 		},
 		apply: func(m *wizardModel, v string) bool {
 			m.answers["proxy"] = v
+			return false
+		},
+		next: func(m *wizardModel) *page {
+			if m.answers["proxy"] == "docker" {
+				p := proxyNetworkPage()
+				return &p
+			}
+			p := bindHostPage()
+			return &p
+		},
+	}
+}
+
+// proxyNetworkPage 收集反向代理所在的 Docker 网络名。
+//
+// 这一步在 bash 版里是「列出宿主机现有网络再让人选」，需要访问 Docker。向导不碰
+// Docker（它只收集答案），所以改成文本输入并给出默认值：dsh-proxy。
+// install.sh 收到这个名字后会自己检查网络是否存在，不存在时创建。
+func proxyNetworkPage() page {
+	return page{
+		kind:        pageInput,
+		title:       "反向代理所在的 Docker 网络",
+		label:       "网络名",
+		placeholder: "默认 dsh-proxy（不存在时由安装器创建）",
+		apply: func(m *wizardModel, v string) bool {
+			if v == "" {
+				v = "dsh-proxy"
+			}
+			m.answers["proxy_network"] = v
 			return false
 		},
 		next: func(m *wizardModel) *page {

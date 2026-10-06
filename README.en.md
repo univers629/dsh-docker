@@ -37,7 +37,7 @@ Windows PowerShell (requires Docker Desktop in Linux containers mode):
 irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | iex
 ```
 
-Both commands open the paged wizard: it asks page by page about image source, access protection, egress mode, model keys, and so on, with a pre-execution confirmation summary last; answering no leaves the run with nothing written. Common arguments:
+Both commands open the paged wizard: it asks page by page about image source, access protection, egress mode, the key broker and the key admin panel, with a pre-execution confirmation summary last; answering no leaves the run with nothing written. Model keys themselves are never typed into the terminal — they are entered in the key admin panel's browser UI. Common arguments:
 
 - `install --quick`: quick install (Basic Auth with random credentials, key broker off), zero prompts, printing the access URL and credentials at the end.
 - `install --non-interactive`: unattended, no prompts and no generated credentials; values come from arguments and safe defaults.
@@ -47,16 +47,20 @@ Both commands open the paged wizard: it asks page by page about image source, ac
 
 The container root password is stored only as a sha512crypt hash in `data/secret/root.hash` and the Basic Auth password only as a bcrypt hash in `data/auth/htpasswd`; neither is written to `.env`. Nothing in this flow uses a privileged container, mounts a Docker socket, or grants host root.
 
-### Two implementations of the wizard
+### How the wizard is implemented
 
-The wizard ships in two forms with identical page sequences and identical resulting arguments:
+The wizard is a standalone Go binary, `dsh-installer`, built on Bubble Tea — the same TUI framework the dpanel installer uses. It takes over the terminal's alternate screen buffer and redraws only the lines that changed; the original screen is restored on exit. It is downloaded to `~/.cache/dsh-docker/` during installation and is built and published to GitHub Releases by [.github/workflows/build-installer.yml](.github/workflows/build-installer.yml).
 
-1. `dsh-installer`: a Go binary rendering the interface with Bubble Tea, the same TUI framework the dpanel installer uses. It takes over the terminal's alternate screen buffer and redraws only the lines that changed instead of repainting everything; the original screen is restored on exit. It is downloaded to `~/.cache/dsh-docker/` during installation.
-2. The built-in bash implementation in `install.sh`: the same pages written in pure shell.
+Interface and installation logic are separate: the wizard only collects answers (written to a `KEY=VALUE` file) and `install.sh` performs the installation. That keeps `curl | bash` (where the script has no path) working, keeps a single copy of the installation logic, and means nothing the wizard already asked is asked a second time in the terminal.
 
-When the binary cannot be fetched (offline, restricted network, unsupported architecture) the installer falls back to the second form, so installation still completes with shell rendering. The binary is built and published to GitHub Releases by [.github/workflows/build-installer.yml](.github/workflows/build-installer.yml); point `DSH_INSTALLER_BASE` at your own mirror if needed.
+When the binary cannot be fetched the installer fails with repair instructions instead of falling back to a second interface, because two interfaces mean two experiences. On an offline or restricted network, point it at a mirror or pre-place the binary:
 
-Interface and installation logic are separate: the wizard only collects answers, and `install.sh` still performs the installation. That keeps `curl | bash` (where the script has no path) working, and keeps a single copy of the installation logic.
+```sh
+DSH_INSTALLER_BASE=https://<your-mirror>/releases/download bash install.sh
+DSH_INSTALLER_BIN=/path/to/dsh-installer bash install.sh
+```
+
+For unattended runs, which do not need the wizard at all: `install.sh install --non-interactive ...` or `install.sh install --quick`.
 
 ### Building behind a restricted network
 

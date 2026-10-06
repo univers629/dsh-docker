@@ -21,11 +21,13 @@ assert.match(installSh, /up -d --no-build --force-recreate --remove-orphans/)
 assert.match(installPs1, /'up','-d','--no-build','--force-recreate','--remove-orphans'/)
 
 // 菜单是翻页式的：更新与卸载都是主菜单里的一页选项，更新再分一页问粒度。
-assert.match(installSh, /"update\t更新\t/)
-assert.match(installSh, /ui_page_select "更新哪一层" 0/)
-assert.match(installSh, /"update\t只更新容器内的 DSH\t/)
-assert.match(installSh, /"upgrade\t换成新镜像并重建容器\t/)
-assert.match(installSh, /"delete\t卸载\t/)
+// 这些页面现在定义在 Go 向导里（cmd/dsh-installer/pages.go），install.sh 不再含菜单。
+const pagesGo = await readFile(join(repoRoot, 'cmd', 'dsh-installer', 'pages.go'), 'utf8')
+assert.match(pagesGo, /\{"update", "更新"/, '向导主菜单必须提供更新')
+assert.match(pagesGo, /func updateModePage\(\) page/, '向导必须有更新分层页')
+assert.match(pagesGo, /\{"update", "只更新容器内的 DSH"/, '更新分层页必须提供只更新 DSH')
+assert.match(pagesGo, /\{"upgrade", "换成新镜像并重建容器"/, '更新分层页必须提供换镜像重建')
+assert.match(pagesGo, /\{"delete", "卸载"/, '向导主菜单必须提供卸载')
 assert.match(installPs1, /Value = 'update'; Label = '更新'/)
 assert.match(installPs1, /Select-UiPage -Title '更新哪一层'/)
 assert.match(installPs1, /Value = 'update'; Label = '只更新容器内的 DSH'/)

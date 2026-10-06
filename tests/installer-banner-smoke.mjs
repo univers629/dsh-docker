@@ -69,6 +69,40 @@ assert.deepEqual(
 // DSH 大字必须是 8 行（用户指定的高度）：太矮在并排时会被鲸鱼压住
 assert.equal(wordmarkLines.length, 8, `the DSH wordmark must be 8 rows, got ${wordmarkLines.length}`)
 
+// Go 向导把同一份图案编进了二进制（curl | bash 场景下它读不到 install.sh）。
+// 三边必须逐字符一致：只改一边，入门横幅就会与页头图案长得不一样。
+const bannerGo = readFileSync(join(root, 'cmd', 'dsh-installer', 'banner.go'), 'utf8')
+
+function readGoArray(src, varName) {
+  const marker = `var ${varName} = []string{`
+  const start = src.indexOf(marker)
+  if (start < 0) return null
+  const end = src.indexOf('\n}', start)
+  assert.ok(end > start, `${varName} array must be terminated`)
+  const out = []
+  for (const line of src.slice(start, end).split('\n')) {
+    // Go 的字符串字面量与 JSON 兼容，用 JSON.parse 还原转义
+    const m = line.match(/^\s*("(?:[^"\\]|\\.)*"),\s*$/)
+    if (m) out.push(JSON.parse(m[1]))
+  }
+  return out
+}
+
+const goArt = readGoArray(bannerGo, 'bannerArt') ?? []
+const goWordmark = readGoArray(bannerGo, 'wordmarkArt') ?? []
+assert.ok(goArt.length >= 8, `Go banner must have at least 8 rows, got ${goArt.length}`)
+assert.ok(goWordmark.length >= 6, `Go wordmark must have at least 6 rows, got ${goWordmark.length}`)
+assert.deepEqual(
+  goArt,
+  artLines,
+  'cmd/dsh-installer/banner.go and install.sh banners must be identical; the Go copy is generated from install.sh',
+)
+assert.deepEqual(
+  goWordmark,
+  wordmarkLines,
+  'cmd/dsh-installer/banner.go and install.sh wordmarks must be identical; the Go copy is generated from install.sh',
+)
+
 // 并排后必须放得进 80 列终端，否则主菜单会被折行打乱
 const bannerWidth = Math.max(...artLines.map((l) => [...l].length))
 assert.ok(

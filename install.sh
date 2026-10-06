@@ -17,6 +17,10 @@ NETWORK_EXTERNAL_OVERRIDE=""
 IMAGE_SOURCE_OVERRIDE=""
 IMAGE_OVERRIDE=""
 INTERACTIVE=auto
+# 向导（dsh-installer）是否已完成全部提问。置 true 后，本脚本的交互原语一律不再
+# 向用户提问，直接返回默认值——否则向导问过的东西会被再问一遍。
+# 必须在这里初始化：脚本开头 set -u，未定义就引用会直接报错。
+DSH_WIZARD_DONE=false
 # 一键安装：--quick 显式开启；无 TTY 的 curl|bash 直灌也默认走一键（随机安全凭据、零提问）。
 # 显式 --non-interactive 保留旧的自动化语义（全显式参数、不随机、不打印横幅）。
 QUICK_INSTALL=auto
@@ -327,9 +331,7 @@ if [ "$INTERACTIVE" = auto ]; then
     INTERACTIVE=false
   fi
 fi
-# --menu 是显式要求看主菜单。此时 INTERACTIVE 置真，让菜单分支执行；
-# 若 /dev/tty 不可用（被管道包住、无控制终端），ui_page_select 会退回编号输入，
-# 从 stdin 读答案——这样 CI 与自动化仍能驱动菜单，而不是直接失败。
+# --menu 是显式要求打开向导（与不带参数时的行为一致，保留它只为兼容既有脚本）。
 if [ "$MENU_REQUESTED" = true ]; then
   INTERACTIVE=true
 fi
@@ -371,6 +373,13 @@ ui_next_page() {
 
 prompt() {
   local message="$1" default="${2:-}" answer
+  # 向导（dsh-installer）已经问过全部问题。走到这里说明某个调用点没带上自己的
+  # 答案判断；与其指望每处都记得检查，不如在原语这一层截断：直接返回默认值。
+  # 这样「向导问完又问一遍」在结构上不可能发生。
+  if [ "${DSH_WIZARD_DONE:-}" = true ]; then
+    PROMPT_RESULT="$default"
+    return 0
+  fi
   # 向导模式下，文本提问也渲染成独立一页（与单选页同一版式）。
   # 这是把 prompt 原语本身做成页面，而不是在 30 多处调用点各写一遍绘制代码——
   # 否则任何新增提问都会退回成终端日志输出。
@@ -437,6 +446,11 @@ prompt() {
 
 prompt_secret() {
   local message="$1" answer
+  # 同 prompt：向导问过的秘密不该再问一遍。返回空串，调用方按「未提供」处理。
+  if [ "${DSH_WIZARD_DONE:-}" = true ]; then
+    PROMPT_RESULT=""
+    return 0
+  fi
   printf '%s: ' "$message" > /dev/tty
   IFS= read -r -s answer < /dev/tty || exit 1
   printf '\n' > /dev/tty
@@ -445,14 +459,12 @@ prompt_secret() {
 
 # ---------------------------------------------------------------- 翻页向导
 #
-# 向导有两套实现，界面语义与最终参数完全一致：
-#   1. dsh-installer：Go 二进制，用与 dpanel 安装器相同的 TUI 框架（Bubble Tea）。
-#      界面是「备用屏幕 + 增量重绘 + 每页独立画面」，与 dpanel 同级。
-#   2. 下面的 bash 实现：同一套页面的纯 shell 版本，作为兜底。
+# 向导由 dsh-installer（Go + Bubble Tea，与 dpanel 安装器同一 TUI 框架）承担：
+# 它负责全部交互页面，收集完答案写成 KEY=VALUE 文件，本脚本读入后执行安装。
 #
-# 之所以保留两套：dsh-installer 需要下载（或现场构建）一个几 MB 的二进制，而本工程
-# 的首要约束是 `curl | bash` 在离线、受限网络、任意架构下都能装完。拿不到二进制时
-# 静默回退，用户仍然拿得到完整向导，只是渲染由 bash 完成。
+# 拿不到二进制时直接报错退出，不提供第二套 bash 界面：两套界面意味着两套体验，
+# 而且 bash 版必须在页面之外处理分支，很难与 Go 版保持一致。宁可让用户看到
+# 「下载失败」并知道怎么修，也不要给出一个看起来能用、实则流程割裂的界面。
 DSH_INSTALLER_VERSION="0.1.0"
 DSH_INSTALLER_BASE="${DSH_INSTALLER_BASE:-https://github.com/univers629/dsh-docker/releases/download}"
 
@@ -498,19 +510,44 @@ dsh_installer_path() {
 #
 # 答案经临时文件中转：界面占用备用屏幕，写 stdout 会与画面互相干扰；退出向导、
 # 终端复原之后再读文件，两个阶段互不影响。
+#
+# 拿不到二进制时打印修复指引并以非零结束——没有第二套界面可退。
 dsh_installer_run() {
   local bin answers key value
-  bin="$(dsh_installer_path)" || return 1
-  [ -x "$bin" ] || return 1
-  answers="$(mktemp "${TMPDIR:-/tmp}/dsh-answers.XXXXXX")" || return 1
+  bin="$(dsh_installer_path)" || {
+    cat >&2 <<'FAIL'
+[错误] 无法获取安装向导（dsh-installer）。
+
+它负责向导的全部交互页面，安装器不再内置第二套界面。请按以下任一方式处理：
+
+  1. 确认能访问 GitHub Releases，然后重试：
+       https://github.com/univers629/dsh-docker/releases
+
+  2. 若使用镜像源，指定它的地址前缀后重试：
+       DSH_INSTALLER_BASE=https://<你的镜像>/releases/download bash install.sh
+
+  3. 离线或受限网络下，先从有网机器下载对应架构的二进制放到缓存目录：
+       ~/.cache/dsh-docker/dsh-installer-0.1.0-<amd64|arm64>
+     再用 DSH_INSTALLER_BIN 指向任意路径：
+       DSH_INSTALLER_BIN=/path/to/dsh-installer bash install.sh
+
+  4. 不需要交互时用无人值守参数，它不依赖向导：
+       bash install.sh install --non-interactive --access local --image-source prebuilt
+       bash install.sh install --quick
+FAIL
+    exit 1
+  }
+  [ -x "$bin" ] || { echo "[错误] $bin 不可执行。" >&2; exit 1; }
+  answers="$(mktemp "${TMPDIR:-/tmp}/dsh-answers.XXXXXX")" || { echo "[错误] 无法创建临时文件。" >&2; exit 1; }
   # 先执行再取退出码：`if ! cmd; then status=$?` 拿到的是取反后的 0，不是真实状态。
   local status=0
   "$bin" --answers-file "$answers" --dir "$TARGET_DIR" || status=$?
   if [ "$status" != 0 ]; then
     rm -f "$answers"
-    # 用户主动取消（3）不是错误：不再回退到 bash 向导，直接结束。
-    [ "$status" = 3 ] && return 0
-    return 1
+    # 用户主动取消（3）：不是错误，干净退出，不打印额外信息。
+    [ "$status" = 3 ] && exit 0
+    echo "[错误] 向导异常退出（退出码 $status）。" >&2
+    exit 1
   fi
   # 逐行读入 KEY=VALUE。值里可能有空格，所以只按第一个 = 切分。
   while IFS= read -r line; do
@@ -531,17 +568,29 @@ dsh_installer_run() {
       root_password) ROOT_PASSWORD_OVERRIDE="$value" ;;
       no_root_password) [ "$value" = yes ] && NO_ROOT_PASSWORD_ANSWER=true ;;
       delete_keep) DSH_DELETE_KEEP="$value" ;;
+      delete_confirmed) DSH_DELETE_CONFIRMED=1 ;;
+      model_broker) PENDING_MODEL_BROKER="$value" ;;
+      egress_allow) EGRESS_ALLOW_OVERRIDE="$value" ;;
+      basic_user) PENDING_BASIC_USER="$value" ;;
+      basic_password) PENDING_BASIC_PASSWORD="$value" ;;
+      proxy) DSH_ANSWER_PROXY="$value" ;;
+      proxy_network) DSH_ANSWER_PROXY_NETWORK="$value" ;;
+      trusted_proxy_ack) [ "$value" = yes ] && TRUSTED_PROXY_ACK=true ;;
     esac
   done < "$answers"
   rm -f "$answers"
+  # 向导已完成：后续的交互原语一律不再提问（见各处 DSH_WIZARD_DONE 判断）。
+  # 这一步是「向导是唯一入口」的关键——否则 bash 会把问过的问题再问一遍。
+  DSH_WIZARD_DONE=true
+  export DSH_WIZARD_DONE
   # 一键安装：向导已经问完，交回引擎的零提问路径。
   if [ "${DSH_ANSWER_MODE:-}" = quick ]; then
     QUICK_INSTALL=true
     INTERACTIVE=false
+    PENDING_MODEL_BROKER=off
   fi
   return 0
 }
-
 # ---------------------------------------------------------------- 翻页向导（bash 兜底）
 #
 # 向导占用终端的**备用屏幕缓冲**（alternate screen buffer），与 dpanel 的安装器同一种
@@ -942,6 +991,11 @@ confirm_install_plan() {
   local -a rows=()
   local broker_label egress_label key_admin_label multi_label
 
+  # 向导已经做过确认页（含同样的摘要）。再确认一次等于问两遍，直接放行。
+  if [ "${DSH_WIZARD_DONE:-}" = true ]; then
+    return 0
+  fi
+
   case "${PENDING_MODEL_BROKER:-off}" in
     on) broker_label="开（密钥只存宿主机与独立容器）" ;;
     *) broker_label="关（密钥直接写进 DSH 配置）" ;;
@@ -1016,6 +1070,11 @@ confirm_install_plan() {
 # 所以这一个只问一次，回车即表示清空当前值。
 prompt_optional() {
   local message="$1" default="${2:-}" answer
+  # 同 prompt：向导问过就不再问，返回默认值。
+  if [ "${DSH_WIZARD_DONE:-}" = true ]; then
+    PROMPT_RESULT="$default"
+    return 0
+  fi
   # 向导模式下同样渲染成独立一页，版式与 prompt 一致。
   if [ "$UI_TUI" = true ]; then
     ui_raw_on || true
@@ -1048,6 +1107,15 @@ prompt_optional() {
 
 prompt_yes_no() {
   local message="$1" default="$2" answer
+  # 同 prompt：向导问过就不再问。按传入的默认值作答（调用点给的默认值就是
+  # 「导航空着这一项时该怎么办」的答案）。
+  if [ "${DSH_WIZARD_DONE:-}" = true ]; then
+    case "$default" in
+      y|Y|yes|YES|true|是) PROMPT_RESULT=true ;;
+      *) PROMPT_RESULT=false ;;
+    esac
+    return 0
+  fi
   # 向导模式下渲染成真正的「是/否」选择页（↑/↓ + Enter），而不是让人手打 y/n——
   # 手打字母既不是面板形态，也容易输错。非向导模式保留原来的 y/n 循环。
   if [ "$UI_TUI" = true ]; then
@@ -1198,81 +1266,14 @@ elif command -v sudo >/dev/null 2>&1 && sudo docker container inspect dsh >/dev/
 fi
 
 if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
-  # 优先把向导交给 dsh-installer（Go + Bubble Tea，与 dpanel 安装器同一 TUI 框架）。
-  # 它只负责界面：收集完答案后写成 KEY=VALUE 文件，本脚本读进来继续执行安装。
-  # 拿不到二进制（离线、受限网络、架构不支持）时回退到下面的 bash 向导，
-  # 两条路径给出同样的页面序列与同样的参数。
-  if [ "$INTERACTIVE" = true ] && dsh_installer_run; then
-    # 答案已就位（ACTION 与各 _OVERRIDE 均已设置），跳过 bash 向导直接进入安装。
-    # 这里不能 exit：安装逻辑在本文件后半段。
-    DSH_ANSWER_CONFIRMED=true
-  elif [ "$INTERACTIVE" = true ]; then
-    # 主菜单：一页列出全部生命周期动作。安装项在容器已存在时标注不可用，
-    # 而不是让人选了才撞上报错。
-    if [ "$INSTALL_AVAILABLE" = false ]; then
-      install_label="安装（当前不可用：容器已存在，需先 ./dsh.sh remove）"
-    elif [ -d "$TARGET_DIR" ]; then
-      install_label="安装 / 重新配置（保留挂载数据）"
-    else
-      install_label="安装"
-    fi
-
-    # 页数只在确实能算准时给分母：主菜单之后的分支长度不同（选「启动」到此为止，
-    # 选「安装」还要再走一页并进各自的配置流程），所以这里只报页码，不编造总数。
-    # UI_PAGE_NO 由 ui_next_page 自增，跨页面累计；UI_STEP 是它给页头读的镜像值。
-    UI_PAGE_NO=0
-    UI_TOTAL=0
-    ui_next_page
-    ui_page_select "选择操作" 0 \
-      "install	${install_label}	安装 DSH 或按新配置重建容器" \
-      "update	更新	升级容器内的 DSH，或换成新镜像重建容器" \
-      "start	启动	启动已有容器，不重建" \
-      "stop	停止	停止容器，保留可写层与数据" \
-      "restart	重启	重启容器，保留可写层与数据" \
-      "logs	查看日志	跟随容器日志输出" \
-      "status	查看状态	容器、健康检查与访问入口" \
-      "delete	卸载	清理容器、镜像、挂载、网络与工程目录" \
-      "model-key	补填模型 API 密钥	只新增密钥代理容器，不重建 dsh" \
-      "key-panel	模型密钥管理面板	浏览器里填密钥、拉模型列表，不重建 dsh"
-    ACTION="$UI_VALUE"
-
-    # 更新是两件不同粒度的事，合成一个入口再分页：日常更新 DSH 本体不需要碰镜像，
-    # 只有发布了新镜像（容器里那套脚本、控制层、基础层变了）才需要重建容器。
-    if [ "$ACTION" = update ]; then
-      ui_next_page
-      ui_page_select "更新哪一层" 0 \
-        "update	只更新容器内的 DSH	重装 npm 包，容器和镜像都不动，最快" \
-        "upgrade	换成新镜像并重建容器	沿用现有配置不重问；会话、插件、项目文件、密钥全部保留，只有容器里 apt 装的系统包要重装"
-      ACTION="$UI_VALUE"
-    fi
-
-    # 安装分两页：先选「一键」还是「手动」，再进各自的流程。
-    # 一键安装不是靠有没有 TTY 隐式决定的——那是无 TTY 直灌时的默认，不是交互时的选项。
-    if [ "$ACTION" = install ]; then
-      ui_next_page
-      ui_page_select "安装方式" 0 \
-        "quick	一键安装	basic 认证 + 随机账密 + 关闭密钥代理，零提问，装完打印访问地址与凭据" \
-        "manual	手动配置	逐页选择镜像来源、访问保护、出站策略、模型密钥等"
-      case "$UI_VALUE" in
-        quick)
-          # 一键 = 零提问：与 --quick 走同一条路径。
-          QUICK_INSTALL=true
-          INTERACTIVE=false
-          ;;
-        *) QUICK_INSTALL=false ;;
-      esac
-    fi
-
-    # 这里**不**离开备用屏幕：后续还有 configure_dsh / configure_user_mode 等十余页，
-    # 它们同样是向导的一部分。备用屏幕只在真正开始安装前（或任何退出路径）才退出，
-    # 否则第二页起就退回成终端日志输出。
-    if [ "$QUICK_INSTALL" = true ]; then
-      ui_term_restore
-      echo "==> 一键安装：basic 认证 + 随机账密 + 关闭密钥代理，装完打印访问地址与凭据。"
-    fi
-  else
-    ACTION=install
-  fi
+  # 向导交给 dsh-installer（Go + Bubble Tea，与 dpanel 安装器同一 TUI 框架）：
+  # 它承担全部交互页面，收集完答案写成 KEY=VALUE 文件，本脚本读入后执行安装。
+  # 这里不套「失败就回退」的分支：向导是唯一入口，拿不到二进制时
+  # dsh_installer_run 会打印修复指引并直接结束进程。
+  dsh_installer_run
+  # 答案已就位（ACTION 与各 _OVERRIDE 均已设置）。这里不能 exit：
+  # 安装逻辑在本文件后半段。
+  DSH_ANSWER_CONFIRMED=true
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -1493,7 +1494,8 @@ container_exists() {
 }
 
 confirm_delete() {
-  local answer
+  # 删除是破坏性操作，确认由向导的一页选择承担（光标默认停在「取消」，回车不会误删）。
+  # 向导确认后会把 delete_confirmed=yes 写进答案文件，这里据此放行。
   if [ "${DSH_DELETE_CONFIRMED:-}" = 1 ]; then
     return 0
   fi
@@ -1501,10 +1503,8 @@ confirm_delete() {
     echo "[错误] delete 是破坏性操作，需要交互确认；请不要使用 --non-interactive。" >&2
     exit 2
   fi
-  # 先问范围，再让人输 DELETE：最后那一下是不可逆的闸门，它前面不该再有别的问题，
-  # 而且警告文案要能反映刚选的范围——否则"全都删"和"留下会话"两种结局共用一句话。
-  # 范围是一页面板（与其他分支一致）；DELETE 那一步刻意保留手输，
-  # 因为不可逆操作需要一次无法误触的确认。
+  # 走到这里说明是以命令行方式（--action delete）直接调用，没有经过向导。
+  # 不再提供手输 DELETE 的第二套确认：改用与向导一致的是/否选择页。
   UI_TOTAL=0
   ui_next_page
   ui_page_select "删除的数据范围" 0 \
@@ -1516,20 +1516,23 @@ confirm_delete() {
     *) echo "[错误] 无效选项。" >&2; exit 2 ;;
   esac
   export DSH_DELETE_KEEP
-  ui_term_restore
-  echo
-  echo "[警告] 将删除 dsh 容器、DSH 镜像（dsh:* 与 .env 记录的预构建引用）、本项目 Compose 挂载和网络、全局 Docker 构建缓存。"
+
+  local scope
   if [ "$DSH_DELETE_KEEP" = 1 ]; then
-    echo "[警告] $TARGET_DIR 里除 workspace/、data/dsh/sessions/、data/dsh/profiles/ 之外的一切也会删除，包括项目源码、.env、模型密钥和 root 密码哈希。"
+    scope="保留会话、工作目录和插件"
   else
-    echo "[警告] $TARGET_DIR 整个目录都会删除，包括 data/ 和 workspace/ 里的一切。"
+    scope="全部删除"
   fi
-  printf '请输入 DELETE 继续，其他输入取消: ' > /dev/tty
-  IFS= read -r answer < /dev/tty || exit 1
-  if [ "$answer" != DELETE ]; then
+  ui_next_page
+  ui_page_select "确认删除（不可恢复）" 1 \
+    "yes	确认删除	将永久清除：dsh 容器、DSH 镜像、Compose 挂载与网络、Docker 构建缓存" \
+    "no	取消	不执行删除"
+  if [ "$UI_VALUE" != yes ]; then
+    ui_term_restore
     echo "已取消。"
     exit 0
   fi
+  echo "==> 删除范围：$scope"
 }
 
 resolve_self_path() {
@@ -2816,6 +2819,24 @@ print_broker_skipped_notice() {
   echo "    不想在终端里填就执行 ./install.sh key-panel，在浏览器里填（同样不重建 dsh）。"
 }
 
+# 向导已经问过密钥代理的两个开关，这里按答案落配置，不再向用户提问。
+#
+# 密钥本体不在终端里收集：向导开启面板后，上游名、base_url、密钥、模型清单全部在
+# 浏览器里的密钥管理面板填。空 keys.json 是合法状态（此时 broker 对 /u/ 请求回 503），
+# 所以这里可以先只建占位文件。
+configure_model_broker_from_answers() {
+  if [ "$PENDING_MODEL_BROKER" != on ]; then
+    PENDING_MODEL_BROKER=off
+    print_broker_skipped_notice
+    return 0
+  fi
+  if [ -s data/broker/keys.json ]; then
+    echo "==> 保留现有 data/broker/keys.json，本次不改动其中的密钥。"
+    return 0
+  fi
+  ensure_broker_config_placeholder
+}
+
 configure_model_broker() {
   PENDING_MODEL_BROKER="$(get_compose_env DSH_MODEL_BROKER off)"
   case "$PENDING_MODEL_BROKER" in on|off) ;; *) PENDING_MODEL_BROKER=off ;; esac
@@ -2851,6 +2872,16 @@ configure_model_broker() {
 
   # 命令行已经把密钥给全了就不再追问：自动化和交互混用时不该被问答打断。
   if [ "${#BROKER_NAMES[@]}" -gt 0 ] || [ -n "$MODEL_KEYS_FILE" ]; then
+    return 0
+  fi
+
+  # 向导已经问过「是否启用密钥代理」与「是否启用管理面板」。走到这里若 INTERACTIVE
+  # 已被向导置 false，就不再重复提问，直接按向导的答案落配置：
+  #   broker on  → 保留已有 keys.json（有的话），或建空文件留给面板填
+  #   broker off → 关闭代理
+  # 密钥本身一律不在终端里收集，统一由密钥管理面板在浏览器里填。
+  if [ "${DSH_WIZARD_DONE:-}" = true ]; then
+    configure_model_broker_from_answers
     return 0
   fi
 
@@ -3071,6 +3102,22 @@ configure_dsh() {
     trusted_hosts="${TRUSTED_HOSTS_OVERRIDE:-}"
     network="${NETWORK_OVERRIDE:-dsh-private}"
     network_external="${NETWORK_EXTERNAL_OVERRIDE:-false}"
+  elif [ "${DSH_WIZARD_DONE:-}" = true ]; then
+    # 向导已经问过反向代理位置、网络名、公网域名与绑定地址，这里按答案装配：
+    # 不再进入下面的分页提问，否则用户在向导里答过的东西会被再问一遍。
+    case "${DSH_ANSWER_PROXY:-host}" in
+      docker)
+        network="${DSH_ANSWER_PROXY_NETWORK:-dsh-proxy}"
+        network_external=true
+        bind_host="${BIND_HOST_OVERRIDE:-127.0.0.1}"
+        echo "==> DSH 加入网络 $network，反向代理用 http://dsh:3080 访问它。"
+        ;;
+      *)
+        bind_host="${BIND_HOST_OVERRIDE:-127.0.0.1}"
+        network="${NETWORK_OVERRIDE:-dsh-private}"
+        network_external="${NETWORK_EXTERNAL_OVERRIDE:-false}"
+        ;;
+    esac
   elif [ "$INTERACTIVE" = true ]; then
     default_route=0
     if DOCKER network inspect dpanel-local >/dev/null 2>&1 || [ "$network_external" = true ]; then
@@ -3120,7 +3167,6 @@ configure_dsh() {
     prompt "宿主机端口绑定地址（推荐 127.0.0.1）" "$bind_host"
     bind_host="$PROMPT_RESULT"
   fi
-
   case "$bind_host" in
     0.0.0.0|::|'[::]'|'*')
       echo "[错误] 为避免绕过认证，不能使用通配绑定地址；请使用 127.0.0.1 或指定的私有接口。" >&2
@@ -3133,7 +3179,9 @@ configure_dsh() {
   fi
 
   if [ "$access_mode" = basic ]; then
-    if [ -s data/auth/htpasswd ] && [ "$INTERACTIVE" = true ]; then
+    # 向导已经问过「新建还是保留」与账密：DSH_WIZARD_DONE 时不进任何提问分支，
+    # 直接用 PENDING_BASIC_USER / PENDING_BASIC_PASSWORD 落盘。
+    if [ "$DSH_WIZARD_DONE" != true ] && [ -s data/auth/htpasswd ] && [ "$INTERACTIVE" = true ]; then
       prompt_yes_no "保留现有 Basic Auth 用户名和密码" y
       keep_auth="$PROMPT_RESULT"
     elif [ -s data/auth/htpasswd ] && [ -z "$PENDING_BASIC_PASSWORD" ]; then
@@ -3154,7 +3202,14 @@ configure_dsh() {
       case "$PENDING_BASIC_USER" in *[!A-Za-z0-9._-]*|'') echo "[错误] 用户名只允许字母、数字、点、下划线和连字符。" >&2; exit 2 ;; esac
     fi
     if [ "$keep_auth" != true ]; then
-      if [ "$INTERACTIVE" = true ]; then
+      if [ "$DSH_WIZARD_DONE" = true ]; then
+        # 账密来自向导，只校验、不提问。
+        case "$PENDING_BASIC_USER" in *[!A-Za-z0-9._-]*|'') echo "[错误] Basic Auth 用户名只允许字母、数字、点、下划线和连字符。" >&2; exit 2 ;; esac
+        if [ "${#PENDING_BASIC_PASSWORD}" -lt 12 ]; then
+          echo "[错误] Basic Auth 密码至少需要 12 个字符。" >&2
+          exit 2
+        fi
+      elif [ "$INTERACTIVE" = true ]; then
         prompt "Basic Auth 用户名" "${PENDING_BASIC_USER:-dsh}"
         PENDING_BASIC_USER="$PROMPT_RESULT"
         case "$PENDING_BASIC_USER" in *[!A-Za-z0-9._-]*|'') echo "[错误] 用户名只允许字母、数字、点、下划线和连字符。" >&2; exit 2 ;; esac
@@ -3191,6 +3246,13 @@ configure_dsh() {
     if [ "${#PENDING_ROOT_PASSWORD}" -lt 12 ]; then
       echo "[错误] 容器 root 密码至少需要 12 个字符。" >&2
       exit 2
+    fi
+  elif [ "$DSH_WIZARD_DONE" = true ]; then
+    # 向导已经问过：给了密码就设置（ROOT_PASSWORD_OVERRIDE 已在上面赋给
+    # PENDING_ROOT_PASSWORD），选了「不设置」则清空哈希。这里不再提问。
+    if [ "${NO_ROOT_PASSWORD_ANSWER:-}" = true ] || [ -z "$PENDING_ROOT_PASSWORD" ]; then
+      PENDING_ROOT_PASSWORD=""
+      rm -f data/secret/root.hash
     fi
   elif [ "$INTERACTIVE" = true ]; then
     keep_root_password=false

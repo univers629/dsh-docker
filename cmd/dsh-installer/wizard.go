@@ -20,6 +20,8 @@ var (
 	descStyle     = lipgloss.NewStyle().Faint(true)
 	helpStyle     = lipgloss.NewStyle().Faint(true)
 	errStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	// 横幅用品牌蓝实心渲染，与 install.sh 的 truecolor 输出一致。
+	bannerColor = lipgloss.NewStyle().Foreground(brandBlue)
 )
 
 // choice 是一个可选项：value 用于回传给 install.sh，label/desc 用于显示。
@@ -68,6 +70,10 @@ type wizardModel struct {
 	input  string
 	err    string
 
+	// width/height 来自 WindowSizeMsg，用于决定横幅是否画得下以及文本是否折行。
+	width  int
+	height int
+
 	answers map[string]string
 	dir     string
 
@@ -79,9 +85,10 @@ func newWizard(opts options) wizardModel {
 	m := wizardModel{
 		answers: map[string]string{},
 		dir:     opts.dir,
+		width:   80,
+		height:  24,
 	}
-	first := actionPage()
-	m.current = first
+	m.current = actionPage()
 	return m
 }
 
@@ -90,6 +97,8 @@ func (m wizardModel) Init() tea.Cmd { return nil }
 func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// 终端尺寸决定横幅是否画得下与文本是否折行，必须记住。
+		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 
 	case tea.KeyMsg:
@@ -198,13 +207,59 @@ func (m wizardModel) goBack() wizardModel {
 	return m
 }
 
+// bodyLineCount 估算本页正文占多少行（含选中项说明与底部提示），
+// 供 View 判断横幅还有多少空间可用。必须与 View 的渲染保持一致：
+// 少算会让横幅挤掉选项，多算会让横幅该出现时没出现。
+func (m wizardModel) bodyLineCount() int {
+	lines := 2 // 页头后的空行 + 底部的空行
+	switch m.current.kind {
+	case pageSelect:
+		// 每项一行；只有选中项额外占一行说明。
+		lines += len(m.current.choices)
+		if m.cursor < len(m.current.choices) && m.current.choices[m.cursor].desc != "" {
+			lines++
+		}
+	case pageInput, pageSecret:
+		lines += 2 // 字段名 + 输入行
+		if m.input == "" && m.current.placeholder != "" {
+			lines++
+		}
+	case pageConfirm:
+		if m.current.summary != nil {
+			lines += len(m.current.summary(&m))
+		}
+		lines += len(m.current.choices)
+	}
+	if m.err != "" {
+		lines += 2
+	}
+	lines++ // 操作键提示
+	return lines
+}
+
 func (m wizardModel) View() string {
 	if m.done || m.aborted {
 		return ""
 	}
 	var b strings.Builder
 
-	// 页头与 install.sh 的 bash 向导同版式：`DeepSeek Harness - <页标题> (<页码>)`。
+	// 横幅：与 install.sh 同一份图案（本文件同目录的 banner.go）。
+	// 按剩余行数决定是否画——选项可见优先于图案，行数不够时只显示内容。
+	// 正文行数先估出来，横幅才知道自己有多少空间。
+	bodyLines := m.bodyLineCount()
+	room := 0
+	if m.height > 0 {
+		// 留一行给底部提示，避免写满最后一行触发终端滚动（滚动会让整页错位）。
+		room = m.height - 1 - bodyLines - 1
+	}
+	if art := bannerLines(m.width, room); art != nil {
+		for _, line := range art {
+			b.WriteString(bannerColor.Render(line) + "\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// 页头与 install.sh 的向导同版式：`DeepSeek Harness - <页标题> (<页码>)`。
 	head := titleStyle.Render("DeepSeek Harness")
 	if m.current.title != "" {
 		head += subtitleStyle.Render(" - ") + titleStyle.Render(m.current.title)
@@ -214,14 +269,16 @@ func (m wizardModel) View() string {
 
 	switch m.current.kind {
 	case pageSelect:
+		// 只显示选中项的说明：十项各带一行说明会把正文撑到 20 行，
+		// 在 24 行终端里直接吃掉横幅与页头的位置。dpanel 的主菜单同样只有动作名。
 		for i, c := range m.current.choices {
 			if i == m.cursor {
 				b.WriteString(cursorStyle.Render("  ▸ "+c.label) + "\n")
+				if c.desc != "" {
+					b.WriteString(descStyle.Render("      "+c.desc) + "\n")
+				}
 			} else {
 				b.WriteString(choiceStyle.Render("    "+c.label) + "\n")
-			}
-			if c.desc != "" {
-				b.WriteString(descStyle.Render("    "+c.desc) + "\n")
 			}
 		}
 	case pageInput, pageSecret:

@@ -7,10 +7,13 @@ import { spawnSync } from 'node:child_process'
 import { parseBrokerConfig } from '../bin/dsh-key-broker-policy.mjs'
 
 const read = async (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
-const [compose, dockerfile, entrypoint, authConfig, nginx, installSh, installPs1, envExample, dshSh, dshBat, readmeZh, readmeEn, isolatedCompose, keyAdminCompose] = await Promise.all([
+const [compose, dockerfile, entrypoint, authConfig, nginx, installSh, installPs1, envExample, dshSh, dshBat, readmeZh, readmeEn, isolatedCompose, keyAdminCompose, installGo] = await Promise.all([
   'docker-compose.yml', 'Dockerfile', 'bin/entrypoint.sh', 'bin/configure-nginx-auth', 'nginx/dsh-nginx.conf',
   'install.sh', 'install.ps1', '.env.example', 'dsh.sh', 'dsh.bat', 'README.md', 'README.en.md',
   'docker-compose.isolated.yml', 'docker-compose.keys-admin.yml',
+  // 向导页面已迁到 Go（cmd/dsh-installer），断言要同时看两边：
+  // 页面在 Go 里定义，执行与校验仍在 install.sh。
+  'cmd/dsh-installer/pages.go',
 ].map(read))
 
 assert.match(compose, /DSH_ACCESS_MODE: "\$\{DSH_ACCESS_MODE:-local\}"/)
@@ -157,8 +160,14 @@ assert.match(installPs1, /Get-ChildItem -LiteralPath \$source -Force/)
 assert.match(installPs1, /dsh-docker-archive-source/)
 assert.match(installPs1, /docker-compose\.yml.*工程获取失败/s)
 assert.match(installSh, /DSH_INSTALL_DIR:-dsh-docker/)
-assert.match(installSh, /"delete	卸载	/)
-assert.match(installSh, /请输入 DELETE 继续/)
+// 卸载的确认现在是 dsh-installer 里的一页选择（光标默认停在「取消」），
+// bash 侧只负责校验范围与执行清理，不再要求手输 DELETE。
+assert.match(installSh, /^confirm_delete\(\) \{$/m)
+assert.match(installSh, /DSH_DELETE_CONFIRMED/)
+assert.match(installSh, /DSH_DELETE_KEEP/)
+assert.match(installGo, /deleteConfirmPage/)
+assert.match(installGo, /\{"no", "取消"/)
+assert.doesNotMatch(installSh, /请输入 DELETE 继续/)
 assert.match(installSh, /container ls -aq --filter "label=com\.docker\.compose\.project=\$project_name"/)
 assert.match(installSh, /volume ls -q --filter "label=com\.docker\.compose\.project=\$project_name"/)
 assert.match(installSh, /label=org\.opencontainers\.image\.title=dsh-docker/)
