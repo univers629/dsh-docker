@@ -2123,6 +2123,15 @@ set_compose_args() {
       exit 1
     fi
     COMPOSE_ARGS+=(-f docker-compose.isolated.yml)
+    # 两个叠加文件都定义了 dsh-ingress，但那是两套不同实现（不同 nginx 配置、
+    # 不同运行用户、不同 entrypoint）。Compose 合并同名服务时序列字段是追加，
+    # 同时激活会让 security_opt / command / ports 出现重复项，严格版本的 compose
+    # 直接拒绝校验。所以按模式只激活其中一个入口：
+    #   多用户 → multiuser.yml 的 dsh-ingress（profiles: multiuser）
+    #   单管理员 → isolated.yml 的 dsh-ingress（profiles: isolate）
+    if [ "$PENDING_MULTI_USER" != on ]; then
+      COMPOSE_ARGS+=(--profile isolate)
+    fi
   fi
 }
 

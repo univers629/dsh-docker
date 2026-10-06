@@ -109,7 +109,18 @@ services:
       start_period: 10s
 
   # 宿主入口：把 3080 发布出来并四层转发给 dsh:3080。
-  dsh-ingress:
+  #
+  # 服务名带 -iso 后缀，是因为 docker-compose.multiuser.yml 里另有一个 dsh-ingress，
+  # 两者是**不同实现**（不同 nginx 配置、不同运行用户、不同 entrypoint、不同网络）。
+  # Compose 合并同名服务时：标量字段后者覆盖、序列字段（security_opt、command、
+  # entrypoint、ports…）**追加**——于是产生重复项与拼接出来的命令，严格版本的
+  # compose 直接拒绝校验（"security_opt items at 0 and 1 are equal"）。
+  #
+  # profile 解决不了这个问题：它只控制服务是否启动，不阻止定义被合并。用不同的
+  # 服务名让两套定义互不干扰，再各自用 profile 保证只启动其中一个。
+  # container_name 仍是 dsh-ingress：对外名字不变，dsh-private 上的别名也照旧。
+  dsh-ingress-iso:
+    profiles: ["isolate"]
     image: "${DSH_IMAGE:-dsh:local}"
     container_name: dsh-ingress
     hostname: dsh-ingress

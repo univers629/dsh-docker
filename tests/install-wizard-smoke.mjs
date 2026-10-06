@@ -746,7 +746,10 @@ try {
   assert.match(isolatedEnv, /^DSH_EGRESS_MODE=allowlist$/m)
   assert.match(isolatedEnv, /^DSH_EGRESS_ALLOWED_HOSTS=mirror\.example\.com$/m)
   const calls = await readFile(dockerLog, 'utf8')
-  assert.match(calls, /compose --env-file \S+ -f docker-compose\.yml -f docker-compose\.isolated\.yml up -d/)
+  assert.match(
+    calls,
+    /compose --env-file \S+ -f docker-compose\.yml -f docker-compose\.isolated\.yml --profile isolate up -d/,
+  )
 } finally {
   await rm(sandbox, { recursive: true, force: true })
 }

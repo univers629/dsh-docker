@@ -424,9 +424,14 @@ try {
   assert.match(preflightOn.stdout, /data\/secret -> 165536:165536/)
 
   const calls = await readFile(dockerLog, 'utf8')
-  // 叠加顺序是契约：keys.yml 只在 broker 开启时出现，isolated.yml 只在 allowlist 下出现。
+  // 叠加顺序是契约：keys.yml 只在 broker 开启时出现，isolated.yml 只在非 open 出站模式下出现。
   assert.match(calls, /compose --env-file \S+ -f docker-compose\.yml -f docker-compose\.keys\.yml up -d/)
-  assert.match(calls, /compose --env-file \S+ -f docker-compose\.yml -f docker-compose\.isolated\.yml up -d/)
+  // 隔离模式下同时激活 --profile isolate：isolated.yml 里的入口服务叫 dsh-ingress-iso，
+  // 与 multiuser.yml 的 dsh-ingress 是两套实现，靠 profile 与不同服务名避免被合并。
+  assert.match(
+    calls,
+    /compose --env-file \S+ -f docker-compose\.yml -f docker-compose\.isolated\.yml --profile isolate up -d/,
+  )
   assert.match(calls, /compose -f docker-compose\.yml -f docker-compose\.keys\.yml build dsh/)
   assert.ok(!calls.includes(deepseekKey), 'a model key must never reach a docker command line')
   assert.ok(!calls.includes(openaiKey), 'a model key must never reach a docker command line')

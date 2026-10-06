@@ -164,8 +164,19 @@ EGRESS_MODE="$(env_value DSH_EGRESS_MODE open)"
 if [ "$EGRESS_MODE" != open ]; then
   if [ -f docker-compose.isolated.yml ]; then
     COMPOSE_ARGS+=(-f docker-compose.isolated.yml)
-    add_sidecars dsh-egress dsh-ingress
+    add_sidecars dsh-egress
     EGRESS_ENABLED=true
+    # 入口容器在两种模式下是不同的服务名：isolated.yml 里叫 dsh-ingress-iso，
+    # multiuser.yml 里叫 dsh-ingress。它们共用 container_name=dsh-ingress，
+    # 但服务定义是两套（不同 nginx 配置、不同运行用户），用不同服务名避免
+    # Compose 合并同名服务时把序列字段（security_opt/command/ports）追加成重复项。
+    # 多用户时由 multiuser 分支负责登记它，这里不重复加。
+    if [ "$MULTI_USER_ENABLED" = true ]; then
+      :
+    else
+      COMPOSE_ARGS+=(--profile isolate)
+      add_sidecars dsh-ingress-iso
+    fi
   else
     echo "[警告] .env 里 DSH_EGRESS_MODE=${EGRESS_MODE}，但目录里没有 docker-compose.isolated.yml，已按 open 处理。" >&2
   fi

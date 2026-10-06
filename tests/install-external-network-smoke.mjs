@@ -170,7 +170,10 @@ try {
   assert.match(isolatedProxyEnv, /^DSH_MODEL_BROKER=off$/m)
 
   const calls = await readFile(dockerLog, 'utf8')
-  assert.match(calls, /compose --env-file \S+ -f docker-compose\.yml -f docker-compose\.isolated\.yml up -d/)
+  assert.match(
+    calls,
+    /compose --env-file \S+ -f docker-compose\.yml -f docker-compose\.isolated\.yml --profile isolate up -d/,
+  )
   // broker 没开就绝不能叠加 keys.yml，否则会凭空多起一个容器。
   assert.doesNotMatch(calls, /docker-compose\.keys\.yml/)
   assert.match(calls, /network inspect proxy-net/)

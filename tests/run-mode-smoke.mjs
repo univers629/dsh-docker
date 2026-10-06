@@ -139,9 +139,16 @@ assert.deepEqual(
 // HTTP_PROXY 环境变量不够，apt 经特权代理以 root 运行时环境会被白名单清掉。
 assert.match(isolatedDsh, /^ +DSH_EGRESS_PROXY_URL: "http:\/\/dsh-egress:3128"$/m)
 
-// dsh-ingress：唯一的宿主入口，并在 dsh-private 上顶替 `dsh` 这个名字。
-const isolatedIngress = isolatedServices.get('dsh-ingress')
-assert.ok(isolatedIngress, 'isolated overlay must define dsh-ingress')
+// 宿主入口，在 dsh-private 上顶替 `dsh` 这个名字。
+//
+// 服务名是 dsh-ingress-iso：multiuser 叠加层里另有一个叫 dsh-ingress 的入口，
+// 两者是不同实现（不同 nginx 配置、不同运行用户）。用不同服务名避免 Compose 合并
+// 同名服务时把序列字段（security_opt/command/ports）追加成重复项。对外名字不变，
+// 仍是 container_name=dsh-ingress。
+const isolatedIngress = isolatedServices.get('dsh-ingress-iso')
+assert.ok(isolatedIngress, 'isolated overlay must define dsh-ingress-iso')
+assert.match(isolatedIngress, /^ +container_name: dsh-ingress$/m, '对外容器名应保持 dsh-ingress')
+assert.match(isolatedIngress, /^ +profiles: \["isolate"\]$/m, '需靠 profile 与多用户入口互斥')
 assert.match(isolatedIngress, /^ +user: "1000:1000"$/m)
 assert.match(isolatedIngress, /cap_drop:\n +- ALL/)
 assert.match(isolatedIngress, /^ +- "\$\{DSH_BIND_HOST:-127\.0\.0\.1\}:3080:3080"$/m)

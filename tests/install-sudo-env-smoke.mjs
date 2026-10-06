@@ -141,10 +141,13 @@ try {
   const hardenedLog = await readFile(dockerLog, 'utf8')
   const hardenedBuild = lastCall(hardenedLog, 'compose ', ' build dsh')
   assert.ok(hardenedBuild, 'installer never reached docker compose build')
-  assert.match(hardenedBuild, /^compose -f docker-compose\.yml -f docker-compose\.keys\.yml -f docker-compose\.isolated\.yml build dsh \| /)
+  // --profile isolate 与 -f isolated.yml 同进同出：isolated.yml 里的入口服务叫
+  // dsh-ingress-iso，而 multiuser.yml 里另有一个 dsh-ingress，两者是不同实现，
+  // 靠不同服务名 + profile 避免被 Compose 合并成重复项。
+  assert.match(hardenedBuild, /^compose -f docker-compose\.yml -f docker-compose\.keys\.yml -f docker-compose\.isolated\.yml --profile isolate build dsh \| /)
   const hardenedUp = lastCall(hardenedLog, 'compose ', ' up -d ')
   assert.ok(hardenedUp, 'installer never reached docker compose up')
-  assert.match(hardenedUp, / -f docker-compose\.yml -f docker-compose\.keys\.yml -f docker-compose\.isolated\.yml up -d /)
+  assert.match(hardenedUp, / -f docker-compose\.yml -f docker-compose\.keys\.yml -f docker-compose\.isolated\.yml --profile isolate up -d /)
   // sudo 会把命令行原样交给 docker，所以这里正好能证明密钥没被写到命令行上。
   assert.ok(!hardenedLog.includes('sk-test-sudo-smoke-key'), 'a model key must never reach a docker command line')
   const hardenedEnv = await readFile(join(sandbox, 'hardened-install', '.env'), 'utf8')
