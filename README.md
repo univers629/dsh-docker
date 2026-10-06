@@ -47,6 +47,17 @@ irm https://raw.githubusercontent.com/univers629/dsh-docker/main/install.ps1 | i
 
 容器 root 密码只以 sha512crypt 哈希写入 `data/secret/root.hash`，Basic Auth 密码只以 bcrypt 哈希写入 `data/auth/htpasswd`，两者都不写入 `.env`。安装过程不使用特权容器、不挂载 Docker socket、不授予宿主机 root。
 
+### 向导的两种实现
+
+向导有两套实现，页面序列与最终参数完全一致：
+
+1. `dsh-installer`：Go 二进制，用 Bubble Tea 承载界面（与 dpanel 安装器同一 TUI 框架）。界面占用终端的备用屏幕缓冲，翻页时只重绘变化的行，不整屏刷新；退出后终端恢复原样。安装时自动下载到 `~/.cache/dsh-docker/`。
+2. `install.sh` 内置的 bash 实现：同一套页面的纯 shell 版本。
+
+拿不到二进制时（离线、受限网络、架构不支持）自动回退到第 2 套，安装照常完成，只是渲染由 bash 完成。二进制由 [.github/workflows/build-installer.yml](.github/workflows/build-installer.yml) 构建并发布到 GitHub Release，可用 `DSH_INSTALLER_BASE` 指向自己的镜像源。
+
+界面与安装逻辑分离：向导只负责收集答案，安装仍由 `install.sh` 执行。这样 `curl | bash`（脚本没有文件路径）也能用，且安装逻辑只有一份。
+
 ### 受限网络下构建镜像
 
 直连 Debian 与 npm 官方源不稳定时，可以换成本地镜像再构建。构建参数是 Dockerfile 提供的，

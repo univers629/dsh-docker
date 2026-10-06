@@ -378,7 +378,7 @@ prompt() {
     ui_raw_on || true
     ui_next_page
     ui_lines_begin
-    ui_draw_header "$message"
+    ui_draw_header "$message" 5
     ui_line ""
     if [ -n "$default" ]; then
       ui_line "$(printf '  \033[2m%s\033[0m \033[2m[%s]\033[0m' "$message" "$default")"
@@ -444,6 +444,105 @@ prompt_secret() {
 }
 
 # ---------------------------------------------------------------- 翻页向导
+#
+# 向导有两套实现，界面语义与最终参数完全一致：
+#   1. dsh-installer：Go 二进制，用与 dpanel 安装器相同的 TUI 框架（Bubble Tea）。
+#      界面是「备用屏幕 + 增量重绘 + 每页独立画面」，与 dpanel 同级。
+#   2. 下面的 bash 实现：同一套页面的纯 shell 版本，作为兜底。
+#
+# 之所以保留两套：dsh-installer 需要下载（或现场构建）一个几 MB 的二进制，而本工程
+# 的首要约束是 `curl | bash` 在离线、受限网络、任意架构下都能装完。拿不到二进制时
+# 静默回退，用户仍然拿得到完整向导，只是渲染由 bash 完成。
+DSH_INSTALLER_VERSION="0.1.0"
+DSH_INSTALLER_BASE="${DSH_INSTALLER_BASE:-https://github.com/univers629/dsh-docker/releases/download}"
+
+# 把 dsh-installer 放到缓存目录并打印它的路径；拿不到就返回非零（调用方回退）。
+#
+# 查找顺序：显式路径 → 工程内已构建的产物 → 缓存 → 下载。最后一个失败即回退，
+# 不做重试：这条路径本来就是「有则更好」，不该拖慢安装。
+dsh_installer_path() {
+  local arch url dest cache
+  if [ -n "${DSH_INSTALLER_BIN:-}" ] && [ -x "$DSH_INSTALLER_BIN" ]; then
+    printf '%s' "$DSH_INSTALLER_BIN"
+    return 0
+  fi
+  # 工程内构建产物：开发者本机验证用，优先于下载。
+  if [ -x "./cmd/dsh-installer/dsh-installer" ]; then
+    printf '%s' "./cmd/dsh-installer/dsh-installer"
+    return 0
+  fi
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  cache="${XDG_CACHE_HOME:-$HOME/.cache}/dsh-docker"
+  dest="$cache/dsh-installer-$DSH_INSTALLER_VERSION-$arch"
+  if [ -x "$dest" ]; then
+    printf '%s' "$dest"
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || return 1
+  local url="$DSH_INSTALLER_BASE/v$DSH_INSTALLER_VERSION/dsh-installer-linux-$arch"
+  mkdir -p "$cache" 2>/dev/null || return 1
+  if ! curl -fsSL --max-time 60 "$url" -o "$dest.tmp" 2>/dev/null; then
+    rm -f "$dest.tmp"
+    return 1
+  fi
+  chmod +x "$dest.tmp" 2>/dev/null || { rm -f "$dest.tmp"; return 1; }
+  mv -f "$dest.tmp" "$dest"
+  printf '%s' "$dest"
+}
+
+# 用 dsh-installer 跑向导，并把答案读进当前 shell 的 _OVERRIDE 变量。
+#
+# 答案经临时文件中转：界面占用备用屏幕，写 stdout 会与画面互相干扰；退出向导、
+# 终端复原之后再读文件，两个阶段互不影响。
+dsh_installer_run() {
+  local bin answers key value
+  bin="$(dsh_installer_path)" || return 1
+  [ -x "$bin" ] || return 1
+  answers="$(mktemp "${TMPDIR:-/tmp}/dsh-answers.XXXXXX")" || return 1
+  # 先执行再取退出码：`if ! cmd; then status=$?` 拿到的是取反后的 0，不是真实状态。
+  local status=0
+  "$bin" --answers-file "$answers" --dir "$TARGET_DIR" || status=$?
+  if [ "$status" != 0 ]; then
+    rm -f "$answers"
+    # 用户主动取消（3）不是错误：不再回退到 bash 向导，直接结束。
+    [ "$status" = 3 ] && return 0
+    return 1
+  fi
+  # 逐行读入 KEY=VALUE。值里可能有空格，所以只按第一个 = 切分。
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      action) ACTION="$value" ;;
+      mode) DSH_ANSWER_MODE="$value" ;;
+      access) ACCESS_MODE_OVERRIDE="$value" ;;
+      image_source) IMAGE_SOURCE_OVERRIDE="$value" ;;
+      bind_host) BIND_HOST_OVERRIDE="$value" ;;
+      egress) EGRESS_MODE_OVERRIDE="$value" ;;
+      multi_user) MULTI_USER_OVERRIDE="$value" ;;
+      register_gate) REGISTER_GATE_OVERRIDE="$value" ;;
+      idle_timeout) IDLE_TIMEOUT_OVERRIDE="$value" ;;
+      disk_quota) DISK_QUOTA_OVERRIDE="$value" ;;
+      key_admin) KEY_ADMIN_OVERRIDE="$value" ;;
+      root_password) ROOT_PASSWORD_OVERRIDE="$value" ;;
+      no_root_password) [ "$value" = yes ] && NO_ROOT_PASSWORD_ANSWER=true ;;
+      delete_keep) DSH_DELETE_KEEP="$value" ;;
+    esac
+  done < "$answers"
+  rm -f "$answers"
+  # 一键安装：向导已经问完，交回引擎的零提问路径。
+  if [ "${DSH_ANSWER_MODE:-}" = quick ]; then
+    QUICK_INSTALL=true
+    INTERACTIVE=false
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------- 翻页向导（bash 兜底）
 #
 # 向导占用终端的**备用屏幕缓冲**（alternate screen buffer），与 dpanel 的安装器同一种
 # 形态：进入后整个终端切到一张独立画布，向导画面不会滚进 scrollback；退出时终端恢复到
@@ -573,15 +672,43 @@ UI_FULL_REDRAW=true  # 下一页是否整页重绘
 ui_lines_begin() { UI_LINES=(); }
 ui_line() { UI_LINES+=("$1"); }
 
+# 终端可用行数。留一行余量：写满最后一列/最后一行会触发滚动，一旦滚动，
+# 「CSI H 回左上 + 换行定位」的行号就全部错位，旧行擦不掉、新行叠上去。
+ui_term_rows() {
+  local size rows
+  size="$(stty size < /dev/tty 2>/dev/null)"
+  rows="${size%% *}"
+  case "$rows" in ''|*[!0-9]*) rows=0 ;; esac
+  if [ "$rows" -gt 1 ]; then
+    printf '%s' "$((rows - 1))"
+  else
+    printf '0'
+  fi
+}
+
 # 输出一帧。UI_FULL_REDRAW 为真时先清屏再逐行画；否则只重画内容有变化的行。
+#
+# 两个必须遵守的约束（都是实测出来的）：
+#   1. 帧高不得超过终端行数。超出就会滚动，而滚动之后所有按行号定位的操作全部错位，
+#      表现是「移动选择时旧行残留成两行、还遮挡下面的选项」。
+#   2. 末行之后不能再输出换行。等高于终端时那一行换行会立刻把整屏顶上去一格。
 ui_flush() {
-  local total=${#UI_LINES[@]} i
+  local total=${#UI_LINES[@]} i limit
+  limit="$(ui_term_rows)"
+  if [ "$limit" -gt 0 ] && [ "$total" -gt "$limit" ]; then
+    # 溢出时保底截断：宁可少显示尾部，也不能滚动（滚动会让整页错位）。
+    total="$limit"
+  fi
   if [ "$UI_FULL_REDRAW" = true ]; then
     printf '\033[2J\033[H' > /dev/tty
     for ((i = 0; i < total; i++)); do
-      printf '%s\033[K\r\n' "${UI_LINES[$i]}" > /dev/tty
+      if [ "$i" -eq $((total - 1)) ]; then
+        printf '%s\033[K' "${UI_LINES[$i]}" > /dev/tty
+      else
+        printf '%s\033[K\r\n' "${UI_LINES[$i]}" > /dev/tty
+      fi
     done
-    UI_DRAWN=("${UI_LINES[@]}")
+    UI_DRAWN=("${UI_LINES[@]:0:$total}")
     UI_FULL_REDRAW=false
     return 0
   fi
@@ -600,7 +727,7 @@ ui_flush() {
     printf '\033[K\r\n' > /dev/tty
   done
   if [ "${#UI_DRAWN[@]}" -gt "$total" ]; then
-    UI_DRAWN=("${UI_LINES[@]}")
+    UI_DRAWN=("${UI_LINES[@]:0:$total}")
   fi
 }
 
@@ -608,29 +735,36 @@ ui_flush() {
 # 版式对齐 dpanel 的安装器：标题与步骤计数同一行（`🚀 DPanel - 安装方式 (3/9)`），
 # 每页都重画一遍 logo，读起来是"同一个程序在翻页"而不是一串散问。
 #
-# 三级降级，按终端尺寸依次退让：
-#   宽 >=71 列且高 >=22 行：鲸鱼 + DSH 并排（最完整）
-#   宽 <71 列（并排放不下）：只画 DSH 大字
-#   高 <22 行（图案会把选项挤走）：只留标题行
+# $2 是页头之后还要输出多少行（正文 + 页脚）。图案按剩余空间选择，而不是按终端
+# 高度写死：只要正文还放得下就画图案，放不下就不画。硬编码高度会让长菜单撑破屏幕，
+# 一旦内容超出终端高度就会滚动，滚动之后按行号定位的重绘全部错位。
+# 图案高度：鲸鱼与 DSH 并排 11 行，仅 DSH 大字 8 行；外加图案后的一行空行。
 ui_draw_header() {
-  local page_title="${1:-}"
-  local term_rows=0 term_cols=0 size
+  local page_title="${1:-}" body_lines="${2:-0}"
+  local term_rows=0 term_cols=0 size room
   size="$(stty size < /dev/tty 2>/dev/null)"
   term_rows="${size%% *}"
   term_cols="${size##* }"
   case "$term_rows" in ''|*[!0-9]*) term_rows=0 ;; esac
   case "$term_cols" in ''|*[!0-9]*) term_cols=0 ;; esac
 
-  if [ "$term_rows" -eq 0 ] || [ "$term_rows" -ge 22 ]; then
-    # 鲸鱼 30 列 + 间隔 2 + DSH 39 列 = 71 列；放不下就退成只画 DSH。
-    # 图案作为「行」进入缓冲，而不是直接打印：页内重绘时它们不变化，
-    # 于是 ui_flush 只下移光标、不重画，图片不会被反复刷。
-    if [ "$term_cols" -eq 0 ] || [ "$term_cols" -ge 71 ]; then
+  # 终端未知（拿不到尺寸）时按最小可用高度处理，只画标题。
+  if [ "$term_rows" -eq 0 ]; then
+    room=0
+  else
+    room=$((term_rows - 1 - body_lines - 1))   # 留白 1 行 + 标题 1 行
+  fi
+
+  if [ "$term_cols" -eq 0 ] || [ "$term_cols" -ge 71 ]; then
+    if [ "$room" -ge 12 ]; then
       ui_paint_banner
-    else
-      ui_paint_wordmark
+      ui_line ""
     fi
-    ui_line ""
+  else
+    if [ "$room" -ge 9 ]; then
+      ui_paint_wordmark
+      ui_line ""
+    fi
   fi
   local head
   head="$(printf '\033[1m  DeepSeek Harness\033[0m')"
@@ -643,6 +777,7 @@ ui_draw_header() {
     head="$head$(printf ' \033[2m(%s)\033[0m' "$UI_STEP")"
   fi
   ui_line "$head"
+  return 0
 }
 
 # 把图案追加为「行」，供增量重绘使用（每行都带品牌蓝，末行后复位颜色）。
@@ -711,8 +846,16 @@ ui_page_select() {
     # 组装本帧：页头 + 空行 + 选项 + 操作键提示。
     # 只组装不打印；ui_flush 决定重画哪些行。
     ui_lines_begin
+    # 先算出正文行数，页头据此决定要不要画图案：选项全部可见优先于图案。
+    local body_lines=3   # 前导空行 + 尾随空行 + 操作键提示
+    for ((i = 0; i < ${#items[@]}; i++)); do
+      rest="${items[$i]#*$'\t'}"
+      label="${rest%%$'\t'*}"
+      body_lines=$((body_lines + 1))
+      [ "$rest" != "$label" ] && body_lines=$((body_lines + 1))
+    done
     # 标题并入页头（dpanel 的版式：`DPanel - 安装方式 (3/9)`），正文直接列选项
-    ui_draw_header "$title"
+    ui_draw_header "$title" "$body_lines"
     ui_line ""
     for ((i = 0; i < ${#items[@]}; i++)); do
       value="${items[$i]%%$'\t'*}"
@@ -766,7 +909,7 @@ ui_page_input() {
   fi
   ui_raw_on || { UI_TUI=false; ui_page_input "$title" "$label" "$default" "$secret"; return 0; }
   ui_lines_begin
-  ui_draw_header "$title"
+  ui_draw_header "$title" 4
   ui_line ""
   if [ -n "$default" ]; then
     ui_line "$(printf '  %s \033[2m[%s]\033[0m' "$label" "$default")"
@@ -836,7 +979,8 @@ confirm_install_plan() {
   if [ "$UI_TUI" = true ]; then
     ui_raw_on || true
     ui_lines_begin
-    ui_draw_header "确认是否执行"
+    # 摘要表本身占 ${#rows[@]} 行，外加前导/尾随空行。
+    ui_draw_header "确认是否执行" "$(( ${#rows[@]} + 2 ))"
     ui_line ""
     local i
     for ((i = 0; i < ${#rows[@]}; i++)); do
@@ -877,7 +1021,7 @@ prompt_optional() {
     ui_raw_on || true
     ui_next_page
     ui_lines_begin
-    ui_draw_header "$message"
+    ui_draw_header "$message" 5
     ui_line ""
     if [ -n "$default" ]; then
       ui_line "$(printf '  \033[2m当前值: %s（回车表示清空）\033[0m' "$default")"
@@ -1054,7 +1198,15 @@ elif command -v sudo >/dev/null 2>&1 && sudo docker container inspect dsh >/dev/
 fi
 
 if [ -z "$ACTION" ] && [ "$USERNS_PREFLIGHT" != true ]; then
-  if [ "$INTERACTIVE" = true ]; then
+  # 优先把向导交给 dsh-installer（Go + Bubble Tea，与 dpanel 安装器同一 TUI 框架）。
+  # 它只负责界面：收集完答案后写成 KEY=VALUE 文件，本脚本读进来继续执行安装。
+  # 拿不到二进制（离线、受限网络、架构不支持）时回退到下面的 bash 向导，
+  # 两条路径给出同样的页面序列与同样的参数。
+  if [ "$INTERACTIVE" = true ] && dsh_installer_run; then
+    # 答案已就位（ACTION 与各 _OVERRIDE 均已设置），跳过 bash 向导直接进入安装。
+    # 这里不能 exit：安装逻辑在本文件后半段。
+    DSH_ANSWER_CONFIRMED=true
+  elif [ "$INTERACTIVE" = true ]; then
     # 主菜单：一页列出全部生命周期动作。安装项在容器已存在时标注不可用，
     # 而不是让人选了才撞上报错。
     if [ "$INSTALL_AVAILABLE" = false ]; then

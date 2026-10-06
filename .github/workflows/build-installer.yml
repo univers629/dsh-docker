@@ -1,0 +1,113 @@
+# 构建 dsh-installer：把向导界面编译成静态二进制，随 GitHub Release 发布。
+#
+# 为什么单独一个工作流：install.sh 会在运行时下载这个二进制（见 dsh_installer_path）。
+# 拿不到时回退到内置的 bash 向导，所以构建失败不会影响安装可用性——只是界面退回
+# 纯 shell 渲染。这也意味着这个工作流可以独立于镜像发布流程演进。
+name: build-installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 版本号（写进 --version，并决定 Release 标签 v<version>）
+        required: true
+        default: '0.1.0'
+  push:
+    tags:
+      - 'installer-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # 版本号先解析出来，供构建与发布两个作业共用。
+  # 放在独立作业里是因为 build 是矩阵作业：矩阵作业的 outputs 会互相覆盖，
+  # 用它传版本号会拿到不确定的那一份。
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: ver
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF: ${{ github.ref_name }}
+        run: |
+          set -eu
+          version="$INPUT_VERSION"
+          if [ -z "$version" ]; then
+            # installer-v0.1.0 -> 0.1.0
+            version="${REF#installer-v}"
+          fi
+          [ -n "$version" ] || { echo '无法确定版本号。' >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+          - goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cmd/dsh-installer/go.sum
+
+      - name: Build
+        working-directory: cmd/dsh-installer
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -eu
+          # CGO_ENABLED=0：静态链接，目标机不需要 glibc 版本匹配。
+          # -s -w 去掉符号表，二进制从 4.4MB 降到约 3MB。
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "dsh-installer-linux-${GOARCH}" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.goarch }}
+          path: cmd/dsh-installer/dsh-installer-linux-${{ matrix.goarch }}
+          if-no-files-found: error
+
+  release:
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum dsh-installer-linux-* > SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -eu
+          tag="v${VERSION}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* \
+              --title "dsh-installer ${VERSION}" \
+              --notes "安装向导的终端界面二进制（Linux amd64 / arm64）。
+
+install.sh 会在运行时自动下载到 ~/.cache/dsh-docker/；拿不到时回退到内置的
+bash 向导，所以不下载这一份也能完成安装，只是界面由纯 shell 渲染。"
+          fi

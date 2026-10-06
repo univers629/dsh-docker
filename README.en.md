@@ -47,6 +47,17 @@ Both commands open the paged wizard: it asks page by page about image source, ac
 
 The container root password is stored only as a sha512crypt hash in `data/secret/root.hash` and the Basic Auth password only as a bcrypt hash in `data/auth/htpasswd`; neither is written to `.env`. Nothing in this flow uses a privileged container, mounts a Docker socket, or grants host root.
 
+### Two implementations of the wizard
+
+The wizard ships in two forms with identical page sequences and identical resulting arguments:
+
+1. `dsh-installer`: a Go binary rendering the interface with Bubble Tea, the same TUI framework the dpanel installer uses. It takes over the terminal's alternate screen buffer and redraws only the lines that changed instead of repainting everything; the original screen is restored on exit. It is downloaded to `~/.cache/dsh-docker/` during installation.
+2. The built-in bash implementation in `install.sh`: the same pages written in pure shell.
+
+When the binary cannot be fetched (offline, restricted network, unsupported architecture) the installer falls back to the second form, so installation still completes with shell rendering. The binary is built and published to GitHub Releases by [.github/workflows/build-installer.yml](.github/workflows/build-installer.yml); point `DSH_INSTALLER_BASE` at your own mirror if needed.
+
+Interface and installation logic are separate: the wizard only collects answers, and `install.sh` still performs the installation. That keeps `curl | bash` (where the script has no path) working, and keeps a single copy of the installation logic.
+
 ### Building behind a restricted network
 
 If the official Debian and npm mirrors are unreliable, build against local mirrors instead. The build arguments come from the Dockerfile, so the installer needs no changes:

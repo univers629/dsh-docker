@@ -29,6 +29,12 @@ build/
 *.zip
 *.log
 
+# dsh-installer 的构建产物：约 4 MB 的静态二进制，由 build-installer 工作流
+# 随 Release 发布，不入库。install.sh 会在运行时下载，拿不到时回退到 bash 向导。
+cmd/dsh-installer/dsh-installer
+cmd/dsh-installer/dsh-installer-*
+cmd/dsh-installer/dsh-installer-linux-*
+
 # Local test deployments: the installer's default --dir / -Dir is "dsh-docker",
 # so running it from inside the repo leaves a whole project tree here.
 /dsh-docker/
