@@ -4362,6 +4362,10 @@ add_model_key() {
     echo "[错误] 启动失败。密钥已写入 data/broker/keys.json，修好后可以重试。" >&2
     exit 1
   fi
+  # 面板地址与令牌必须在 assert 之前打印：assert 失败会 return/exit，把它们之后的
+  # 输出全部跳过。上面刚调过 write_key_admin_token，令牌可能是这一轮新生成的——
+  # 只回显这一次，被跳过就只能自己去 data/broker/admin.token 里翻。
+  print_key_admin_access
   assert_model_broker
   assert_key_admin
   echo
@@ -4370,7 +4374,6 @@ add_model_key() {
   echo "    刷新一下 WebUI 就能在「设置 → 模型」里看到这些供应商，密钥框里是占位串。"
   echo "    容器内那份 skill 文档上的 DSH_MODEL_BROKER 仍显示安装时的值，要等下次重建容器"
   echo "    才会刷新——那只是说明文字，不影响代理生效。"
-  print_key_admin_access
 }
 
 # 给已经装好的部署开或关模型密钥管理面板。和 model-key 同一个理由：docker-compose.keys-admin.yml
@@ -4418,12 +4421,15 @@ manage_key_admin() {
     echo "[错误] 启动失败。.env 已更新，修好后可以重新执行 ./install.sh key-panel。" >&2
     exit 1
   fi
+  # 面板地址与令牌必须在 assert 之前打印：assert 失败会 exit，把它们之后的输出
+  # 全部跳过。上面刚调过 write_key_admin_token，令牌可能是这一轮新生成的——
+  # 只回显这一次，被跳过就只能自己去 data/broker/admin.token 里翻。
+  print_key_admin_access
   assert_model_broker
   assert_key_admin
   echo
   echo "==> 面板已就绪。在页面上保存上游后它会直接写 data/dsh/settings.yaml 与"
   echo "    .credentials.yaml，DSH 热加载这两份文件，刷新 WebUI 就能在「设置 → 模型」里选到。"
-  print_key_admin_access
 }
 
 cleanup_pending_env() {
@@ -4483,13 +4489,18 @@ install_execute_body() {
   fi
   mv "$PENDING_ENV_FILE" .env
   PENDING_ENV_FILE=""
-  assert_dsh_hardening
-  assert_model_broker
-  assert_key_admin
   # 面板地址与访问令牌必须在这里打印：它是浏览器里填密钥的唯一入口，
   # 装完不告诉用户地址和令牌，密钥面板就等于不存在（密钥本体不在终端里收集，
   # 全部在面板里填）。此前只在 model-key / key-panel 路径打印，install 漏了。
+  #
+  # 位置必须在下面那组 assert **之前**：那些 assert 失败会 return 1，把它们之后
+  # 的输出全部跳过。容器此刻已经起来、.env 也已提交，访问信息已经是既成事实，
+  # 不该因为一项校验没过就不告诉用户——令牌只回显这一次，错过就得自己去
+  # data/broker/admin.token 里翻。
   print_key_admin_access
+  assert_dsh_hardening
+  assert_model_broker
+  assert_key_admin
   assert_egress_isolation
   # ./dsh.sh remove 之后重装是常见路径，那会留下失去标签的旧镜像和退出的旁路容器。
   prune_project_leftovers

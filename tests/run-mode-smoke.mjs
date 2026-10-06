@@ -438,6 +438,38 @@ assert.match(files.skill, /sudo apt-get install/)
 assert.doesNotMatch(files.installSh, /--run-as-root|--normal-user|--no-root(?!-password)/)
 assert.match(files.installSh, /remove_compose_env DSH_RUN_AS_ROOT/)
 assert.match(files.installSh, /assert_dsh_hardening/)
+// 访问凭据必须在同一函数内的 assert 之前打印。
+//
+// 那些 assert 失败会 return/exit，把它们之后的语句全部跳过。容器此刻已经起来、
+// .env 也已提交，访问信息是既成事实：一项校验没过就不告诉用户面板地址与令牌，
+// 会让人以为「装好了但拿不到令牌」。write_key_admin_token 还可能在同一条路径上
+// 新生成令牌，只回显这一次，错过只能自己去 data/broker/admin.token 里翻。
+//
+// 覆盖全部三个会打印凭据的入口：安装、补填密钥、开关面板。
+{
+  const ASSERTS = ['assert_dsh_hardening', 'assert_model_broker', 'assert_key_admin', 'assert_egress_isolation']
+  // 取出每个函数的正文（从 `name() {` 到下一个顶层 `}`）。
+  function bodyOf(name) {
+    const start = files.installSh.indexOf(`${name}() {`)
+    assert.ok(start > 0, `install.sh 必须定义 ${name}`)
+    const end = files.installSh.indexOf('\n}', start)
+    return files.installSh.slice(start, end)
+  }
+  for (const fn of ['install_execute_body', 'add_model_key', 'manage_key_admin']) {
+    const body = bodyOf(fn)
+    const accessAt = body.indexOf('print_key_admin_access')
+    assert.ok(accessAt > 0, `${fn} 必须调用 print_key_admin_access`)
+    for (const later of ASSERTS) {
+      const at = body.indexOf(later)
+      if (at < 0) continue
+      assert.ok(
+        accessAt < at,
+        `${fn} 里 ${later} 会在失败时中断并跳过其后的输出，` +
+          `因此 print_key_admin_access 必须排在它之前（实际在第 ${accessAt} 字符，${later} 在第 ${at} 字符）`,
+      )
+    }
+  }
+}
 assert.match(files.installSh, /期望 1000/)
 assert.match(files.installSh, /verify-dsh-hardening/)
 assert.match(files.installSh, /--root-password/)
