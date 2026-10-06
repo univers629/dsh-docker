@@ -207,36 +207,6 @@ func (m wizardModel) goBack() wizardModel {
 	return m
 }
 
-// bodyLineCount 估算本页正文占多少行（含选中项说明与底部提示），
-// 供 View 判断横幅还有多少空间可用。必须与 View 的渲染保持一致：
-// 少算会让横幅挤掉选项，多算会让横幅该出现时没出现。
-func (m wizardModel) bodyLineCount() int {
-	lines := 2 // 页头后的空行 + 底部的空行
-	switch m.current.kind {
-	case pageSelect:
-		// 每项一行；只有选中项额外占一行说明。
-		lines += len(m.current.choices)
-		if m.cursor < len(m.current.choices) && m.current.choices[m.cursor].desc != "" {
-			lines++
-		}
-	case pageInput, pageSecret:
-		lines += 2 // 字段名 + 输入行
-		if m.input == "" && m.current.placeholder != "" {
-			lines++
-		}
-	case pageConfirm:
-		if m.current.summary != nil {
-			lines += len(m.current.summary(&m))
-		}
-		lines += len(m.current.choices)
-	}
-	if m.err != "" {
-		lines += 2
-	}
-	lines++ // 操作键提示
-	return lines
-}
-
 func (m wizardModel) View() string {
 	if m.done || m.aborted {
 		return ""
@@ -244,20 +214,15 @@ func (m wizardModel) View() string {
 	var b strings.Builder
 
 	// 横幅：与 install.sh 同一份图案（本文件同目录的 banner.go）。
-	// 按剩余行数决定是否画——选项可见优先于图案，行数不够时只显示内容。
-	// 正文行数先估出来，横幅才知道自己有多少空间。
-	bodyLines := m.bodyLineCount()
-	room := 0
-	if m.height > 0 {
-		// 留一行给底部提示，避免写满最后一行触发终端滚动（滚动会让整页错位）。
-		room = m.height - 1 - bodyLines - 1
+	//
+	// 只按宽度决定画哪一个，不因高度而省略。向导的内容是固定的：横幅 11 行 +
+	// 空行 1 + 页头 2 + 选项 + 选中项说明 1 + 提示 2，主菜单 6 项合计 23 行，
+	// 最常见的 24 行终端装得下，所以正常情况不需要裁剪任何东西。
+	art := bannerForWidth(m.width)
+	for _, line := range art {
+		b.WriteString(bannerColor.Render(line) + "\n")
 	}
-	if art := bannerLines(m.width, room); art != nil {
-		for _, line := range art {
-			b.WriteString(bannerColor.Render(line) + "\n")
-		}
-		b.WriteString("\n")
-	}
+	b.WriteString("\n")
 
 	// 页头与 install.sh 的向导同版式：`DeepSeek Harness - <页标题> (<页码>)`。
 	head := titleStyle.Render("DeepSeek Harness")
@@ -269,8 +234,8 @@ func (m wizardModel) View() string {
 
 	switch m.current.kind {
 	case pageSelect:
-		// 只显示选中项的说明：十项各带一行说明会把正文撑到 20 行，
-		// 在 24 行终端里直接吃掉横幅与页头的位置。dpanel 的主菜单同样只有动作名。
+		// 全部选项都要显示：看不到的选项等于不存在，用户无从知道自己漏了什么。
+		// 说明只在选中项那一行显示（每项都带说明会把整页推到 29 行）。
 		for i, c := range m.current.choices {
 			if i == m.cursor {
 				b.WriteString(cursorStyle.Render("  ▸ "+c.label) + "\n")
@@ -320,7 +285,9 @@ func (m wizardModel) View() string {
 		hint += " | Esc 返回"
 	}
 	hint += " | Ctrl+C 退出"
-	b.WriteString("\n" + helpStyle.Render(hint) + "\n")
+	// 末尾不写换行：Bubble Tea 按 "\n" 切分帧，结尾的换行会多算一个空行，
+	// 而渲染器在帧高于终端时从顶部裁剪——多算的这一行会挤掉最上面的图案。
+	b.WriteString("\n" + helpStyle.Render(hint))
 
 	return b.String()
 }

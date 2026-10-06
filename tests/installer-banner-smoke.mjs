@@ -88,23 +88,60 @@ function readGoArray(src, varName) {
   return out
 }
 
+// 统计被实心像素四面包围的空白格（镂空）。鲸鱼的眼睛与腹部是识别特征，
+// 压缩后若归零，说明图标已糊成一块实心色块。
+function countHollows(lines) {
+  const w = Math.max(...lines.map((l) => [...l].length))
+  const g = lines.map((l) => [...l].concat(Array(w - [...l].length).fill(' ')))
+  const on = (r, c) => ['█', '▀', '▄'].includes(g[r]?.[c] ?? ' ')
+  let count = 0
+  for (let r = 1; r < g.length - 1; r++) {
+    for (let c = 1; c < w - 1; c++) {
+      if (on(r, c)) continue
+      let l = false, ri = false, u = false, d = false
+      for (let k = c - 1; k >= 0; k--) if (on(r, k)) { l = true; break }
+      for (let k = c + 1; k < w; k++) if (on(r, k)) { ri = true; break }
+      for (let k = r - 1; k >= 0; k--) if (on(k, c)) { u = true; break }
+      for (let k = r + 1; k < g.length; k++) if (on(k, c)) { d = true; break }
+      if (l && ri && u && d) count++
+    }
+  }
+  return count
+}
+
 const goArt = readGoArray(bannerGo, 'bannerArt') ?? []
 const goWordmark = readGoArray(bannerGo, 'wordmarkArt') ?? []
-assert.ok(goArt.length >= 8, `Go banner must have at least 8 rows, got ${goArt.length}`)
 assert.ok(goWordmark.length >= 6, `Go wordmark must have at least 6 rows, got ${goWordmark.length}`)
-assert.deepEqual(
-  goArt,
-  artLines,
-  'cmd/dsh-installer/banner.go and install.sh banners must be identical; the Go copy is generated from install.sh',
+
+// Go 侧的并排横幅是压缩过的，与 install.sh 的原始图案**不同**（也不必相同）：
+// 压缩是刻意的——Bubble Tea 渲染器在帧高于终端时从顶部裁剪，原始 11 行横幅会
+// 让常见终端里的鲸鱼被切掉。这里断言压缩后的关键性质，而不是两边逐字符相等。
+assert.ok(
+  goArt.length >= 5 && goArt.length <= 9,
+  `压缩后的并排横幅应在 5..9 行之间（兼顾可辨与矮终端），实际 ${goArt.length} 行`,
 )
+
+// 页面总高 = 横幅 + 空行 1 + 页头 2 + 选项 6 + 选中项说明 1 + 提示 1
+// 必须放得进最常见的 19 行终端，否则顶部的鲸鱼会被渲染器裁掉。
+const pageRows = goArt.length + 1 + 2 + 6 + 1 + 1
+assert.ok(
+  pageRows <= 19,
+  `完整页面应在 19 行终端内显示（当前 ${pageRows} 行）——超出会让顶部的鲸鱼被裁掉`,
+)
+
+// 压缩必须保住镂空：鲸鱼的眼睛与腹部是它的识别特征，糊成一块就不成图标了。
+const goHollow = countHollows(goArt)
+assert.ok(goHollow >= 6, `压缩后的鲸鱼必须保留镂空，实际只有 ${goHollow} 格`)
+
+// wordmark 未经压缩，两边必须逐字符一致：它是窄终端的降级图案，没有压缩需求。
 assert.deepEqual(
   goWordmark,
   wordmarkLines,
-  'cmd/dsh-installer/banner.go and install.sh wordmarks must be identical; the Go copy is generated from install.sh',
+  'cmd/dsh-installer/banner.go and install.sh wordmarks must be identical',
 )
 
-// 并排后必须放得进 80 列终端，否则主菜单会被折行打乱
-const bannerWidth = Math.max(...artLines.map((l) => [...l].length))
+// 并排后必须放得进常见终端宽度，否则页面会被折行打乱
+const bannerWidth = Math.max(...goArt.map((l) => [...l].length))
 assert.ok(
   bannerWidth <= 80,
   `composed banner must fit an 80-column terminal, got ${bannerWidth} columns`,
