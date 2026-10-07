@@ -14,6 +14,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { brokerTokenDigest, callerTokenFromHeaders, identifyCaller, isUpstreamAllowed, parseGrants } from '../bin/dsh-broker-grants.mjs'
+import { ADMIN_UID } from '../bin/dsh-instances-policy.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -131,6 +132,62 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
   const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8')
   assert.ok(dockerfile.includes('seed-dsh-model-settings.mjs'), 'the seeder ships in the image (it runs at instance creation)')
   console.log('接线（编排侧）：ok')
+}
+
+// ---- 8) 管理员工作台同样要有身份 ----
+//
+// root 没有实例容器（它直接用静态声明的管理工作台），但代理按 uid 识别调用者，
+// 所以它同样需要 uid 与令牌。缺了任一个，管理员在自己的工作台里发模型请求会被
+// 代理以「认不出调用者」拒掉，而配置看上去一切正常。
+{
+  const policy = fs.readFileSync(path.join(root, 'bin', 'dsh-instances-policy.mjs'), 'utf8')
+  assert.ok(policy.includes('ADMIN_UID'), 'a reserved uid exists for the administrator')
+
+  const auth = fs.readFileSync(path.join(root, 'bin', 'dsh-auth.mjs'), 'utf8')
+  assert.ok(auth.includes('migrateAdminIdentity'), 'existing administrators are migrated on startup')
+  assert.match(
+    auth,
+    /role !== 'root'/,
+    'the migration targets the administrator account',
+  )
+  assert.ok(
+    auth.includes('adminBrokerToken'),
+    'the administrator token comes from the deployment declaration, not a random value: ' +
+      'the same value has to reach the settings.yaml header written by the installer and the panel',
+  )
+
+  // 授权表按 uid 生成，root 的 uid 必须在其中，否则代理认不出它。
+  const grants = parseGrants(JSON.stringify({
+    version: 1,
+    users: { [String(ADMIN_UID)]: { tokenDigest: brokerTokenDigest('admin-token'), upstreams: ['vyceai'] } },
+  }))
+  const caller = identifyCaller(grants, 'admin-token')
+  assert.ok(caller, 'the administrator uid is accepted by the broker')
+  assert.equal(caller.uid, String(ADMIN_UID))
+  assert.ok(isUpstreamAllowed(caller, 'vyceai'), 'the administrator gets its granted upstreams')
+  console.log('管理员身份：ok')
+}
+
+// ---- 9) settings.yaml 变更后 supervisor 会重启 DSH ----
+//
+// DSH 只在启动时导入 settings.yaml（随后改名成 .imported），它没有热加载。
+// 没有这一步，面板里保存成功、工作台里却看不到新供应商。
+{
+  const supervisor = fs.readFileSync(path.join(root, 'bin', 'dsh-supervisor'), 'utf8')
+  assert.ok(
+    supervisor.includes('DSH_SETTINGS_FILE'),
+    'the supervisor watches the model settings file',
+  )
+  assert.match(
+    supervisor,
+    /-f "\$DSH_SETTINGS_FILE"/,
+    'the watch triggers on the file reappearing, which is exactly what a save does',
+  )
+  assert.ok(
+    supervisor.includes('DSH_RESTART_REQUEST_FILE'),
+    'the restart reuses the existing request-file path so the shutdown path stays single',
+  )
+  console.log('模型配置重启：ok')
 }
 
 console.log('dsh-broker-grants smoke: ok')

@@ -343,6 +343,19 @@ function writeSeedTarget(file, text, mode) {
 }
 
 /**
+ * 管理员工作台的模型代理令牌，写进每条生成路由的请求头。
+ *
+ * 代理按调用者身份放行上游，管理员工作台是静态容器、没有实例令牌，所以这份值
+ * 必须由部署方提供（.env 的 DSH_ADMIN_BROKER_TOKEN），与网关在授权表里标识 root
+ * 的那一份同值。留空时返回空对象：宁可写不出路由，也不写一个认不出的令牌。
+ * @returns {Record<string,string>} 请求头。
+ */
+function adminExtraHeaders() {
+  const token = String(process.env.DSH_ADMIN_BROKER_TOKEN ?? '').trim()
+  return token.length > 0 ? { 'x-dsh-instance-token': token } : {}
+}
+
+/**
  * 把 keys.json 里的非秘密事实写进 DSH 自己的配置（settings.yaml / .credentials.yaml）。
  * 复用安装器那个脚本做纯变换，不重写一份：格式契约只该有一个实现。密钥不进载荷。
  *
@@ -374,7 +387,7 @@ function spawnSeed(document) {
     return Promise.resolve({ skipped: true, failed: true, output: '', warnings: '', error: error.message })
   }
   const payload = JSON.stringify({
-    ...seedPayload(document, BROKER_BASE, PLACEHOLDER),
+    ...seedPayload(document, BROKER_BASE, PLACEHOLDER, adminExtraHeaders()),
     settingsText,
     credentialsText,
   })
@@ -641,7 +654,10 @@ function stateResponse() {
   }
 }
 
-const RELOAD_NOTE = 'dsh-key-broker 每 5 秒按修改时间热加载 keys.json，DSH 的 settings.yaml 也是热加载：两边都不用重启容器。'
+// DSH 的 settings.yaml 不是热加载的：它只在启动时被导入 profile（随后改名成
+// .imported）。dsh 容器里的 supervisor 会盯着这个文件，一出现就重启 DSH 进程
+// （容器不动），所以这里说「保存后 DSH 会自动重启一次」而不是「不用重启」。
+const RELOAD_NOTE = 'dsh-key-broker 每 5 秒按修改时间热加载 keys.json；DSH 的模型配置只在启动时读取，保存后 dsh 容器会自动重启一次 DSH 进程（容器不重建，进行中的会话会中断）。'
 
 /**
  * 保存前替目录外的网关向上游问一次：模型清单，以及 base_url 到底该不该带版本段。

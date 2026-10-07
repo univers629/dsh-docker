@@ -65,12 +65,19 @@ async function api(path, body) {
 
 function shapeOptions() {
   const select = byId('shape')
+  // 重建选项会把当前选中值丢掉（清空 select 后浏览器默认选第一项，也就是 any）。
+  // refresh() 每次保存后都会调用这里，不保住原值的话，用户选了 responses 保存，
+  // 界面却跳回 any —— 看起来像没保存上，其实 keys.json 里是对的。
+  const previous = select.value
   select.textContent = ''
   for (const shape of S.state.apiShapes) {
     const option = document.createElement('option')
     option.value = shape.id
     option.textContent = shape.id + ' — ' + shape.label
     select.appendChild(option)
+  }
+  if (previous !== '' && S.state.apiShapes.some((shape) => shape.id === previous)) {
+    select.value = previous
   }
 }
 

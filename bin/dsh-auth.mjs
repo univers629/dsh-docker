@@ -67,7 +67,7 @@ import {
   sealCaptchaSecret,
   verifyCaptchaToken,
 } from './dsh-auth-policy.mjs'
-import { UID_BASE, allocateUid } from './dsh-instances-policy.mjs'
+import { ADMIN_UID, UID_BASE, allocateUid } from './dsh-instances-policy.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -115,6 +115,9 @@ const CONFIG = {
   // 网关与管理员工作台共享 dsh-private，因此这道进程内校验是必要的纵深防御。
   // 留空则维持旧行为（仅靠网络边界），供单入口直连的开发场景使用。
   ingressToken: process.env.DSH_AUTH_INGRESS_TOKEN ?? '',
+  // 管理员工作台的模型代理令牌。必须与写进 settings.yaml 请求头的那一份同值
+  // （安装器与密钥面板都从 .env 的同名变量取），否则代理认不出 root。
+  adminBrokerToken: process.env.DSH_ADMIN_BROKER_TOKEN ?? '',
   // 可信代理地址列表：只有直接对端在这个列表里时，x-real-ip / x-forwarded-for 才被
   // 采信（否则一律用 socket 地址）。默认只信入口容器；多入口部署用逗号分隔追加。
   trustedProxies: (process.env.DSH_AUTH_TRUSTED_PROXIES ?? 'dsh-ingress')
@@ -835,23 +838,82 @@ function verifySecondFactor(user, code) {
 
 // ---------------------------------------------------------------- bootstrap
 
+/**
+ * 给一个账户发放模型代理令牌（明文进 state.brokerTokens，摘要进 user）。
+ *
+ * 与注册流程同一套做法：代理只存摘要，明文由编排服务在创建实例时取用。
+ *
+ * 管理员例外：它的明文要出现在 dsh 容器的 settings.yaml 请求头里，而那份文件由
+ * 安装器与密钥面板写，两者都不该去读 dsh-auth 的状态库。因此管理员用部署方给的
+ * DSH_ADMIN_BROKER_TOKEN（.env），三处同值；没给才退回随机生成。
+ * @param {object} state 状态库。
+ * @param {object} user 用户记录（就地修改）。
+ * @param {string} [preset] 指定明文令牌。
+ * @returns {void}
+ */
+function assignBrokerToken(state, user, preset = '') {
+  const token = preset.length > 0 ? preset : randomToken(32)
+  user.brokerTokenDigest = brokerTokenDigest(token)
+  state.brokerTokens = state.brokerTokens ?? {}
+  state.brokerTokens[user.id] = token
+}
+
+/**
+ * 给早先版本建的管理员补上 uid 与代理令牌，并让令牌跟随部署声明。
+ *
+ * 旧版 root 没有 uid，于是进不了授权表，管理员在自己的工作台里发模型请求会被代理
+ * 以「认不出调用者」拒绝。
+ *
+ * 令牌以 DSH_ADMIN_BROKER_TOKEN 为准而不是「缺失才补」：那份明文还要写进 dsh 容器
+ * 的 settings.yaml 请求头，换令牌时（.env 改了）若只保留旧摘要，两边就对不上，
+ * 现象是管理员的模型请求全被 401，而配置看上去一切正常。留空时不动，避免把部署
+ * 方手工设置的令牌覆盖掉。
+ * @param {object} state 状态库。
+ * @returns {boolean} 是否发生了改动。
+ */
+function migrateAdminIdentity(state) {
+  let changed = false
+  for (const user of state.users) {
+    if (user.role !== 'root') continue
+    if (!Number.isInteger(user.uid)) {
+      user.uid = ADMIN_UID
+      changed = true
+    }
+    const declared = CONFIG.adminBrokerToken
+    const current = state.brokerTokens?.[user.id]
+    const missing = typeof current !== 'string' || current.length === 0
+    if (declared.length > 0 ? current !== declared : missing) {
+      assignBrokerToken(state, user, declared)
+      changed = true
+    }
+  }
+  if (changed) {
+    appendAudit(state, { actorId: 'system', action: 'admin.identity.migrate', result: 'ok', change: { uid: ADMIN_UID } })
+    commitState(state)
+  }
+  return changed
+}
+
 /** 首次启动创建 root。密码来自环境变量，否则随机生成写入 0600 文件（不打印明文）。 */
 function bootstrap(state) {
   if (state.setup.initialized && state.users.some((u) => u.role === 'root')) return
   const fromEnv = process.env.DSH_AUTH_INITIAL_PASSWORD
   const password = typeof fromEnv === 'string' && fromEnv.length > 0 ? fromEnv : generatePassword()
   const at = now()
-  state.users.push({
+  const user = {
     id: `u-${randomToken(8)}`,
     username: 'root',
     role: 'root',
     status: 'enabled',
+    uid: ADMIN_UID,
     passwordHash: hashPassword(password),
     authVersion: 1,
     totp: { enabled: false },
     passkeys: [],
     createdAt: at,
-  })
+  }
+  assignBrokerToken(state, user, CONFIG.adminBrokerToken)
+  state.users.push(user)
   state.setup.initialized = true
   state.setup.multiUser = CONFIG.multiUser
   state.setup.registerGate = CONFIG.registerGate
@@ -2486,6 +2548,10 @@ resolveTrustedProxies().catch((error) => {
 })
 const initial = freshState()
 bootstrap(initial)
+// 旧版建的管理员缺 uid 与代理令牌，补一次再生成授权表，否则它进不了授权表。
+if (migrateAdminIdentity(freshState())) {
+  process.stdout.write('[dsh-auth] admin identity migrated (uid and broker token assigned)\n')
+}
 const configChanges = syncDeploymentConfig(freshState())
 // 授权表是派生数据：启动时按当前账户重写一次，避免它与状态库脱节
 await syncBrokerGrants(freshState())

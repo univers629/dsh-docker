@@ -38,6 +38,9 @@ services:
       DSH_KEY_ADMIN_DSH_HOME: /data/dsh
       DSH_KEY_ADMIN_SEED: /dsh-bin/seed-dsh-model-settings.mjs
       DSH_KEY_ADMIN_WEB: /dsh-bin/dsh-key-admin-web
+      # 管理员工作台的模型代理令牌：面板把它写进 settings.yaml 的请求头，与网关
+      # 在授权表里标识 root 的那一份必须同值，否则代理认不出管理员。
+      DSH_ADMIN_BROKER_TOKEN: "${DSH_ADMIN_BROKER_TOKEN:-}"
       # 写进 DSH settings.yaml 的 base_url 前缀，必须与 broker 的实际地址一致。
       DSH_KEY_ADMIN_BROKER_BASE: "${DSH_MODEL_BROKER_BASE:-http://dsh-key-broker:8080}"
       # 写进 DSH .credentials.yaml 的占位密钥。必须与 install.sh 的

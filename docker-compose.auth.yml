@@ -46,6 +46,9 @@ services:
       DSH_AUTH_IDLE_TTL_SECONDS: "${DSH_SESSION_IDLE_TTL_SECONDS:-86400}"
       # 入口↔网关共享密钥：设置后 verify 端点要求调用者携带同一个值。
       DSH_AUTH_INGRESS_TOKEN: "${DSH_AUTH_INGRESS_TOKEN:-}"
+      # 管理员工作台的模型代理令牌：网关据此在授权表里标识 root。必须与写进
+      # settings.yaml 请求头的那一份同值（安装器与密钥面板读同一个变量）。
+      DSH_ADMIN_BROKER_TOKEN: "${DSH_ADMIN_BROKER_TOKEN:-}"
     volumes:
       - ./data/auth:/data/auth
     read_only: true

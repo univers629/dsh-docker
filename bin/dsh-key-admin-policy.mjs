@@ -621,11 +621,22 @@ export function mergeDiscoveredModels(ids, existingEntry) {
 /**
  * 交给 bin/seed-dsh-model-settings.mjs 的载荷：把 keys.json 里的非秘密事实
  * （上游名、形态、模型 id 及其能力与档位）翻译成"DSH 侧该怎么填"。密钥不在其中。
+ *
+ * extraHeaders 是部署事实（管理员工作台的模型代理令牌）：它必须每次覆盖，
+ * 所以由调用方从环境里取当前值传进来，而不是从 keys.json 里读。
+ * @param document keys.json 解析结果。
+ * @param brokerBase 代理地址前缀。
+ * @param placeholder 占位密钥。
+ * @param extraHeaders 每条生成路由都要带的请求头。
  */
-export function seedPayload(document, brokerBase, placeholder) {
+export function seedPayload(document, brokerBase, placeholder, extraHeaders = {}) {
+  const headers = Object.fromEntries(
+    Object.entries(extraHeaders).filter(([, value]) => typeof value === 'string' && value.length > 0),
+  )
   return {
     brokerBase,
     placeholder,
+    ...(Object.keys(headers).length > 0 ? { extraHeaders: headers } : {}),
     upstreams: document.upstreams.map((entry) => {
       const view = toUpstreamView(entry)
       return {

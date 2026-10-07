@@ -3765,8 +3765,9 @@ seed_dsh_model_settings() {
   for name in $names; do
     upstreams="${upstreams:+$upstreams, }{\"name\": $(json_string "$name"), \"shape\": $(json_string "$(broker_upstream_profile "$name")"), \"models\": $(broker_models_json "$(broker_upstream_models "$name")")}"
   done
-  payload="$(printf '{"brokerBase": %s, "placeholder": %s, "upstreams": [%s]}' \
-    "$(json_string "$MODEL_BROKER_BASE")" "$(json_string "$MODEL_BROKER_PLACEHOLDER_KEY")" "$upstreams")"
+  payload="$(printf '{"brokerBase": %s, "placeholder": %s, "upstreams": [%s], "extraHeaders": {"x-dsh-instance-token": %s}}' \
+    "$(json_string "$MODEL_BROKER_BASE")" "$(json_string "$MODEL_BROKER_PLACEHOLDER_KEY")" "$upstreams" \
+    "$(json_string "${DSH_ADMIN_BROKER_TOKEN:-}")")"
   echo "==> 正在把模型供应商写进 DSH 配置（data/dsh/settings.yaml）："
   if ! printf '%s' "$payload" | DOCKER run --rm -i \
       -v "$(pwd)/bin:/dsh-seed:ro" -v "$(pwd)/data/dsh:/seed-home" \
@@ -3808,6 +3809,11 @@ prepare_pending_env() {
   if [ "$PENDING_MULTI_USER" = on ]; then
     ensure_ingress_token "$PENDING_ENV_FILE"
   fi
+  # 两种模式都要：管理员的模型请求都经代理，代理一律要求调用者身份。
+  # 值已由 resolve_admin_broker_token 解析并导出，这里只负责落盘。
+  if [ -n "${DSH_ADMIN_BROKER_TOKEN:-}" ]; then
+    set_compose_env DSH_ADMIN_BROKER_TOKEN "$DSH_ADMIN_BROKER_TOKEN" "$PENDING_ENV_FILE"
+  fi
 }
 
 # 确保 .env 里有 DSH_AUTH_INGRESS_TOKEN。已有非空值就不动（重跑向导不该轮换密钥）。
@@ -3824,6 +3830,34 @@ ensure_ingress_token() {
   fi
   set_compose_env DSH_AUTH_INGRESS_TOKEN "$(od -An -tx1 -N24 /dev/urandom | tr -d '[:space:]')" "$file"
   echo "==> 已生成入口↔网关共享密钥（DSH_AUTH_INGRESS_TOKEN 写入 .env）。"
+}
+
+# 解析出管理员的模型代理令牌并导出为 DSH_ADMIN_BROKER_TOKEN。
+#
+# 管理员的模型请求同样经过密钥代理，而代理按调用者身份放行上游，所以管理工作台也
+# 需要一枚令牌。网关、安装器与密钥面板三处必须同值：网关用它标识 root，另外两处把
+# 它写进 settings.yaml 的请求头。缺了它代理认不出调用者，管理员在自己工作台里发
+# 模型请求会被 401 拒掉。
+#
+# 只解析并导出、不落盘：写模型配置那一步在 .env 提交之前就要用它拼请求头，而落盘
+# 统一走 PENDING_ENV_FILE（见 prepare_pending_env），安装失败时 .env 保持原样。
+# 已有非空值就沿用（重跑向导不该轮换令牌）。
+resolve_admin_broker_token() {
+  local file="${1:-.env}" current
+  current="${DSH_ADMIN_BROKER_TOKEN:-}"
+  if [ -z "$current" ] && [ -f "$file" ]; then
+    current="$(awk -F= '$1 == "DSH_ADMIN_BROKER_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$file" 2>/dev/null)"
+  fi
+  if [ -z "$current" ]; then
+    if [ ! -r /dev/urandom ]; then
+      echo "[警告] 读不到 /dev/urandom，无法生成管理员模型代理令牌。" >&2
+      echo "       请手动设置 DSH_ADMIN_BROKER_TOKEN，否则管理员的模型请求会被代理拒绝。" >&2
+      return 0
+    fi
+    current="$(od -An -tx1 -N32 /dev/urandom | tr -d '[:space:]')"
+    echo "==> 已生成管理员模型代理令牌（DSH_ADMIN_BROKER_TOKEN）。"
+  fi
+  export DSH_ADMIN_BROKER_TOKEN="$current"
 }
 
 compose_up_with_pending_env() {
@@ -4376,6 +4410,8 @@ add_model_key() {
   assert_model_broker
   assert_key_admin
   echo
+  # 与 install 路径同理：请求头里的令牌要先就位，配置才写得对。
+  resolve_admin_broker_token
   seed_dsh_model_settings "$(node_tool_image)"
   echo "==> 密钥代理已就绪。DSH 的 settings.yaml 与 .credentials.yaml 都是热加载的，"
   echo "    刷新一下 WebUI 就能在「设置 → 模型」里看到这些供应商，密钥框里是占位串。"
@@ -4491,6 +4527,9 @@ install_execute_body() {
   write_broker_config
   write_key_admin_token
   write_egress_policy
+  # 管理员令牌要在写模型配置之前就位：那份 settings.yaml 的请求头里带着它，
+  # 而配置只写一次，之后再生成就对不上授权表里的摘要了。
+  resolve_admin_broker_token
   seed_dsh_model_settings "$PENDING_IMAGE"
   prepare_pending_env
   echo "==> 正在启动 DSH..."

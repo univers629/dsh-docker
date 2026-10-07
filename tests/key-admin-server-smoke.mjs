@@ -153,6 +153,17 @@ try {
   assert.match(style.text, /\.mtable/)
   assert.match(style.text, /\.mchip/)
 
+  // 形态下拉框在 refresh() 里被重建，而 refresh() 每次保存后都跑一次。重建时不
+  // 保住原选中值的话，用户选了 responses 保存，界面会跳回第一项 any——看起来像
+  // 没保存上，其实 keys.json 里是对的。
+  {
+    const body = app.text.match(/function shapeOptions\(\) \{[\s\S]*?\n\}/)
+    assert.ok(body, 'app.js 必须定义 shapeOptions')
+    assert.match(body[0], /select\.value/, 'shapeOptions 必须回填原来的选中值')
+    assert.match(body[0], /const previous = select\.value/, '重建前先记住当前值')
+    assert.match(body[0], /select\.value = previous/, '重建后恢复当前值')
+  }
+
   // --- 令牌 ---
   const anonymous = await call('/api/state', { auth: null })
   assert.equal(anonymous.status, 401, '没有令牌必须打不动 /api')

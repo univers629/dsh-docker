@@ -6,6 +6,10 @@ DSH_PID_FILE=${DSH_PID_FILE:-/run/dsh.pid}
 DSH_SUPERVISOR_PID_FILE=${DSH_SUPERVISOR_PID_FILE:-/run/dsh-supervisor.pid}
 DSH_RESTART_REQUEST_FILE=${DSH_RESTART_REQUEST_FILE:-/run/dsh-state/restart}
 DSH_RESTART_DELAY=${DSH_RESTART_DELAY:-2}
+# DSH 只在启动时导入这份配置，导入后把它改名成 .imported（见 @deepseek-ai/dsh-settings
+# 的 importLegacyDocument）。所以它再次出现就意味着有人改了模型供应商：必须重启 DSH
+# 才能生效，否则面板里保存成功、工作台里却看不到新供应商。
+DSH_SETTINGS_FILE=${DSH_SETTINGS_FILE:-/data/dsh/settings.yaml}
 DSH_PREPARE_EXECUTABLE=${DSH_PREPARE_EXECUTABLE:-}
 DSH_NGINX_EXECUTABLE=${DSH_NGINX_EXECUTABLE:-nginx}
 DSH_NGINX_CONFIG=${DSH_NGINX_CONFIG:-/usr/local/share/dsh/nginx.conf}
@@ -489,6 +493,15 @@ while [ "$stopping" != true ]; do
       echo '[dsh-supervisor] Nginx exited while DSH was running; retrying' >&2
     fi
     start_profile_watcher
+    # settings.yaml 重新出现 = 有人改了模型供应商。它只在启动时被导入，所以要主动
+    # 重启一次，否则改动静默地不生效（面板报成功，工作台里却没有那个供应商）。
+    # 复用已有的重启请求文件，走同一条收尾路径。
+    if [ -f "$DSH_SETTINGS_FILE" ]; then
+      echo '[dsh-supervisor] model settings changed; restarting DSH to apply them' >&2
+      : > "$DSH_RESTART_REQUEST_FILE" 2>/dev/null || true
+      kill -TERM "$dsh_pid" 2>/dev/null || true
+      break
+    fi
     sleep 1
   done
   if [ "$adopted" = true ]; then
