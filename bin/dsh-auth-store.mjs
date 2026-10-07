@@ -28,7 +28,12 @@ export const AUDIT_LIMIT = 5000
 function emptyState() {
   return {
     version: STATE_VERSION,
-    setup: { initialized: false, multiUser: false, registerGate: 'open' },
+    // defaultUpstreams：新账户默认被开放的模型上游。
+    //
+    // null = 跟随代理当前的上游集合（即"默认全部开放"）。数组 = 只开放列出的这些。
+    // 放在这里而不是只靠 user.allowedUpstreams，是为了让管理员**在还没有任何用户时**
+    // 就能设定新账户的默认值；否则「模型开放」页在没有用户时没有任何可调项。
+    setup: { initialized: false, multiUser: false, registerGate: 'open', defaultUpstreams: null },
     users: [],
     sessions: [],
     flows: [],

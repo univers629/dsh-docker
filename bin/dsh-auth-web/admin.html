@@ -269,6 +269,20 @@
     <section class="section" id="section-models">
       <p class="empty" data-i18n="admin.models.hint" style="display:block;padding:0 0 14px"></p>
       <div class="empty" id="models-note" style="display:none;padding:0 0 12px"></div>
+      <!-- 新账户默认：作用于"还没有的用户"，所以必须在没有用户时也能设置。
+           逐账户那张表只对已存在的账户渲染，这个控件不能依赖它。 -->
+      <div class="policy" id="models-default">
+        <div class="policy__head">
+          <strong data-i18n="admin.models.defaultTitle">新账户默认开放</strong>
+          <span class="muted" data-i18n="admin.models.defaultHint">此后新建的账户按这里的选择开放模型上游；已有账户不受影响，请在下面逐账户调整。</span>
+        </div>
+        <div class="pick-grid" id="models-default-grid"></div>
+        <div class="row-actions" style="margin-top:10px">
+          <button class="mini" type="button" id="models-default-all" data-i18n="admin.models.selectAll">全选</button>
+          <button class="mini" type="button" id="models-default-none" data-i18n="admin.models.selectNone">取消全选</button>
+          <button class="mini mini--primary" type="button" id="models-default-save" data-i18n="admin.models.apply">保存</button>
+        </div>
+      </div>
       <div class="table-scroll">
       <table>
         <thead>
@@ -347,6 +361,9 @@
       'admin.tab.captcha': '人机验证',
       'admin.tab.models': '模型开放',
       'admin.models.hint': '勾选每个账户可以使用的模型上游。未单独设置的账户默认可以使用全部上游；用户也可以在自己的会话里配置模型，但未被开放的上游会被密钥代理拒绝。',
+      'admin.models.defaultTitle': '新账户默认开放',
+      'admin.models.defaultHint': '此后新建的账户按这里的选择开放模型上游；已有账户不受影响，请在下面逐账户调整。',
+      'admin.models.defaultSaved': '新账户默认开放已更新。',
       'admin.models.available': '可用模型上游',
       'admin.models.all': '全部（默认）',
       'admin.models.none': '不可用',
@@ -454,6 +471,9 @@
       'admin.tab.captcha': 'Human verification',
       'admin.tab.models': 'Model access',
       'admin.models.hint': 'Tick which model upstreams each account may use. Accounts without an explicit setting may use every upstream; users can also configure models in their own session, but upstreams that were not granted are refused by the key broker.',
+      'admin.models.defaultTitle': 'Default for new accounts',
+      'admin.models.defaultHint': 'Accounts created from now on get the upstreams selected here. Existing accounts are unaffected; adjust those in the table below.',
+      'admin.models.defaultSaved': 'Default access for new accounts updated.',
       'admin.models.available': 'Available upstreams',
       'admin.models.all': 'All (default)',
       'admin.models.none': 'None',
@@ -1026,6 +1046,11 @@ $('captcha-save').addEventListener('click', () => { void saveCaptcha() })
     if (!body.brokerReachable) modelsNote(t('admin.models.unreachable'), true)
     else modelsNote('')
 
+    // 新账户默认：独立于下面的逐账户表渲染。
+    // 它作用于"此后新建的账户"，所以即使一个用户都没有也要显示 —— 这正是
+    // 「想在还没有用户时就调好默认」所需要的。null = 默认全部开放。
+    mountDefaultPicks(available, body.defaultUpstreams ?? null)
+
     const users = (body.users ?? []).filter((user) => user.role !== 'root')
     $('models-empty').style.display = users.length ? 'none' : ''
 
@@ -1099,6 +1124,62 @@ $('captcha-save').addEventListener('click', () => { void saveCaptcha() })
       tbody.appendChild(row)
     }
     modelsLoaded = true
+  }
+
+  /**
+   * 渲染「新账户默认开放」的卡片组，并接上全选/取消全选/保存。
+   *
+   * 与逐账户那套分开：这里的值作用于此后新建的账户，用 POST /api/admin/model-defaults
+   * 写入 state.setup.defaultUpstreams。默认值 null 表示"全部开放"，界面上表现为全选。
+   */
+  function mountDefaultPicks(available, defaults) {
+    const grid = $('models-default-grid')
+    grid.textContent = ''
+    const granted = new Set(defaults === null ? available : defaults)
+    const picks = []
+    for (const upstream of available) {
+      const card = document.createElement('button')
+      card.type = 'button'
+      card.className = 'pick'
+      card.setAttribute('aria-pressed', granted.has(upstream) ? 'true' : 'false')
+      card.textContent = upstream
+      card.addEventListener('click', () => {
+        card.setAttribute('aria-pressed', card.getAttribute('aria-pressed') !== 'true' ? 'true' : 'false')
+      })
+      picks.push(card)
+      grid.appendChild(card)
+    }
+    // 代理一个上游都没有时给出可见说明：空白的卡片组会让人以为界面坏了。
+    if (available.length === 0) {
+      const hint = document.createElement('span')
+      hint.className = 'muted'
+      hint.textContent = t('admin.models.unreachable')
+      grid.appendChild(hint)
+    }
+    const setAll = (on) => picks.forEach((card) => card.setAttribute('aria-pressed', on ? 'true' : 'false'))
+    // 每次重新渲染都要换掉旧监听：这个函数会被 loadModels 反复调用，
+    // 直接 addEventListener 会累加，点一次保存发多次请求。
+    for (const [id, handler] of [
+      ['models-default-all', () => setAll(true)],
+      ['models-default-none', () => setAll(false)],
+      ['models-default-save', async () => {
+        clearAlerts()
+        const picked = picks.filter((card) => card.getAttribute('aria-pressed') === 'true')
+          .map((card) => card.textContent)
+        // 全选 = 恢复默认（null），这样以后新增的上游会自动包含进来
+        const payload = picked.length === available.length
+          ? { defaultUpstreams: null }
+          : { defaultUpstreams: picked }
+        const result = await api('/api/admin/model-defaults', { method: 'POST', body: JSON.stringify(payload) })
+        if (!result.response.ok) { modelsNote(t('admin.models.saveFailed'), true); return }
+        modelsNote(t('admin.models.defaultSaved'))
+        await loadModels()
+      }],
+    ]) {
+      const node = $(id)
+      node.replaceWith(node.cloneNode(true))
+      $(id).addEventListener('click', handler)
+    }
   }
 
   function mountModelsTab() {

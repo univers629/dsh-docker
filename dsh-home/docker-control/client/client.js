@@ -987,10 +987,14 @@ div:has(> [data-shell-overlay]):not([data-sidebar-collapsed]) [data-dsh-containe
     const metricsListeners = new Set()
 
     function metricsEnabled() {
+      // 默认关闭：这块卡片是常驻的实时状态面板（CPU / 内存 / 网络 / 磁盘），
+      // 它会按固定间隔轮询宿主指标。默认开着等于每个打开工作台的人都持续拉取
+      // 这些数据，而多数会话并不需要盯着它。要看的人在 DSH 环境页里打开一次，
+      // 选择记在 localStorage 里，之后一直保持。
       try {
-        return window.localStorage.getItem(METRICS_STORAGE_KEY) !== 'off'
+        return window.localStorage.getItem(METRICS_STORAGE_KEY) === 'on'
       } catch {
-        return true
+        return false
       }
     }
 

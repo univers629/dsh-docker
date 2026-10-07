@@ -1118,6 +1118,9 @@ async function handleAdminModelAccess(state, req, res) {
     // 代理不可达时为空：界面据此提示「无法读取可用上游」，而不是显示成「一个都没有」
     available,
     brokerReachable: available.length > 0,
+    // 新账户的默认开放范围。管理员在还没有任何用户时也能设定它，
+    // 因此这个值必须随 GET 一起返回，界面才渲染得出顶部那组控件。
+    defaultUpstreams: normalizeDefaultUpstreams(state.setup.defaultUpstreams),
     users: state.users
       .filter((u) => Number.isInteger(u.uid))
       .map((u) => ({
@@ -1129,6 +1132,49 @@ async function handleAdminModelAccess(state, req, res) {
         allowedUpstreams: Array.isArray(u.allowedUpstreams) ? u.allowedUpstreams : null,
       })),
   })
+}
+
+/**
+ * 设置「新账户默认开放的模型上游」。
+ *
+ * 传 null 表示默认全部开放（跟随代理当前的上游集合）；传数组则限定。
+ * 只影响**此后新建**的账户，已有账户保持各自的 allowedUpstreams 不变——
+ * 悄悄改写已有账户的授权会让管理员在不知情的情况下改变现网用户的可用范围。
+ *
+ * @param {object} state 状态库。
+ * @param {object} req 请求。
+ * @param {object} res 响应。
+ */
+async function handleAdminModelDefaultsUpdate(state, req, res) {
+  const admin = requireRoot(state, req, res)
+  if (!admin) return
+  if (!requireCsrf(admin, req, res)) return
+  const body = await readBody(req)
+  if (!body || typeof body !== 'object') return fail(res, 400, 'invalid_request')
+
+  if (body.defaultUpstreams === null || body.defaultUpstreams === undefined) {
+    state.setup.defaultUpstreams = null
+  } else if (Array.isArray(body.defaultUpstreams)) {
+    const available = await brokerUpstreamNames()
+    const requested = [...new Set(body.defaultUpstreams.map((name) => String(name).toLowerCase()).filter(Boolean))]
+    // 只接受代理确实存在的上游：接受不存在的名字会让人以为开放了、实际用不了
+    if (available.length > 0) {
+      const unknown = requested.filter((name) => !available.includes(name))
+      if (unknown.length > 0) return fail(res, 400, 'unknown_upstream', { unknown })
+    }
+    state.setup.defaultUpstreams = requested
+  } else {
+    return fail(res, 400, 'invalid_request')
+  }
+
+  appendAudit(state, {
+    actorId: admin.user.id,
+    action: 'admin.model-defaults.update',
+    result: 'ok',
+    change: { upstreams: state.setup.defaultUpstreams === null ? 'all' : state.setup.defaultUpstreams.length },
+  })
+  commitState(state)
+  send(res, 200, { ok: true, defaultUpstreams: normalizeDefaultUpstreams(state.setup.defaultUpstreams) })
 }
 
 /**
@@ -1168,6 +1214,19 @@ async function handleAdminModelAccessUpdate(state, req, res) {
 
   target.updatedAt = now()
   await syncBrokerGrants(state)
+  // 授权表变了，实例里的模型配置必须跟着重写。
+  //
+  // seedModelSettings 只在实例**创建**时跑过一次，而授权表可以在那之后才变化：
+  // 全新部署时 keys.json 里还没有上游，「默认全部开放」展开成空数组，实例创建时
+  // 什么都没写；管理员随后补了密钥、又在面板上保存了授权，实例里始终没有
+  // settings.yaml，用户看到的模型页一张卡片都没有 —— 而面板却报「已更新」。
+  //
+  // 不重建容器：reseed 只重写 /data/dsh 下那两份配置文件，DSH 对它们是热加载的。
+  // 实例不存在（用户从未登录）时无需处理：它下次创建时会读到新授权表。
+  const reseed = await callInstances('/instances/reseed', { uid: target.uid })
+  if (!reseed.ok && reseed.status !== 404) {
+    process.stderr.write(`[dsh-auth] reseed ${target.username} failed: ${reseed.status} ${JSON.stringify(reseed.body)}\n`)
+  }
   appendAudit(state, {
     actorId: admin.user.id,
     action: 'admin.model-access.update',
@@ -1353,9 +1412,10 @@ async function handleRegister(state, req, res) {
     status: 'enabled',
     uid,
     brokerTokenDigest: brokerTokenDigest(brokerToken),
-    // 默认全部开放：管理员配好上游后，用户开箱即可用（符合「默认显示并可用」）。
-    // 显式传 null 表示尚未设置过，syncBrokerGrants 会按 broker 现有上游补齐。
-    allowedUpstreams: null,
+    // 新账户的开放范围取管理面板设定的「新账户默认」（state.setup.defaultUpstreams）。
+    // null = 跟随代理当前的上游集合（即"默认全部开放"），syncBrokerGrants 会按 broker
+    // 现有上游补齐；数组 = 只开放列出的这些。管理员可以在还没有用户时就把它设好。
+    allowedUpstreams: normalizeDefaultUpstreams(state.setup.defaultUpstreams),
     passwordHash: hashPassword(body.password),
     authVersion: 1,
     totp: { enabled: false },
@@ -1543,6 +1603,22 @@ function adminUserView(state, user) {
 }
 
 /**
+ * 规范化「新账户默认开放的上游」。
+ *
+ * 只接受 null（跟随代理当前上游）或字符串数组。别的形态一律当成 null：状态文件
+ * 可能被手工改过，一个畸形值不该让注册路径抛错——那是公开端点。
+ *
+ * @param {unknown} value 状态库里的值。
+ * @returns {string[]|null} 规范化结果。
+ */
+function normalizeDefaultUpstreams(value) {
+  if (value === null || value === undefined) return null
+  if (!Array.isArray(value)) return null
+  const names = [...new Set(value.map((name) => String(name).toLowerCase()).filter(Boolean))]
+  return names
+}
+
+/**
  * 列出密钥代理里当前可用的上游名。
  *
  * 授权界面要让人从「实际存在的上游」里挑，而不是手打名字——打错一个字就等于
@@ -1600,6 +1676,15 @@ async function handleAdminUserStatus(state, req, res) {
   // 调用，停用与启用不刷新的话，被停用账户的实例令牌会一直被 broker 认作有效，
   // 与 :312「停用的账户即时失去模型访问」的承诺相悖。
   await syncBrokerGrants(state)
+  // 授权表重算之后，实例里的模型配置也要跟上：停用期间该账户的 upstreams 被写成
+  // 空数组，重新启用若只更新授权表而不重写实例，用户会看到「账户已启用但模型页
+  // 一张卡片都没有」。与「模型开放」保存后同样的理由，见 handleAdminModelAccess。
+  if (status === 'enabled' && target.role === 'user' && Number.isInteger(target.uid)) {
+    const reseed = await callInstances('/instances/reseed', { uid: target.uid })
+    if (!reseed.ok && reseed.status !== 404) {
+      process.stderr.write(`[dsh-auth] reseed ${target.username} failed: ${reseed.status} ${JSON.stringify(reseed.body)}\n`)
+    }
+  }
   send(res, 200, { ok: true, user: adminUserView(state, target) })
 }
 
@@ -2319,8 +2404,10 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'POST' && p === '/api/admin/invite') return handleAdminInvite(state, req, res)
     if (req.method === 'GET' && p === '/api/admin/registration') return handleAdminRegistration(state, req, res)
     if (req.method === 'POST' && p === '/api/admin/registration') return await handleAdminRegistrationUpdate(state, req, res)
-        if (req.method === 'GET' && p === '/api/admin/model-access') return await handleAdminModelAccess(state, req, res)
-        if (req.method === 'POST' && p === '/api/admin/model-access') return await handleAdminModelAccessUpdate(state, req, res)
+    if (req.method === 'GET' && p === '/api/admin/model-access') return await handleAdminModelAccess(state, req, res)
+    if (req.method === 'POST' && p === '/api/admin/model-access') return await handleAdminModelAccessUpdate(state, req, res)
+    // 新账户的默认开放范围：与逐账户授权分开，因为它作用于"还没有的用户"。
+    if (req.method === 'POST' && p === '/api/admin/model-defaults') return await handleAdminModelDefaultsUpdate(state, req, res)
         if (req.method === 'GET' && p === '/api/admin/captcha') return handleAdminCaptcha(state, req, res)
         if (req.method === 'POST' && p === '/api/admin/captcha') return await handleAdminCaptchaUpdate(state, req, res)
         return fail(res, 404, 'not_found')

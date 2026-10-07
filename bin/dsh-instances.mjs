@@ -521,11 +521,9 @@ async function createInstance(memoryMb, uid, username) {
  * @returns {Promise<void>} 完成。
  */
 async function seedModelSettings(name, uid, upstreams, token, models = {}) {
-  if (upstreams.length === 0) {
-    // 没有任何开放上游：不写 providers（留空），但仍把令牌放进环境，
-    // 这样用户自己配了指向代理的 provider 时也能通过身份校验。
-    return
-  }
+  // 空清单也要跑一次：seeder 会把不再被授权的 provider 路由删掉（见它的
+  // removedProviders 处理）。早先在这里提前 return，结果是管理员取消勾选后
+  // settings.yaml 里那条路由还在，撤销授权不生效。
   const payload = JSON.stringify({
     brokerBase: CONFIG.brokerUrl,
     placeholder: CONFIG.placeholderKey,
@@ -910,6 +908,28 @@ const server = http.createServer(async (req, res) => {
         status: outcome.status,
         url: `http://${outcome.name}:${INSTANCE_PORT}`,
       })
+    }
+    // 按当前授权表重写实例的模型配置。
+    //
+    // 为什么需要它：seedModelSettings 只在 createInstance 里调用一次，而授权表会
+    // 在实例创建之后变化（管理员在「模型开放」里改勾选）。实例创建时若授权表还是
+    // 空的（全新部署：keys.json 里还没有上游，「默认全部开放」展开为空数组），
+    // seedModelSettings 会直接 return —— 之后管理员补了密钥、又保存了授权，
+    // 实例里始终没有 settings.yaml，用户看到的模型页一张卡片都没有。
+    //
+    // 不动容器：只重写 /data/dsh 下的两份配置文件，DSH 对它们是热加载的。
+    if (req.method === 'POST' && p === '/instances/reseed') {
+      const body = await readBody(req)
+      const uid = Number(body?.uid)
+      if (!Number.isInteger(uid) || uid < UID_BASE) return sendJson(res, 400, { ok: false, code: 'invalid_uid' })
+      const record = registry.instances[uid]
+      if (!record) return sendJson(res, 404, { ok: false, code: 'not_found' })
+      const grant = readGrants()[String(uid)]
+      const upstreams = Array.isArray(grant?.upstreams) ? grant.upstreams : []
+      const token = readTokens()[record.username] ?? ''
+      await seedModelSettings(record.name, uid, upstreams, token, readUpstreamModels())
+      process.stdout.write(`[dsh-instances] reseeded ${record.name} with ${upstreams.length} upstream(s)\n`)
+      return sendJson(res, 200, { ok: true, uid, upstreams })
     }
     if (req.method === 'GET' && p === '/instances/state') {
       const uid = Number(url.searchParams.get('uid'))

@@ -404,6 +404,32 @@ export function planSeed(request) {
     if (!reclaimed.includes(ref)) reclaimed.push(ref)
   }
 
+  // 撤销授权：把这次没有被授权的、且**确实指向本部署代理**的路由删掉。
+  //
+  // 为什么要单独做这一步：上面那圈只回收凭据引用，不删路由本身；而写入那圈只写
+  // 「这次被授权的」上游。两者都不动旧路由，于是管理员在「模型开放」里取消勾选后，
+  // settings.yaml 里那条 provider 仍在，用户照样能选到它 —— 撤销授权不生效。
+  //
+  // 判据与上面一致（baseURL 正好等于本部署的代理地址），因此只删安装器/面板自己
+  // 写下的路由；用户手写的直连供应商（指向别的地址）一律不动。
+  //
+  // granted 取 request.upstreams 而不是 entries：entries 只含**规划成功**的上游，
+  // 某个被授权的上游若因缺模型清单等原因被 planProvider 跳过，用 entries 判就会把它
+  // 误当成「已撤销」删掉。撤销与否只看授权表怎么说。
+  const granted = new Set((request.upstreams ?? []).map((upstream) => String(upstream.name).toLowerCase()))
+  const revoked = []
+  for (const [name, profile] of brokerRouteCandidates(existingProviders, existing.natives ?? {})) {
+    if (!isBrokerRouteBaseUrl(profile?.baseURL, name, request.brokerBase)) continue
+    if (granted.has(String(name).toLowerCase())) continue
+    revoked.push(name)
+  }
+  // 第一方命名空间（llm-deepseek）删的是整条 native 路由；pi-ai 路由删 providers.<name>。
+  for (const name of revoked) {
+    const native = NATIVE_ROUTES[name]
+    if (native?.settingsPath && existing.natives?.[name] !== undefined) removals.push([...native.settingsPath])
+    else removals.push([...piAiRoutePath(name)])
+  }
+
   // 默认模型只在还没有的时候设：这是"装完就能对话"的最后一步，但用户选过之后
   // 每次重新配置都改回来就成了骚扰。
   let defaultModel = null
