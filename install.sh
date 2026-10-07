@@ -2014,34 +2014,41 @@ get_compose_env() {
   printf '%s' "${value:-$fallback}"
 }
 
-# data/auth 存 Basic Auth 的 bcrypt 文件；data/secret 只存容器 root 口令哈希，
+# data/auth 存认证网关的状态与 TOTP 密钥；data/secret 只存容器 root 口令哈希，
 # 并且只挂到容器的 /root/dsh-secret（0700 root:root），dsh 账户读不到。
 # data/broker 存模型密钥，只被 dsh-key-broker 容器以 UID 1000 只读挂载，
 # 完全不出现在 DSH 容器的挂载表里。
 # data/egress 存出站策略（模式 + 白名单 + 黑名单）：管理面板可写，dsh-egress 只读挂载。
-mkdir -p data/auth data/secret data/broker data/egress
-# data/broker 与 data/egress 的属主必须对齐到 1000，而且目录本身也要对齐 —— 不只是
-# 里面的文件。
 #
-# 这两个目录不挂进 dsh 容器，所以 entrypoint 的 align_data_ownership 管不到它们；
-# 以 root 全新安装时目录属主就是 root，而 dsh-key-admin / dsh-egress 都以 UID 1000
-# 运行。面板保存密钥要在目录里新建临时文件（keys.json.tmp.<pid>），目录不可写就
-# 直接 EACCES：文件本身的属主改对了也没用，因为改的是目录的写权限。userns-preflight
-# 那条路径本来就对整个目录做了 chown，这里补上才和它一致。
+# 这三个目录的属主必须对齐到 1000，而且**目录本身**也要对齐 —— 不只是里面的文件。
 #
-# 失败只警告：rootless、userns-remap 或非 Linux 宿主上 chown 本来就会失败，那不是
-# 安装失败，下面会打印出宿主上该执行的命令。
-broker_dir_chown() {
-  if chown 1000:1000 data/broker data/egress 2>/dev/null; then
-    return 0
+# 它们不挂进 dsh 容器，所以 entrypoint 的 align_data_ownership 管不到；以 root 全新
+# 安装时目录属主就是 root，而 dsh-auth / dsh-key-broker / dsh-key-admin 都以 UID 1000
+# 运行。这三个进程都要在目录里新建临时文件再 rename（state.json / totp.key /
+# keys.json.tmp.<pid>），目录不可写就直接 EACCES：把文件的属主改对了也没用，
+# 卡住的是目录的写权限。
+#
+# 必须在 cd 进工程目录**之后**调用：这些是相对路径，脚本顶层的 cwd 是调用者的
+# 当前目录（curl | bash 时就是 $HOME），在那儿执行会把目录建到工程外面去，
+# 工程里的那份反而保持 root 属主。
+align_writable_data_dirs() {
+  local failed=0
+  mkdir -p data/auth data/secret data/broker data/egress
+  # data/secret 由容器 root 使用，属主留 root。
+  for directory in data/auth data/broker data/egress; do
+    chown 1000:1000 "$directory" 2>/dev/null || failed=1
+  done
+  if [ "$failed" = 1 ]; then
+    # 失败只警告：rootless、userns-remap 或非 Linux 宿主上 chown 本来就会失败，
+    # 那不是安装失败。下面给出宿主上该执行的命令。
+    echo "[警告] 无法把 data/auth、data/broker、data/egress 的属主改成 1000:1000。" >&2
+    echo "       dsh-auth 与密钥管理面板以 UID 1000 运行，要在这些目录里新建临时文件。" >&2
+    echo "       如果容器反复重启（EACCES）或面板保存时报错，请在宿主上执行：" >&2
+    echo "       sudo chown 1000:1000 data/auth data/broker data/egress" >&2
   fi
-  echo "[警告] 无法把 data/broker 与 data/egress 的属主改成 1000:1000。" >&2
-  echo "       dsh-key-admin 以 UID 1000 运行，要在 data/broker 里新建临时文件来保存密钥。" >&2
-  echo "       如果面板保存时报 EACCES，请在宿主上执行：" >&2
-  echo "       sudo chown 1000:1000 data/broker data/egress" >&2
+  return 0
 }
 
-broker_dir_chown
 COMPOSE_ARGS=(-f docker-compose.yml)
 
 # 叠加顺序是契约的一部分，不能按别的顺序拼：keys.yml 先把 dsh-key-broker 放进
@@ -4467,6 +4474,10 @@ install_prepare_body() {
   fetch_project
   cd "$TARGET_DIR" || { echo "[错误] 无法进入工程目录：$TARGET_DIR"; return 1; }
   chmod +x dsh.sh 2>/dev/null || true
+  # 数据目录的属主对齐必须在 cd 之后：它们是相对路径，在脚本顶层执行会落到
+  # 调用者的当前目录（curl | bash 时是 $HOME），工程里那份反而保持 root 属主，
+  # 于是 dsh-auth 以 UID 1000 启动后写不了 /data/auth，容器陷入重启循环。
+  align_writable_data_dirs
   # 装配 PENDING_* 与 COMPOSE_ARGS。向导已经把答案交过来了，这一步不再提问。
   configure_dsh
 }
@@ -4806,6 +4817,10 @@ case "$ACTION" in
     # 维护类动作。走到这里才进工程目录：命令行路径在脚本中段已经进过（幂等，
     # 这里直接返回），而向导路径此刻才第一次知道要做什么动作。
     enter_project || exit $?
+    # 补填密钥（model-key）与开关面板（key-panel）都会让 UID 1000 的容器在
+    # data/broker 里新建临时文件。老部署可能是以 root 建的目录，这里顺手对齐一次；
+    # 目录属主不对时面板能读不能写，报的是 EACCES，看不出是属主问题。
+    align_writable_data_dirs
     case "$ACTION" in
       upgrade) upgrade_dsh ;;
       model-key) add_model_key ;;
