@@ -133,6 +133,9 @@ CONFIG.activityPersistIntervalMs = Math.min(
 )
 
 const MAX_BODY_BYTES = 64 * 1024
+// 请求头上限。Node 默认 16KB，而入口的 auth_request 会转发原请求头并叠加
+// X-Original-URI 与 X-Forwarded-*；DSH 客户端的 /plugins/?? 批量 URL 本身就有数 KB。
+const MAX_HEADER_SIZE = 64 * 1024
 // 失败计数映射的键数上限（prune 里按最久不活跃淘汰）。正常部署的键数是
 // 「账户数 × 2 + 活跃来源 IP 数」的量级；到上限只能说明有人在批量伪造用户名。
 const MAX_FAILURE_KEYS = 10000
@@ -2365,7 +2368,7 @@ function serveStatic(req, res, pathname) {
   res.end(data)
 }
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, async (req, res) => {
   // 请求目标的解析放在 try 之内：畸形请求行（如 `GET http://[ HTTP/1.1`）会让
   // WHATWG URL 构造器抛 ERR_INVALID_URL，若在 async 监听器里逃逸到 unhandled
   // rejection，进程会直接退出，任一实例容器都能让全站登录瘫痪。

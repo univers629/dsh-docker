@@ -121,6 +121,9 @@ const RUNTIME_DEFAULTS = Object.freeze({
   memoryMb: CONFIG.memoryMb,
 })
 
+/** 请求头上限。Node 默认 16KB；本服务在网关之后，请求头已带 X-Forwarded-* 等。 */
+const MAX_HEADER_SIZE = 64 * 1024
+
 /** 生效的闲置阈值（毫秒）：运行时值优先。 */
 function runtimeIdleTimeoutMs(registry) {
   const seconds = registry?.settings?.idleTimeoutSeconds
@@ -768,7 +771,7 @@ function authorize(req) {
   return diff === 0 ? 'ok' : 'denied'
 }
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, async (req, res) => {
   // 与 dsh-auth 相同的防护：畸形请求目标解析必须在 try 之内，否则 async 监听器里
   // 的 ERR_INVALID_URL 会成为 unhandled rejection 并终止进程。
   let url

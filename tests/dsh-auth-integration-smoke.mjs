@@ -494,6 +494,18 @@ try {
   const pkState = JSON.parse(fs.readFileSync(path.join(sandbox, 'auth', 'state.json'), 'utf8'))
   assert.ok(!JSON.stringify(pkState).includes('"passkeys":[{"id"'), 'passkeys array emptied after delete')
 
+  // ---- 请求头超过 Node 默认的 16KB 时不得回 431 ----
+  //
+  // 入口的 auth_request 转发原请求头并叠加 X-Original-URI 与 X-Forwarded-*，
+  // 加上 DSH 客户端数 KB 的 /plugins/?? 批量 URL，很容易越过 16KB。
+  {
+    const bigHeader = 'a'.repeat(20 * 1024)
+    const overLimit = await fetch(`${base}/api/auth/status`, { headers: { 'x-padding': bigHeader } })
+    assert.notEqual(overLimit.status, 431, 'a 20KB header must not be rejected as too large')
+    assert.equal(overLimit.status, 200, 'the request is served normally despite the large header')
+    await overLimit.arrayBuffer()
+  }
+
   console.log('dsh-auth integration smoke: ok')
 } finally {
   child.kill()

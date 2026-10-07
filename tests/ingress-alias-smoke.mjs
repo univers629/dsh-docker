@@ -72,6 +72,36 @@ assert.equal(
   'isolated 叠加层不应再定义无后缀的 dsh-ingress（会与 multiuser 的同名服务被合并）',
 )
 
+// —— 管理工作台的上游名不能是 `dsh` ——
+//
+// 入口自己占着 `dsh` 这个别名，而 Docker 内嵌 DNS 会把查询方自己的别名也算进
+// 结果：网关若把 root 的实例名报成 `dsh`，入口 proxy_pass 会命中它自己并自连，
+// 连接数暴涨后以 500 结束。网关侧必须换成另一个可解析的名字。
+function adminInstanceName(text) {
+  const m = text.match(/^\s+DSH_ADMIN_INSTANCE_NAME:\s*"?([^"\n]+)"?\s*$/m)
+  return m ? m[1].trim() : null
+}
+
+const authLayer = read('docker-compose.auth.yml')
+assert.equal(
+  adminInstanceName(authLayer),
+  'dsh',
+  'auth 层（单管理员）的实例名就是 `dsh`，入口后面直接是工作台',
+)
+
+const multiAuth = serviceBlock(multi, 'dsh-auth')
+assert.ok(multiAuth, 'multiuser 叠加层必须定义 dsh-auth')
+assert.equal(
+  adminInstanceName(multiAuth),
+  'dsh-app',
+  '多用户模式下 dsh-auth 的 DSH_ADMIN_INSTANCE_NAME 必须是 dsh-app：入口在 ' +
+    'dsh-private 上占用了 `dsh` 别名，沿用它会解析到入口自己并自连，表现为 500',
+)
+assert.ok(
+  hasAliasOn(serviceBlock(multi, 'dsh'), 'dsh-private', 'dsh-app'),
+  '管理工作台必须在入口所在的网络上声明 dsh-app 别名，否则入口解析不到上游',
+)
+
 // —— README 记录的正是这个上游 ——
 for (const doc of ['README.md', 'README.en.md']) {
   const text = read(doc)

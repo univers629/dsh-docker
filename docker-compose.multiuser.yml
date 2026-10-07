@@ -18,6 +18,9 @@ services:
       dsh-private:
         aliases:
           - dsh-admin
+          # 入口在 dsh-private 上占用了 `dsh` 这个名字，解析会命中它自己。
+          # 管理工作台因此另挂一个别名供入口转发；隔离模式下同样叫 dsh-app。
+          - dsh-app
       dsh-internal:
     environment:
       # password 模式：认证由 dsh-auth 网关在七层入口完成，容器内 nginx 不做认证。
@@ -38,6 +41,10 @@ services:
       DSH_MULTI_USER: "on"
       DSH_REGISTER_GATE: "${DSH_REGISTER_GATE:-open}"
       DSH_AUTH_WORKSPACE: "on"
+      # root 登录后入口把请求转发到管理工作台，这个名字必须与 dsh 容器在本网络上
+      # 实际可解析的别名一致。不能沿用 auth 层的 `dsh`：入口自己占用了那个别名，
+      # 解析会命中它自己并自连，连接数暴涨后以 500 结束。
+      DSH_ADMIN_INSTANCE_NAME: "dsh-app"
       DSH_INSTANCES_URL: "http://dsh-instances:8092"
       DSH_INSTANCES_TOKEN_FILE: "/data/auth/instances.token"
       DSH_AUTH_MAX_REGISTRATIONS_PER_IP: "${DSH_MAX_REGISTRATIONS_PER_IP:-5}"

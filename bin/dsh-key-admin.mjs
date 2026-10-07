@@ -74,6 +74,8 @@ const BROKER_BASE = process.env.DSH_KEY_ADMIN_BROKER_BASE ?? 'http://dsh-key-bro
 const PLACEHOLDER = process.env.DSH_KEY_ADMIN_PLACEHOLDER ?? 'dsh-broker-placeholder'
 const UPSTREAM_TIMEOUT_MS = Number(process.env.DSH_KEY_ADMIN_UPSTREAM_TIMEOUT_MS ?? 20_000)
 const SEED_TIMEOUT_MS = Number(process.env.DSH_KEY_ADMIN_SEED_TIMEOUT_MS ?? 120_000)
+/** 请求头上限。Node 默认 16KB；面板通常经反代访问，请求头会被追加。 */
+const MAX_HEADER_SIZE = 64 * 1024
 // 凭据巡检间隔。0 或负数关闭；见 scrubCredentials 上面那段说明。
 const SCRUB_INTERVAL_MS = Number(process.env.DSH_KEY_ADMIN_SCRUB_INTERVAL_MS ?? 30_000)
 // 出站策略文件（面板可写，dsh-egress 只读挂同一份）。空串 = 这台部署没有这个功能。
@@ -810,7 +812,7 @@ async function handle(request, response) {
   sendJson(response, 404, { ok: false, message: '没有这个地址：' + pathname })
 }
 
-const server = http.createServer((request, response) => {
+const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, (request, response) => {
   handle(request, response).catch((error) => {
     const status = error instanceof AdminInputError ? error.status : 500
     const message = error instanceof AdminInputError ? error.message : '面板内部错误，详见容器日志。'
