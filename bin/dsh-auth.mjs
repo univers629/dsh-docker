@@ -1846,6 +1846,34 @@ async function handleAdminInstancePin(state, req, res) {
   send(res, 200, { ok: true, uid, pinned: result.body.pinned === true })
 }
 
+/**
+ * 重建某个账户的实例容器：删容器、保留数据，下次登录时自动重建。
+ *
+ * 不带 purge——删数据是删账户的语义（见 handleAdminUserDelete）。
+ */
+async function handleAdminInstanceRebuild(state, req, res) {
+  const admin = requireRoot(state, req, res)
+  if (!admin) return
+  if (!requireCsrf(admin, req, res)) return
+  const body = await readBody(req)
+  const uid = Number(body?.uid)
+  if (!Number.isInteger(uid) || uid < UID_BASE) return fail(res, 400, 'invalid_uid')
+  const result = await callInstances('/instances/delete', { uid, purge: false })
+  // 实例本来就不存在（用户从未登录过）也算成功：重建的目标状态已经达成。
+  if (!result.ok && result.status !== 404) {
+    return fail(res, result.status === 400 ? 400 : 502, result.body?.code ?? 'instances_unavailable')
+  }
+  const target = state.users.find((user) => user.uid === uid)
+  appendAudit(state, {
+    actorId: admin.user.id,
+    action: 'admin.instance.rebuild',
+    result: 'ok',
+    change: { uid, username: target?.username ?? '' },
+  })
+  commitState(state)
+  send(res, 200, { ok: true, uid })
+}
+
 /** 生成新的邀请码（仅邀请码门槛下有意义），旧码立即作废。 */
 function handleAdminInvite(state, req, res) {
   const admin = requireRoot(state, req, res)
@@ -2398,6 +2426,7 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'GET' && p === '/api/admin/instances') return await handleAdminInstances(state, req, res)
     if (req.method === 'POST' && p === '/api/admin/instances/settings') return await handleAdminInstancesSettings(state, req, res)
     if (req.method === 'POST' && p === '/api/admin/instances/pin') return await handleAdminInstancePin(state, req, res)
+    if (req.method === 'POST' && p === '/api/admin/instances/rebuild') return await handleAdminInstanceRebuild(state, req, res)
         if (req.method === 'POST' && p === '/api/admin/users/status') return await handleAdminUserStatus(state, req, res)
         if (req.method === 'POST' && p === '/api/admin/users/password') return await handleAdminUserPassword(state, req, res)
         if (req.method === 'POST' && p === '/api/admin/users/delete') return await handleAdminUserDelete(state, req, res)

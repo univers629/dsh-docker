@@ -420,6 +420,10 @@
       'admin.retention.unpinned': '{name}: 已恢复自动回收。',
       'admin.retention.failed': '操作未完成。',
       'admin.retention.hint': '固化的实例不会被闲置回收，内存紧张时也不会停用。',
+      'admin.instance.rebuild': '重建',
+      'admin.instance.rebuildConfirm': '重建 {name} 的容器？容器内的可写层会丢失，用户数据（会话、文件、配置）保留。',
+      'admin.instance.rebuilt': '{name}: 已删除容器，用户下次访问时会自动重建。',
+      'admin.instance.rebuildFailed': '重建未完成。',
       'admin.empty.users': '还没有其他账户。',
       'admin.empty.audit': '暂无审计记录。',
       'admin.empty.instances': '还没有实例。',
@@ -530,6 +534,10 @@
       'admin.retention.unpinned': '{name}: back to auto-reclaim.',
       'admin.retention.failed': 'The operation did not complete.',
       'admin.retention.hint': 'A pinned instance is never reclaimed for idleness, not even under memory pressure.',
+      'admin.instance.rebuild': 'Rebuild',
+      'admin.instance.rebuildConfirm': 'Rebuild the container for {name}? The writable layer inside the container is lost; user data (sessions, files, configuration) is kept.',
+      'admin.instance.rebuilt': '{name}: container removed; it is recreated on the next visit.',
+      'admin.instance.rebuildFailed': 'Rebuild did not complete.',
       'admin.empty.users': 'No other accounts yet.',
       'admin.empty.audit': 'No audit entries yet.',
       'admin.empty.instances': 'No instances yet.',
@@ -901,10 +909,23 @@
       )
       toggle.title = instance.pinned ? t('admin.retention.unpin') : t('admin.retention.pin')
       group.appendChild(toggle)
+      // 重建：删容器但保留数据，下次登录自动重建。用于实例卡死或想让新授权生效。
+      // 删数据是删账户的语义，放在用户页，不混进这里。
+      group.appendChild(actionButton(t('admin.instance.rebuild'), () => rebuildInstance(instance.uid, instance.name)))
       retention.appendChild(group)
       row.appendChild(retention)
       tbody.appendChild(row)
     }
+  }
+
+  /** 重建实例容器（保留数据，下次登录自动拉起）。 */
+  async function rebuildInstance(uid, name) {
+    if (!window.confirm(fill('admin.instance.rebuildConfirm', { name }))) return
+    clearAlerts()
+    const { response } = await api('/api/admin/instances/rebuild', { method: 'POST', body: JSON.stringify({ uid }) })
+    if (!response.ok) { error(t('admin.instance.rebuildFailed')); return }
+    notice(fill('admin.instance.rebuilt', { name }))
+    await loadInstances()
   }
 
   /** 固化 / 取消固化一个实例容器（永久保留，回收策略跳过）。 */

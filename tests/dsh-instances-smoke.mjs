@@ -504,6 +504,24 @@ try {
     'the ingress and broker are disconnected before removing the network (docker refuses otherwise)',
   )
 
+  // ---- 重建：删容器但保留数据 ----
+  //
+  // 用新 uid：上面那个实例已被 purge 删掉。purge 未开启时 `purged` 为 true，
+  // 含义是「uid 可安全复用」而不是「数据已删」，所以要断言的是目录仍在。
+  const rebuildUid = uid + 1
+  const ensured = await call('/instances/ensure', { uid: rebuildUid, username: 'rebuild' })
+  assert.equal(ensured.status, 200, 'a fresh instance is created for the rebuild case')
+  const rebuildDir = path.join(sandbox, 'users', String(rebuildUid))
+  fs.mkdirSync(rebuildDir, { recursive: true })
+  fs.writeFileSync(path.join(rebuildDir, 'keep.txt'), 'session data')
+  const rebuilt = await call('/instances/delete', { uid: rebuildUid, purge: false })
+  assert.equal(rebuilt.status, 200, 'rebuild removes the container')
+  const rebuiltBody = await rebuilt.json()
+  assert.equal(rebuiltBody.purgeRequested, false, 'rebuild must not request a purge')
+  assert.ok(fs.existsSync(path.join(rebuildDir, 'keep.txt')), 'rebuild keeps the user data directory')
+  const missingRebuild = await call('/instances/delete', { uid: 999999, purge: false })
+  assert.equal(missingRebuild.status, 404, 'rebuilding an unknown instance is a 404')
+
   console.log('dsh-instances smoke: ok')
 } finally {
   child.kill()

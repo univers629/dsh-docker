@@ -422,6 +422,36 @@ try {
     `a normal user may not pin instances (got ${pinByUser.status})`,
   )
 
+  // 重建实例：普通用户不可达；管理员缺 CSRF 令牌时同样被拒（与 pin 同一套守卫）。
+  const rebuildByUser = await fetch(`${base}/api/admin/instances/rebuild`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: base, cookie: cookieHeader(userJar), 'x-csrf-token': loginBody.csrfToken },
+    body: JSON.stringify({ uid: 100000 }),
+  })
+  assert.ok(
+    [401, 403].includes(rebuildByUser.status),
+    `a normal user may not rebuild instances (got ${rebuildByUser.status})`,
+  )
+  const rebuildNoCsrf = await fetch(`${base}/api/admin/instances/rebuild`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: base, cookie: cookieHeader(rootJar) },
+    body: JSON.stringify({ uid: 100000 }),
+  })
+  assert.equal(rebuildNoCsrf.status, 403, 'rebuild requires a CSRF token')
+
+  // 重建必须保留数据：网关转发给编排服务的 purge 只能是 false。
+  // 传 true 会连用户目录一起删掉，而「重建」的语义是只换容器。
+  {
+    const authSource = fs.readFileSync(path.join(root, 'bin', 'dsh-auth.mjs'), 'utf8')
+    const handler = authSource.match(/async function handleAdminInstanceRebuild\([\s\S]*?\n\}/)
+    assert.ok(handler, 'dsh-auth.mjs must define handleAdminInstanceRebuild')
+    assert.match(
+      handler[0],
+      /callInstances\('\/instances\/delete',\s*\{\s*uid,\s*purge:\s*false\s*\}\)/,
+      'rebuild must call /instances/delete with purge: false, or it deletes user data',
+    )
+  }
+
   // ---- 单用户模式：注册端点必须不存在 ----
   const singlePort = await freePort()
   const single = spawn(process.execPath, [path.join(root, 'bin', 'dsh-auth.mjs')], {
