@@ -142,9 +142,15 @@ services:
       # dsh-private：到认证网关（auth_request）与管理员工作台（dsh-admin 别名）。
       # dsh-instances-net：到各用户实例（proxy_pass http://$dsh_instance:3080）。
       # dsh-internal：保持与密钥代理等内部组件的既有连通性。
-      - dsh-private
-      - dsh-internal
-      - dsh-instances-net
+      dsh-private:
+        # 顶替 `dsh` 这个名字：容器化反代（Docker 面板等）按 README 把上游写成
+        # http://dsh:3080，而多用户模式下 dsh 容器已不再对外，入口才是那个 3080。
+        # 不声明这个别名，反代就解析不到主机名，表现为 502。隔离模式的
+        # dsh-ingress-iso 同样带这个别名，两种模式对外行为保持一致。
+        aliases:
+          - dsh
+      dsh-internal: {}
+      dsh-instances-net: {}
     security_opt:
       - no-new-privileges:true
     cap_drop:
