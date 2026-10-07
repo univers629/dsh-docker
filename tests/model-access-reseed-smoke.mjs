@@ -190,7 +190,55 @@ const clientJs = read('dsh-home/docker-control/client/client.js')
 }
 
 // ---------------------------------------------------------------------------
-// 5) dsh-control 的实时状态卡片默认不打开
+// 5) 实例侧读上游配置：模型清单与形态都要读对位置
+//
+// keys.json 里这两项都在 upstreams[].dsh 下（面板写在那里）。读错位置的后果都不
+// 报错，只是模型页上什么都不出现：
+//   * 清单读成顶层 models（恒为空）→ DSH 丢掉整条目录外路由；
+//   * 形态写死 any → responses 上游被当成 chat 上游，请求落到上游不认的路径上。
+// 两者都不会让登录或保存失败，所以只能靠断言锁住。
+// ---------------------------------------------------------------------------
+{
+  const source = read('bin/dsh-instances.mjs')
+  const fn = source.match(/function readUpstreamModels\(\)[\s\S]*?\n\}/)
+  assert.ok(fn, 'dsh-instances.mjs 必须定义 readUpstreamModels')
+
+  // 用真实结构跑一遍这个函数，而不是只看它有没有出现某个字符串。
+  // 直接 import 会启动整个服务，所以把函数体摘出来、注入最小依赖执行。
+  const keys = {
+    upstreams: [
+      { name: 'vyceai', dsh: { api: 'responses', models: [{ id: 'deepseek-v4.1' }, { id: 'agnes-3.0-flash' }] } },
+      { name: 'gcli', dsh: { api: 'any', models: [{ id: 'gemini-3.8-flash' }] } },
+    ],
+  }
+  const factory = new Function(
+    'fs', 'CONFIG', 'return (' + fn[0] + ')',
+  )
+  const readUpstreamModels = factory({ readFileSync: () => JSON.stringify(keys) }, { brokerKeysFile: 'x' })
+  const map = readUpstreamModels()
+  assert.deepEqual(
+    map.vyceai?.models,
+    ['deepseek-v4.1', 'agnes-3.0-flash'],
+    '模型清单必须从 upstreams[].dsh.models 读出来；读成顶层 models 会恒为空，整条路由被 DSH 丢掉',
+  )
+  assert.equal(map.vyceai?.shape, 'responses', '形态要跟着上游走，写死 any 会把 responses 上游当成 chat 上游')
+  assert.equal(map.gcli?.shape, 'any', 'any 上游保持 any')
+
+  // 送进 seeder 的 shape 必须来自上游配置，而不是固定值。
+  assert.match(
+    source,
+    /shape: known\?\.shape \?\? 'any'/,
+    'seedModelSettings 必须把上游自己的形态传给 seeder',
+  )
+  assert.doesNotMatch(
+    source,
+    /shape: 'any',\s*\n\s*models: models\[/,
+    '不能把形态写死成 any（那会让 responses 上游发出错误协议的请求）',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 6) dsh-control 的实时状态卡片默认不打开
 // ---------------------------------------------------------------------------
 {
   assert.match(

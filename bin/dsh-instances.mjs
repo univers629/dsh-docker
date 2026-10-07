@@ -414,15 +414,34 @@ async function prepareDataDir(uid) {
  *
  * @returns {Record<string, string[]>} 上游名 → 模型 id 数组。
  */
+/**
+ * 读取「上游名 → { shape, models }」，用来给实例生成 DSH 的 provider 路由。
+ *
+ * 两处都在 keys.json 的 `upstreams[].dsh` 下（面板写在那里）：
+ *   * models：不是顶层 `upstreams[].models`。读错位置会让清单恒为空，而 DSH 对
+ *     目录外的路由要求至少一个模型 id，缺了就丢掉整条路由——现象是「授权了却一个
+ *     模型都看不到」。
+ *   * api：上游的 wire 协议（responses / chat / …）。写成固定的 any 会让 responses
+ *     上游被当成 chat 上游，请求打到上游不认的路径上，现象是发消息就报密钥无效。
+ * @returns {Record<string, {shape: string, models: string[]}>} 小写上游名 → 形态与模型。
+ */
 function readUpstreamModels() {
   try {
     const parsed = JSON.parse(fs.readFileSync(CONFIG.brokerKeysFile, 'utf8'))
     const map = {}
     for (const entry of parsed?.upstreams ?? []) {
       if (typeof entry?.name !== 'string') continue
-      map[entry.name.toLowerCase()] = (Array.isArray(entry.models) ? entry.models : [])
-        .map((model) => (typeof model === 'string' ? model : model?.id))
-        .filter((id) => typeof id === 'string' && id.length > 0)
+      const dsh = entry?.dsh ?? {}
+      // 顶层 models 是旧版安装器留下的位置，一并认，免得老部署读不出清单。
+      const source = Array.isArray(dsh.models)
+        ? dsh.models
+        : (Array.isArray(entry?.models) ? entry.models : [])
+      map[entry.name.toLowerCase()] = {
+        shape: typeof dsh.api === 'string' && dsh.api.length > 0 ? dsh.api : 'any',
+        models: source
+          .map((model) => (typeof model === 'string' ? model : model?.id))
+          .filter((id) => typeof id === 'string' && id.length > 0),
+      }
     }
     return map
   } catch {
@@ -530,16 +549,18 @@ async function seedModelSettings(name, uid, upstreams, token, models = {}) {
   const payload = JSON.stringify({
     brokerBase: CONFIG.brokerUrl,
     placeholder: CONFIG.placeholderKey,
-    // shape 用 broker 侧那套词汇（any/chat/responses/messages）：'any' 表示
-    // 「不显式收窄形态」，自定义路由会落到 openai-completions——这正是代理的默认。
-    // 不用我自己猜的 'openai'（那不在合法取值里，会被 seeder 拒绝并跳过）。
-    // 模型清单来自代理配置：seeder 要求非内置目录的上游必须显式列出模型，
-    // 否则整条上游会被跳过（现象是「授权了却一个模型都没有」）。
-    upstreams: upstreams.map((upstream) => ({
-      name: upstream,
-      shape: 'any',
-      models: models[upstream.toLowerCase()] ?? [],
-    })),
+    // shape 用 broker 侧那套词汇（any/chat/responses/messages），取自上游自己的配置：
+    // 写死 any 会把 responses 上游当成 chat 上游，请求落到上游不认的路径上，现象是
+    // 一发消息就报密钥无效。模型清单同理必须显式给出——DSH 对目录外的路由要求至少
+    // 一个模型 id，缺了就丢掉整条路由（现象是「授权了却一个模型都没有」）。
+    upstreams: upstreams.map((upstream) => {
+      const known = models[upstream.toLowerCase()]
+      return {
+        name: upstream,
+        shape: known?.shape ?? 'any',
+        models: known?.models ?? [],
+      }
+    }),
     // 每个 provider 都带上实例令牌：代理据此识别调用者并只放行被开放的上游
     extraHeaders: { 'x-dsh-instance-token': token },
   })
