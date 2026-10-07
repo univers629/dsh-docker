@@ -19,9 +19,12 @@ export const ARGON2 = Object.freeze({
   tagLength: 32,
 })
 
-/** 密码长度与组成规则（KPanel validatePassword 同款：12–256 字节、至少一字母一数字）。 */
-export const PASSWORD_MIN = 12
+/** 密码长度范围（字节）。低于下限拒绝；组成复杂度不做硬性要求。 */
+export const PASSWORD_MIN = 6
 export const PASSWORD_MAX = 256
+
+/** 建议长度：短于此值且字符集单一时，界面提示一句，不拦截。 */
+export const PASSWORD_RECOMMENDED = 12
 
 const USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$/
 
@@ -35,21 +38,50 @@ export function isValidUsername(username) {
 }
 
 /**
- * 校验密码强度。返回 null 表示通过，否则返回面向用户的短原因（不含内部细节）。
+ * 校验密码长度。返回 null 表示通过，否则返回面向用户的短原因。
+ *
+ * 只校验长度：组成复杂度会把人推向 `Password1!` 这类可预测组合，强度提升有限
+ * 却挡住注册。强度提示由界面承担，见 passwordAdvice。
+ *
  * @param {string} password 待校验密码。
- * @returns {null | 'length' | 'composition'} 失败原因。
+ * @returns {null | 'length'} 失败原因。
  */
 export function validatePassword(password) {
   if (typeof password !== 'string') return 'length'
   const bytes = Buffer.byteLength(password, 'utf8')
   if (bytes < PASSWORD_MIN || bytes > PASSWORD_MAX) return 'length'
+  return null
+}
+
+/**
+ * 评估密码强度的建议（不拦截）。
+ *
+ * @param {string} password 待评估密码。
+ * @returns {string | null} 建议标识，或 null 表示无需提示。
+ */
+export function passwordAdvice(password) {
+  if (typeof password !== 'string' || password.length === 0) return null
+  const bytes = Buffer.byteLength(password, 'utf8')
+  // 低于下限时不提示：那会被 validatePassword 拒绝，由它报错。
+  if (bytes < PASSWORD_MIN) return null
   let hasLetter = false
   let hasDigit = false
+  let hasSymbol = false
   for (const ch of password) {
     if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) hasLetter = true
     else if (ch >= '0' && ch <= '9') hasDigit = true
+    else hasSymbol = true
   }
-  if (!hasLetter || !hasDigit) return 'composition'
+  const kinds = [hasLetter, hasDigit, hasSymbol].filter(Boolean).length
+  if (bytes < PASSWORD_RECOMMENDED && kinds < 2) {
+    return 'short_simple'
+  }
+  if (bytes < PASSWORD_RECOMMENDED) {
+    return 'short'
+  }
+  if (kinds < 2) {
+    return 'simple'
+  }
   return null
 }
 
@@ -302,13 +334,9 @@ function headerValue(value) {
 }
 
 /**
- * 生成一个必然通过 validatePassword 的口令。
- *
- * 直接拿随机字节做 base64url 是不够的：结果可能一个数字都没有，于是自己生成的
- * 口令反而过不了自己的强度校验（管理员重置口令时就会踩到）。这里用 base32 字母表
- * （a-z + 2-7）生成，再按需补齐种类。
+ * 生成一个随机口令（管理员重置口令且未指定时使用）。
  * @param {number} [bytes] 熵字节数。
- * @returns {string} 满足强度规则的口令。
+ * @returns {string} 随机口令。
  */
 export function generatePassword(bytes = 18) {
   let candidate = base32Encode(randomBytes(bytes)).toLowerCase()

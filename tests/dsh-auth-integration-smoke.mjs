@@ -203,8 +203,10 @@ try {
   })
   assert.equal(crossOrigin.status, 403, 'cross-origin write must be rejected')
 
-  // ---- 弱密码必须拒绝 ----
-  const weak = await jsonPost(`${base}/api/auth/password`, { currentPassword: ROOT_PASSWORD, newPassword: 'alllettersonly' }, jar, { 'x-csrf-token': loginBody.csrfToken })
+  // ---- 太短的密码必须拒绝 ----
+  // 只有长度是硬性要求：组成复杂度改为界面提示（见 passwordAdvice），
+  // 所以这里用「短于下限」触发 weak_password，而不是用"纯字母"。
+  const weak = await jsonPost(`${base}/api/auth/password`, { currentPassword: ROOT_PASSWORD, newPassword: 'abc12' }, jar, { 'x-csrf-token': loginBody.csrfToken })
   assert.equal(weak.status, 400)
   assert.equal((await weak.json()).code, 'weak_password')
 

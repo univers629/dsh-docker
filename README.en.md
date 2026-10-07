@@ -272,16 +272,6 @@ If you would rather not fill keys in a terminal, use the panel: add or remove up
 - Do not fill keys for broker-managed upstreams in the DSH WebUI card: that field is `type=password`, so a browser password manager will auto-fill a saved password, and saving once writes it in cleartext into `.credentials.yaml` inside the container. The panel swaps such values back to the placeholder every 30 seconds and names them in the log (rotate them), but a key entered that way should still be treated as having been inside the container.
 - Skipping the broker and the panel still allows entering keys directly in the WebUI, at the cost of losing this layer.
 
-### No card appears on the models page
-
-The DSH models page only renders providers that really exist in the configuration; a rejected configuration produces no error, just one fewer card. Check in order:
-
-1. On the host, `cat data/dsh/settings.yaml` and look under `llm-pi-ai.providers`. If the upstream is missing, the configuration was never written — check `docker logs dsh-key-admin` (panel saves) or the installer's warnings (wizard).
-2. Present but with an empty `models`: upstreams outside the catalogue need at least one model id, or DSH drops the whole route. Add a model id and save again.
-3. A non-conforming upstream name (uppercase, underscores, leading digit) is also dropped; rename and resave.
-4. The DeepSeek card uses DSH's own first-party provider and always exists; it is not something newly added.
-5. If the key field already has content when you open the settings page and copying it out yields a key you entered before, that is your browser's password manager auto-filling. DSH never back-fills stored keys; the field is always empty.
-
 ### Chat returns 403 or "API key is invalid"
 
 You can select the model and the panel can fetch the model list, but every chat returns 403 or an invalid-key error — usually a missing version segment in the base_url: the panel tries both `<base>/models` and `<base>/v1/models` and reports success on the second, while DSH does not add the segment when sending requests, so they land on the upstream root path.
@@ -298,10 +288,6 @@ You can select the model and the panel can fetch the model list, but every chat 
 - `allowlist`: also routes through `dsh-egress`, but only allows listed domains; the built-in allow list covers Debian, npm, PyPI, GitHub, GHCR, and 15 domains in total. Anything else returns 403, including pages and search APIs the agent tries to reach.
 
 The mode and both lists live in `data/egress/policy.json` (written by the panel, read by the proxy, hot-reloaded by modification time). Switching between `blocklist` and `allowlist`, and editing either list, happens in the panel's "Container outbound policy" and takes effect in 5 seconds; only switching between `open` and an isolated mode needs a rerun of the installer, because that changes the compose overlay. None of the three modes affects model requests: that route leaves through `dsh-key-broker` independently.
-
-## Image publishing
-
-Prebuilt images are built by [.github/workflows/publish-image.yml](.github/workflows/publish-image.yml) on native amd64 and arm64 runners and merged into a multi-arch manifest. Three triggers: a daily 03:17 UTC check of `@deepseek-ai/dsh` `latest` on npm that builds when the matching tag is missing; a manual version or dist-tag run from the Actions page; and pushing a `v*` tag. Each release is tagged `latest`, `dsh-<DSH version>`, and `<date>-<commit>`; if upstream changes invalidate a patch anchor, the build fails rather than publishing an unpatched image. New GHCR packages are private by default, so after the first release change visibility to public in Package settings — otherwise anonymous pulls return `denied`.
 
 ## License
 

@@ -180,8 +180,9 @@ try {
   // 校验：用户名规则、密码强度、重复名
   assert.equal((await post(`${base}/api/auth/register`, { username: 'ab', password: 'goodpass1234' })).status, 400, 'short username rejected')
   assert.equal((await post(`${base}/api/auth/register`, { username: 'bad name', password: 'goodpass1234' })).status, 400, 'invalid username rejected')
-  const weak = await post(`${base}/api/auth/register`, { username: 'bobby', password: 'alllettersonly' })
-  assert.equal(weak.status, 400, 'weak password rejected')
+  // 只有长度是硬性要求（6 位下限）；组成复杂度改为界面提示，不再拦截。
+  const weak = await post(`${base}/api/auth/register`, { username: 'bobby', password: 'abc12' })
+  assert.equal(weak.status, 400, 'too-short password rejected')
   assert.equal((await weak.json()).code, 'weak_password')
   assert.equal((await post(`${base}/api/auth/register`, { username: 'alice', password: 'another-pass-99' })).status, 409, 'duplicate username rejected')
   assert.equal((await post(`${base}/api/auth/register`, { username: 'ALICE', password: 'another-pass-99' })).status, 409, 'duplicate check is case-insensitive')

@@ -37,6 +37,7 @@ import {
   sealTotpSecret,
   tokenDigest,
   totpCodeAtStep,
+  passwordAdvice,
   validatePassword,
   verifyPassword,
 } from '../bin/dsh-auth-policy.mjs'
@@ -72,19 +73,32 @@ try {
   assert.equal(verifyPassword('x', 'not-a-hash'), false, 'verify on garbage must be false, not throw')
 
   // ---------- 密码强度 ----------
-  assert.equal(validatePassword('short1'), 'length', 'short password rejected')
-  assert.equal(validatePassword('alllettersonly'), 'composition', 'letters-only rejected')
-  assert.equal(validatePassword('123456789012'), 'composition', 'digits-only rejected')
-  assert.equal(validatePassword('goodpass1234'), null, 'valid password accepted')
+  //
+  // 只有长度是硬性要求。组成复杂度**不再拦截**：早先沿用 KPanel 的"至少一字母
+  // 一数字"，实测把大量正常用户挡在注册之外，而强度提升有限（人们会写
+  // Password1! 这类可预测组合）。强度改为界面提示，见 passwordAdvice。
+  assert.equal(PASSWORD_MIN, 6, '长度下限是 6')
+  assert.equal(validatePassword('short'), 'length', '5 位太短，拒绝')
+  assert.equal(validatePassword('123456'), null, '纯数字 6 位放行（不再要求字母）')
+  assert.equal(validatePassword('abcdef'), null, '纯字母 6 位放行')
+  assert.equal(validatePassword('ab12'), 'length', '4 位仍拒绝')
   assert.equal(validatePassword('a'.repeat(257)), 'length', 'over-long rejected')
   assert.equal(validatePassword(null), 'length', 'non-string rejected')
 
-  // ---------- 生成的口令必须必然通过强度校验 ----------
-  // 随机串可能整串没有数字，那会让「系统生成的口令」过不了自己的规则。
+  // ---------- 强度建议（不拦截） ----------
+  assert.equal(passwordAdvice('123456'), 'short_simple', '6 位纯数字：既短又单一字符集')
+  assert.equal(passwordAdvice('abcdefghij'), 'short_simple', '10 位纯字母：同样既短又单一字符集')
+  assert.equal(passwordAdvice('abcdefghijkl'), 'simple', '12 位纯字母：够长，只提示字符集单一')
+  assert.equal(passwordAdvice('abcd1234efgh'), null, '12 位且混合字符集：无建议')
+  assert.equal(passwordAdvice('abcd1234'), 'short', '8 位但混合字符集：只提示偏短')
+  assert.equal(passwordAdvice('ab'), null, '低于下限不提示（由 validatePassword 报错）')
+
+  // ---------- 生成的口令必须必然通过校验 ----------
   for (let i = 0; i < 200; i++) {
     const generated = generatePassword()
     assert.equal(validatePassword(generated), null, `generated password must be valid: ${generated}`)
     assert.ok(generated.length >= PASSWORD_MIN, 'generated password meets the minimum length')
+    assert.equal(passwordAdvice(generated), null, 'generated password needs no advice')
   }
 
   // ---------- 用户名 ----------

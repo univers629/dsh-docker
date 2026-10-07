@@ -106,6 +106,8 @@
             <input id="register-password" type="password" autocomplete="new-password" />
           </span>
         </label>
+        <!-- 强度提醒：只是提醒，不阻止提交。文案随输入实时变化，见 passwordAdvice。 -->
+        <div class="inline-alert inline-alert--info" id="password-advice" role="status" style="display:none"></div>
         <label class="field">
           <span class="label" data-i18n="register.confirm">确认密码</span>
           <span class="input-wrap">
@@ -249,7 +251,7 @@
       'signedIn.admin': '管理面板',
       'register.action': '创建账户',
       'register.noAccount': '还没有账户？',
-      'register.hint': '注册后系统会为你准备独立的工作区，会话与文件与其他账户互不可见。密码至少 12 位，并同時包含字母和数字。',
+      'register.hint': '注册后系统会为你准备独立的工作区，会话与文件与其他账户互不可见。密码至少 6 位；更长、混合字母数字符号会更安全，但不强制。',
       'register.confirm': '确认密码',
       'register.invite': '邀请码',
       'register.submit': '创建账户',
@@ -257,7 +259,11 @@
       'register.errorRequired': '请填写用户名与密码。',
       'register.errorMismatch': '两次输入的密码不一致。',
       'register.errorUsername': '用户名需 3–32 位，以字母或数字开头，只能包含字母、数字、点、下划线和连字符。',
-      'register.errorWeak': '密码至少 12 位，且需同时包含字母和数字。',
+      'register.errorWeak': '密码至少 6 位。',
+      // 强度建议：显示但不阻止提交。
+      'password.advice.shortSimple': '这个密码较短、且只用了单一字符集。能用，但建议加长或混入字母、数字、符号。',
+      'password.advice.short': '密码偏短。能用，加长一些会更安全。',
+      'password.advice.simple': '密码只用了单一字符集。能用，混入字母、数字或符号会更安全。',
       'register.errorTaken': '该用户名已被占用。',
       'register.errorInvite': '邀请码无效。',
       'register.errorClosed': '管理员已关闭注册，请联系管理员开通账户。',
@@ -323,7 +329,7 @@
       'signedIn.admin': 'Admin panel',
       'register.action': 'Create account',
       'register.noAccount': 'No account yet?',
-      'register.hint': 'Registration provisions a private workspace: sessions and files are invisible to other accounts. Use at least 12 characters with both letters and digits.',
+      'register.hint': 'Registration provisions a private workspace: sessions and files are invisible to other accounts. Use at least 6 characters; longer passwords mixing letters, digits and symbols are safer, but none of that is enforced.',
       'register.confirm': 'Confirm password',
       'register.invite': 'Invite code',
       'register.submit': 'Create account',
@@ -331,7 +337,11 @@
       'register.errorRequired': 'Enter a username and password.',
       'register.errorMismatch': 'The two passwords do not match.',
       'register.errorUsername': 'Username must be 3–32 characters, start with a letter or digit, and contain only letters, digits, dots, underscores or hyphens.',
-      'register.errorWeak': 'Password must be at least 12 characters and contain both letters and digits.',
+      'register.errorWeak': 'Password must be at least 6 characters.',
+      // Strength advice: shown, never blocking.
+      'password.advice.shortSimple': 'This password is short and uses a single character class. It works, but a longer one — or one mixing letters, digits and symbols — would be safer.',
+      'password.advice.short': 'This password is on the short side. It works, but a longer one would be safer.',
+      'password.advice.simple': 'This password uses a single character class. It works, but mixing in letters, digits or symbols would be safer.',
       'register.errorTaken': 'That username is already taken.',
       'register.errorInvite': 'Invalid invite code.',
       'register.errorClosed': 'Registration is closed. Ask an administrator to create an account for you.',
@@ -1049,6 +1059,30 @@
   // ---- 注册 ----
   $('show-register').addEventListener('click', () => { clearError(); showStep(stepRegister) })
   $('back-login').addEventListener('click', () => { clearError(); showStep(stepCredentials) })
+
+  // 密码强度提醒：边输边提示，不阻止提交。服务端只硬性要求长度下限。
+  $('register-password').addEventListener('input', (e) => {
+    const node = $('password-advice')
+    const value = e.target.value
+    const bytes = new TextEncoder().encode(value).length
+    // 低于下限时由提交后的错误提示说明，这里不重复。
+    if (bytes < 6) { node.style.display = 'none'; node.textContent = ''; return }
+    let hasLetter = false
+    let hasDigit = false
+    let hasSymbol = false
+    for (const ch of value) {
+      if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) hasLetter = true
+      else if (ch >= '0' && ch <= '9') hasDigit = true
+      else hasSymbol = true
+    }
+    const kinds = [hasLetter, hasDigit, hasSymbol].filter(Boolean).length
+    const key = bytes < 12 && kinds < 2 ? 'password.advice.shortSimple'
+      : bytes < 12 ? 'password.advice.short'
+        : kinds < 2 ? 'password.advice.simple'
+          : ''
+    node.textContent = key ? t(key) : ''
+    node.style.display = key ? '' : 'none'
+  })
 
   $('step-register').addEventListener('submit', async (e) => {
     e.preventDefault()
