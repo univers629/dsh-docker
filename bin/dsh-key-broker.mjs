@@ -44,8 +44,12 @@ const GRANTS_PATH = process.env.DSH_BROKER_GRANTS ?? '/etc/dsh-broker/grants.jso
 const PORT = Number(process.env.DSH_BROKER_PORT ?? 8080)
 const BIND = process.env.DSH_BROKER_BIND ?? '0.0.0.0'
 const RELOAD_INTERVAL_MS = Number(process.env.DSH_BROKER_RELOAD_MS ?? 5000)
+// 收到响应头之后的流式读取上限。推理模型边想边出，整个回合可以跑很久，所以给足。
 const UPSTREAM_TIMEOUT_MS = Number(process.env.DSH_BROKER_UPSTREAM_TIMEOUT_MS ?? 600_000)
-const CONNECT_TIMEOUT_MS = Number(process.env.DSH_BROKER_CONNECT_TIMEOUT_MS ?? 20_000)
+// 首次响应头的等待上限。这个值覆盖的是「连接建立 + 上游开始回话」，而不是网络握手：
+// 推理模型要先想完才开始输出，首字延迟十几秒是常态（实测同一上游 6.7s–19.3s 都有）。
+// 定得太紧会把正常请求判成超时，而重试又可能再超时，现象是超时反复出现。
+const CONNECT_TIMEOUT_MS = Number(process.env.DSH_BROKER_CONNECT_TIMEOUT_MS ?? 60_000)
 const MAX_CONCURRENT = Number(process.env.DSH_BROKER_MAX_CONCURRENT ?? 64)
 // 见下方 https.request 的 lookup：防止「配置里的合法域名被解析到内网」。
 const guardedLookup = createGuardedLookup()
@@ -312,7 +316,9 @@ function forward(request, response, route) {
   }
 
   upstreamRequest.setTimeout(CONNECT_TIMEOUT_MS, () => {
-    upstreamRequest.destroy(new Error('上游连接超时'))
+    // 措辞要对得上实际判定：这里等的是「上游开始回话」，不是 TCP 握手。写成
+    // 「连接超时」会让人去查网络，而真实原因多半是上游本身慢。
+    upstreamRequest.destroy(new Error(`上游 ${Math.round(CONNECT_TIMEOUT_MS / 1000)} 秒内未返回响应`))
   })
   upstreamRequest.on('response', () => {
     upstreamRequest.setTimeout(UPSTREAM_TIMEOUT_MS)

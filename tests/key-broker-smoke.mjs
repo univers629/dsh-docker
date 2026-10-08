@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import net from 'node:net'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -390,6 +391,35 @@ try {
 } finally {
   child.kill('SIGKILL')
   await rm(sandbox, { recursive: true, force: true })
+}
+
+// ---- 首次响应头的等待上限 ----
+//
+// 这个值覆盖的是「连接建立 + 上游开始回话」，不是 TCP 握手：推理模型要先想完才
+// 输出，首字延迟十几秒是常态。定得太紧会把正常请求判成超时，而重试又可能再超时，
+// 现象是「上游连接超时」反复出现而网络其实没问题。
+{
+  const broker = readFileSync(fileURLToPath(new URL('../bin/dsh-key-broker.mjs', import.meta.url)), 'utf8')
+  const declared = broker.match(/const CONNECT_TIMEOUT_MS = Number\(process\.env\.DSH_BROKER_CONNECT_TIMEOUT_MS \?\? ([\d_]+)\)/)
+  assert.ok(declared, 'broker 必须定义可配置的 CONNECT_TIMEOUT_MS')
+  const defaultMs = Number(declared[1].replaceAll('_', ''))
+  assert.ok(
+    defaultMs >= 60_000,
+    `首次响应头的等待上限至少 60 秒，实测推理上游首字延迟可到 19 秒（当前 ${defaultMs}ms）`,
+  )
+  // 流式读取上限要明显更宽：长回合可以跑几分钟。
+  const stream = broker.match(/const UPSTREAM_TIMEOUT_MS = Number\(process\.env\.DSH_BROKER_UPSTREAM_TIMEOUT_MS \?\? ([\d_]+)\)/)
+  assert.ok(stream, 'broker 必须定义可配置的 UPSTREAM_TIMEOUT_MS')
+  assert.ok(
+    Number(stream[1].replaceAll('_', '')) > defaultMs,
+    '收到响应头之后的读取上限必须比首字等待更宽，否则长回合会被中途掐断',
+  )
+  // 收到响应头之后必须放宽，否则整个流式回合都受首字超时约束。
+  assert.match(
+    broker,
+    /on\('response', \(\) => \{\s*upstreamRequest\.setTimeout\(UPSTREAM_TIMEOUT_MS\)/,
+    '收到响应头后必须把超时放宽到流式上限',
+  )
 }
 
 console.log('key broker smoke: ok')
