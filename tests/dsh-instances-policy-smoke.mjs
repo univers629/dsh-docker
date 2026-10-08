@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 
 import {
   DEFAULT_MEMORY_MB,
-  DEFAULT_NODE_HEAP_MB,
+  defaultNodeHeapMb,
   INSTANCE_PORT,
   SHRINK_IDLE_TIMEOUT_MS,
   UID_BASE,
@@ -57,8 +57,13 @@ assert.ok(joined.includes('--pids-limit 256'), 'pids limited')
 assert.ok(!spec.includes('--read-only'), 'instances keep a writable rootfs: the entrypoint writes /etc/shadow and /run/dsh-*')
 assert.ok(joined.includes('/data/dsh:rw'), 'DSH home mounted writable for this instance only')
 assert.ok(joined.includes('/workspace:rw'), 'workspace mounted for this instance only')
+// DSH 把这三个目录声明为可写（DSH_WRITABLE_PATHS），Agent 会把产物写进 /data/home。
+// 不挂它们的话文件落在容器可写层：用户在自己的工作区里看不到，容器一重建就丢。
+for (const target of ['/data/home:rw', '/data/agents:rw', '/data/mcp:rw']) {
+  assert.ok(joined.includes(target), `${target} 必须挂到宿主，否则 Agent 产物不可见且不持久`)
+}
 assert.ok(!joined.includes('settings.yaml:'), 'no nested file mount inside the DSH home: it breaks on file-sharing hosts')
-assert.ok(joined.includes(`--max-old-space-size=${DEFAULT_NODE_HEAP_MB}`), 'node heap capped')
+assert.ok(joined.includes(`--max-old-space-size=${defaultNodeHeapMb(DEFAULT_MEMORY_MB)}`), 'node heap capped')
 assert.ok(joined.includes('DSH_ACCESS_MODE=password'), 'inner nginx auth disabled: the gateway is the gate')
 assert.ok(!joined.includes('DSH_ACCESS_MODE=basic'), 'instances must not require Basic Auth')
 assert.ok(!joined.includes('docker.sock'), 'no docker socket inside user instances')
@@ -85,25 +90,44 @@ assert.equal(idle({ pinned: true, lastSeenAt: now - 10 * 3600_000 }).reason, 'pi
 assert.equal(idle({ pinned: true, busy: true, lastSeenAt: now - 10 * 3600_000 }).stop, false, 'pin wins over every other signal')
 
 // ---------- 水位决策（含滞回） ----------
-// 压力 = 需求/(需求+可用)。以下取值按该定义手算，注释给出算式。
+// 压力 = 需求/(需求+可用)。按定义反解出落进各区间的实例数，而不是写死 200MB 时的
+// 具体数字：默认内存上限会随宿主规模调整，写死的话调一次默认值这里就跟着红。
 const perInstanceMb = DEFAULT_MEMORY_MB
 const MB = 1024 ** 2
-assert.equal(watermarkMode({ onlineCount: 0, perInstanceMb, availableBytes: 8 * 1024 * MB }), 'normal', 'no demand')
-// 10×200MB / (2000MB + 8192MB) = 0.196
-assert.equal(watermarkMode({ onlineCount: 10, perInstanceMb, availableBytes: 8 * 1024 * MB }), 'normal', 'low pressure is normal')
-// 100×200MB / (20000MB + 2048MB) = 0.907 ≥ 0.90
-assert.equal(watermarkMode({ onlineCount: 100, perInstanceMb, availableBytes: 2 * 1024 * MB }), 'emergency', 'very high pressure is emergency')
-// 30×200MB / (6000MB + 2048MB) = 0.745 → shrink
-assert.equal(watermarkMode({ onlineCount: 30, perInstanceMb, availableBytes: 2 * 1024 * MB }), 'shrink', 'high pressure shrinks')
-// 滞回：0.745 已高于 recover(0.60)，收缩态不应立刻恢复
+// 给定可用内存，求「压力达到 target 所需的在线实例数」。
+const countForPressure = (target, availableMb) =>
+  Math.round((target * availableMb) / (perInstanceMb * (1 - target)))
+
+const wideAvailable = 8 * 1024
+const narrowAvailable = 2 * 1024
+const lowCount = Math.max(1, Math.round(countForPressure(0.20, wideAvailable)))
+const shrinkCount = countForPressure(0.75, narrowAvailable)
+const emergencyCount = countForPressure(0.95, narrowAvailable)
+
+assert.equal(watermarkMode({ onlineCount: 0, perInstanceMb, availableBytes: wideAvailable * MB }), 'normal', 'no demand')
 assert.equal(
-  watermarkMode({ onlineCount: 30, perInstanceMb, availableBytes: 2 * 1024 * MB, previous: 'shrink' }),
+  watermarkMode({ onlineCount: lowCount, perInstanceMb, availableBytes: wideAvailable * MB }),
+  'normal',
+  'low pressure is normal',
+)
+assert.equal(
+  watermarkMode({ onlineCount: emergencyCount, perInstanceMb, availableBytes: narrowAvailable * MB }),
+  'emergency',
+  'very high pressure is emergency',
+)
+assert.equal(
+  watermarkMode({ onlineCount: shrinkCount, perInstanceMb, availableBytes: narrowAvailable * MB }),
+  'shrink',
+  'high pressure shrinks',
+)
+// 滞回：0.75 已高于 recover(0.60)，收缩态不应立刻恢复
+assert.equal(
+  watermarkMode({ onlineCount: shrinkCount, perInstanceMb, availableBytes: narrowAvailable * MB, previous: 'shrink' }),
   'shrink',
   'hysteresis keeps shrink above recover',
 )
-// 压力 0.196 < 0.60 → 恢复
 assert.equal(
-  watermarkMode({ onlineCount: 10, perInstanceMb, availableBytes: 8 * 1024 * MB, previous: 'shrink' }),
+  watermarkMode({ onlineCount: lowCount, perInstanceMb, availableBytes: wideAvailable * MB, previous: 'shrink' }),
   'normal',
   'recovers once below recover threshold',
 )

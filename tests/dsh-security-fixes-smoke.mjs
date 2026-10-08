@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 const root = fileURLToPath(new URL('..', import.meta.url))
 
 const {
-  buildContainerSpec, DEFAULT_NODE_HEAP_MB, minInstanceMemoryMb, UID_BASE,
+  buildContainerSpec, DEFAULT_MEMORY_MB, defaultNodeHeapMb, minInstanceMemoryMb, UID_BASE,
 } = await import(new URL('../bin/dsh-instances-policy.mjs', import.meta.url).href)
 const {
   clientIp, ipBucketKey, isAddressLiteral, loginKeys,
@@ -25,27 +25,32 @@ const instances = fs.readFileSync(path.join(root, 'bin', 'dsh-instances.mjs'), '
 
 // ---- 1) 内存下限与容器堆不变式一致 ----
 {
-  const floor = minInstanceMemoryMb(DEFAULT_NODE_HEAP_MB)
-  assert.ok(floor > DEFAULT_NODE_HEAP_MB, `下限必须大于堆上限（得到 ${floor} vs 堆 ${DEFAULT_NODE_HEAP_MB}）`)
-  // 下限本身必须能被容器层接受——这正是原缺陷：接口接受 64，容器层却抛错。
-  const spec = buildContainerSpec({
-    name: 't', uid: UID_BASE, image: 'i', network: 'n', dataDir: '/d', memoryMb: floor,
-  })
-  assert.ok(spec.includes(`${floor}m`), '下限值必须能构造出合法容器规格')
-  // 逐点验证：接口允许的最小值不再触发容器层的错误。
-  for (const memoryMb of [floor, floor + 1, 200]) {
+  // 未显式配置堆上限时，堆按容器上限的比例算，所以「小内存」也能构造出合法规格。
+  // 这条比例关系就是原来的缺陷所在：堆取固定值时，管理员调低内存上限会让
+  // buildContainerSpec 抛错——设置保存成功，之后所有实例创建都失败。
+  for (const memoryMb of [128, 200, 512, 768, 1024]) {
     assert.doesNotThrow(
       () => buildContainerSpec({ name: 't', uid: UID_BASE, image: 'i', network: 'n', dataDir: '/d', memoryMb }),
       `memoryMb=${memoryMb} 必须能通过容器层校验`,
     )
   }
-  // 而旧下限（64/128/160）确实会抛错——这解释了下限为什么必须抬高。
-  for (const memoryMb of [64, 128, DEFAULT_NODE_HEAP_MB]) {
-    assert.throws(
-      () => buildContainerSpec({ name: 't', uid: UID_BASE, image: 'i', network: 'n', dataDir: '/d', memoryMb }),
-      `memoryMb=${memoryMb} 应当被容器层拒绝（证明旧下限是错的）`,
-    )
-  }
+  // 显式给的堆上限仍然受同一条不变式约束：超过容器上限必须拒绝。
+  assert.throws(
+    () => buildContainerSpec({
+      name: 't', uid: UID_BASE, image: 'i', network: 'n', dataDir: '/d',
+      memoryMb: 256, nodeHeapMb: 512,
+    }),
+    '显式堆上限超过容器上限时必须拒绝',
+  )
+  // 接口下限与容器层用同一个函数算出来，而不是各自硬编码一个数字。
+  const floor = minInstanceMemoryMb(defaultNodeHeapMb(DEFAULT_MEMORY_MB))
+  assert.ok(floor < DEFAULT_MEMORY_MB, `默认上限必须高于它自己的下限（下限 ${floor}）`)
+  assert.doesNotThrow(
+    () => buildContainerSpec({
+      name: 't', uid: UID_BASE, image: 'i', network: 'n', dataDir: '/d', memoryMb: floor,
+    }),
+    '下限本身必须能构造出合法容器规格',
+  )
   // 设置接口必须用同一个下限，而不是硬编码 64。
   assert.ok(
     instances.includes('minInstanceMemoryMb('),

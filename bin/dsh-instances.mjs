@@ -23,7 +23,7 @@ import {
   DEFAULT_DISK_QUOTA_BYTES,
   DEFAULT_IDLE_TIMEOUT_MS,
   DEFAULT_MEMORY_MB,
-  DEFAULT_NODE_HEAP_MB,
+  defaultNodeHeapMb,
   INSTANCE_PORT,
   UID_BASE,
   allocateUid,
@@ -152,7 +152,7 @@ function normalizeRuntimeSettings(input, current) {
     // 下限必须与容器层的不变式一致（堆上限 < 容器内存），而不是「镜像能启动」的 64MB。
     // 否则接口会接受一个让 buildContainerSpec 抛错的值：保存成功，但之后所有实例创建
     // 都失败（审计实测 64MB → /instances/ensure 500）。
-    const floor = minInstanceMemoryMb(nodeHeapMb())
+    const floor = minInstanceMemoryMb(nodeHeapMb(memoryMb))
     if (!Number.isInteger(memoryMb) || memoryMb < floor || memoryMb > 4096) {
       return { error: 'invalid_memory', min: floor }
     }
@@ -161,10 +161,17 @@ function normalizeRuntimeSettings(input, current) {
   return { settings: output }
 }
 
-/** 生效的 Node 堆上限（与 buildContainerSpec 的默认口径一致）。 */
-function nodeHeapMb() {
+/**
+ * 生效的 Node 堆上限（与 buildContainerSpec 的默认口径一致）。
+ *
+ * 未显式配置时按「容器内存上限的 70%」算，而不是取一个固定值：固定值会在管理员
+ * 调低内存上限时超过容器上限，于是建实例直接失败（而不是退化）。
+ * @param {number} memoryMb 生效的容器内存上限 MB。
+ * @returns {number} 堆上限 MB。
+ */
+function nodeHeapMb(memoryMb) {
   const configured = Number(process.env.DSH_INSTANCE_NODE_HEAP_MB)
-  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_NODE_HEAP_MB
+  return Number.isInteger(configured) && configured > 0 ? configured : defaultNodeHeapMb(memoryMb)
 }
 
 // ---------------------------------------------------------------- 每实例网络
@@ -396,7 +403,9 @@ async function containerNetwork(name) {
 async function prepareDataDir(uid) {
   const dir = path.posix.join(await hostUsersDir(), String(uid))
   const localDir = path.join(CONFIG.usersDir, String(uid))
-  for (const sub of ['home', 'workspace']) {
+  // 这五个子目录与 buildContainerSpec 的挂载一一对应：少建一个，Docker 会以 root
+  // 属主自动创建它，而容器入口要求挂载点归 dsh(1000:1000)，启动阶段就会 EACCES。
+  for (const sub of ['home', 'workspace', 'userhome', 'agents', 'mcp']) {
     fs.mkdirSync(path.join(localDir, sub), { recursive: true, mode: 0o750 })
   }
   // 模型配置不在这里手写：交给 bin/seed-dsh-model-settings.mjs。那份脚本会用 DSH
@@ -1009,8 +1018,14 @@ const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, async (req,
         }
         // volume 模式连卷一起删：只删容器会留下一份谁也看不到的孤儿数据。
         // 这里刻意不用 allowFailure：删除失败必须影响 purged 的取值。
+        // 五个卷与 buildContainerSpec 的挂载一一对应，漏删一个就留下孤儿数据。
         try {
-          await docker(['volume', 'rm', '-f', `${CONFIG.volumePrefix}-${uid}-home`, `${CONFIG.volumePrefix}-${uid}-workspace`])
+          await docker(['volume', 'rm', '-f',
+            `${CONFIG.volumePrefix}-${uid}-home`,
+            `${CONFIG.volumePrefix}-${uid}-workspace`,
+            `${CONFIG.volumePrefix}-${uid}-userhome`,
+            `${CONFIG.volumePrefix}-${uid}-agents`,
+            `${CONFIG.volumePrefix}-${uid}-mcp`])
         } catch (error) {
           purged = false
           process.stderr.write(`[dsh-instances] purge volumes for ${uid} failed: ${error?.message ?? error}\n`)

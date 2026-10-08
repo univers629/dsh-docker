@@ -17,11 +17,20 @@ export const UID_BASE = 100000
  */
 export const ADMIN_UID = 99999
 
-/** 每实例内存硬上限。宿主 8-10GB 可用内存下，该值决定同时在线实例数。 */
-export const DEFAULT_MEMORY_MB = 200
+/**
+ * 每实例内存硬上限（MB）。
+ *
+ * 这个值要容得下 DSH 自身加上一次插件安装：pnpm 的解析阶段峰值明显高于运行时，
+ * 上限太低时它被 OOM killer 杀掉，而 DSH 只把结果报成「plugin command failed」，
+ * 从那条信息看不出是内存问题。实测 DSH 常驻约 150MB，装一个插件期间整容器峰值
+ * 约 390MB，所以 200/300 都不够。
+ *
+ * 宿主可用内存除以该值就是同时在线实例数，按机器规模调。
+ */
+export const DEFAULT_MEMORY_MB = 768
 
-/** Node 堆上限：留 40MB 给运行时自身，避免堆被打满触发 OOM killer 而不是 GC。 */
-export const DEFAULT_NODE_HEAP_MB = 160
+/** Node 堆上限：留出余量给运行时自身与原生模块，避免堆被打满触发 OOM killer 而不是 GC。 */
+export const DEFAULT_NODE_HEAP_MB = 512
 
 /** 闲置停用默认阈值：无活动超过该时长即停用，内存归零，数据保留。 */
 export const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000
@@ -103,9 +112,28 @@ export const INSTANCE_PORT = 3080
  * @param {string} [spec.nodeHeapMb] Node 堆上限 MB。
  * @returns {string[]} docker run 参数（不含 `docker run` 本身）。
  */
+/**
+ * Node 堆上限的默认值：取容器上限的一部分，留出余量给运行时自身、原生模块与
+ * pnpm 之类的子进程。写死一个绝对值会在管理员调低内存上限时违反「堆必须小于
+ * 容器上限」这条不变式——那时建实例直接失败，而不是退化。
+ * @param {number} memoryMb 容器内存上限 MB。
+ * @returns {number} 堆上限 MB。
+ */
+export function defaultNodeHeapMb(memoryMb) {
+  return Math.max(64, Math.min(DEFAULT_NODE_HEAP_MB, Math.floor(memoryMb * 0.7)))
+}
+
+/**
+ * 构造 `docker run` 参数。
+ *
+ * @param {object} spec 规格。
+ * @param {number} [spec.memoryMb] 内存上限 MB。
+ * @param {string} [spec.nodeHeapMb] Node 堆上限 MB。
+ * @returns {string[]} docker run 参数（不含 `docker run` 本身）。
+ */
 export function buildContainerSpec(spec) {
   const memoryMb = spec.memoryMb ?? DEFAULT_MEMORY_MB
-  const heapMb = spec.nodeHeapMb ?? DEFAULT_NODE_HEAP_MB
+  const heapMb = spec.nodeHeapMb ?? defaultNodeHeapMb(memoryMb)
   if (memoryMb < 64) throw new Error('memory limit below 64MB would not boot DSH')
   if (heapMb >= memoryMb) throw new Error('node heap must stay below the container memory limit')
   const { name, uid, image, network, dataDir } = spec
@@ -115,14 +143,23 @@ export function buildContainerSpec(spec) {
   const storage = spec.storage ?? 'bind'
   let homeSource
   let workspaceSource
+  let userHomeSource
+  let agentsSource
+  let mcpSource
   if (storage === 'volume') {
     if (!spec.volumeBase) throw new Error('volume storage requires volumeBase')
     homeSource = `${spec.volumeBase}-home`
     workspaceSource = `${spec.volumeBase}-workspace`
+    userHomeSource = `${spec.volumeBase}-userhome`
+    agentsSource = `${spec.volumeBase}-agents`
+    mcpSource = `${spec.volumeBase}-mcp`
   } else {
     if (!dataDir) throw new Error('bind storage requires dataDir')
     homeSource = `${dataDir}/home`
     workspaceSource = `${dataDir}/workspace`
+    userHomeSource = `${dataDir}/userhome`
+    agentsSource = `${dataDir}/agents`
+    mcpSource = `${dataDir}/mcp`
   }
   return [
     '--name', name,
@@ -155,6 +192,13 @@ export function buildContainerSpec(spec) {
     // 缓存目录再 dlopen，noexec 会让它失败。主容器同样如此。
     '-v', `${homeSource}:/data/dsh:rw`,
     '-v', `${workspaceSource}:/workspace:rw`,
+    // DSH 把 /data/home、/data/agents、/data/mcp 声明为可写路径（DSH_WRITABLE_PATHS），
+    // Agent 会把产物写到 /data/home。不挂它们的话文件落在容器可写层：用户在自己的
+    // 工作区里看不到（那里只挂 /workspace），容器一重建就丢。主容器三个都挂了，
+    // 实例侧必须一致，否则「同一个 DSH」在两种形态下的持久化语义不同。
+    '-v', `${userHomeSource}:/data/home:rw`,
+    '-v', `${agentsSource}:/data/agents:rw`,
+    '-v', `${mcpSource}:/data/mcp:rw`,
     // 只做目录级挂载，不往 /data/dsh 里嵌文件：目录挂载套文件挂载在部分宿主上会失效。
     // 模型配置由管理器生成到 home 内；真实密钥始终只在 dsh-key-broker。见 auth-design §4.1。
     '-e', `NODE_OPTIONS=--max-old-space-size=${heapMb}`,

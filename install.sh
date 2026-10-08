@@ -3543,7 +3543,7 @@ configure_user_mode() {
       ui_next_page
       ui_page_select "用户模式" 0 \
         "off	单管理员	一套管理员凭据，不开放注册" \
-        "on	多用户	开放注册；每个账户拥有独立会话与文件（独立 DSH 实例，默认 200MB 上限 + 闲置自动停用）"
+        "on	多用户	开放注册；每个账户拥有独立会话与文件（独立 DSH 实例，默认 768MB 上限 + 闲置自动停用）"
       multi_user="$UI_VALUE"
     else
       multi_user="$existing"
@@ -4306,7 +4306,7 @@ print_multiuser_summary() {
     echo "      初始邀请码: $(cat "$invite_code_file")（单次有效，用掉后可在管理面板里换一个）"
   fi
   echo "      闲置停用: ${PENDING_IDLE_TIMEOUT}s（0 表示不回收）；每用户磁盘配额: ${PENDING_USER_DISK_QUOTA}GB（0 表示不限制）"
-  echo "      每实例内存上限: ${DSH_INSTANCE_MEMORY_MB:-200}MB"
+  echo "      每实例内存上限: ${DSH_INSTANCE_MEMORY_MB:-768}MB"
   echo "      管理面板: http://$PENDING_BIND_HOST:$entry_port/admin（仅初始管理员可访问）"
   echo "      账户数据: data/users/<uid>/（属主为该实例 uid；删除账户可在管理面板里连带清理）"
   echo "      注意: 实例被闲置停用后，用户再次访问会看到等待页并自动拉起，通常需要 10–30 秒。"
