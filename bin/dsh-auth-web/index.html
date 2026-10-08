@@ -786,10 +786,31 @@
     renderCaptchaWidget('captcha-register')
   }
 
-  /** 取当前容器的 token；服务端要求验证而这里没有时返回空串，调用方据此就地提示。 */
+  /**
+   * 取走当前容器的 token，并立刻作废它。
+   *
+   * Turnstile 的 token 是一次性的：服务端拿它去 Cloudflare 校验一次，之后无论
+   * 那次请求成功与否都作废。前端若把同一个 token 再送一次，Cloudflare 回
+   * invalid-input-response —— 界面只显示一句笼统的「操作未完成」，看不出原因。
+   * 所以取用即消费，并让调用方在需要时重挂 widget 拿一个新的。
+   */
   function captchaTokenFor(containerId) {
     if (!CAPTCHA.config.required) return ''
-    return CAPTCHA.tokens[containerId] || ''
+    const token = CAPTCHA.tokens[containerId] || ''
+    CAPTCHA.tokens[containerId] = ''
+    return token
+  }
+
+  /**
+   * 重挂某个容器的人机验证 widget，拿一枚新 token。
+   *
+   * 提交失败后必须调用它：失败的那次已经把那枚 token 用掉了，不重挂的话用户
+   * 再点一次提交仍然带着作废的 token，于是永远失败。
+   */
+  function refreshCaptchaWidget(containerId) {
+    if (!CAPTCHA.config.required) return
+    CAPTCHA.tokens[containerId] = ''
+    renderCaptchaWidget(containerId)
   }
 
 
@@ -954,9 +975,12 @@
       }
       busy(btn, false)
       error(errorText(body, response))
+      // 这枚 token 已经被服务端用掉了，重挂 widget 才能再试一次。
+      refreshCaptchaWidget('captcha-login')
     } catch {
       busy(btn, false)
       error(t('error.network'))
+      refreshCaptchaWidget('captcha-login')
     }
   })
 
@@ -1090,10 +1114,12 @@
     const username = $('register-username').value.trim()
     const password = $('register-password').value
     const confirm = $('register-confirm').value
-    const captchaToken = captchaTokenFor('captcha-register')
-    if (CAPTCHA.config.required && !captchaToken) { error(t('captcha.required')); return }
+    // 本地能判定的错误先判：captchaTokenFor 会取走 token（它是一次性的），
+    // 在必填/一致性校验之前调用等于把一枚好 token 白白作废。
     if (!username || !password) { error(t('register.errorRequired')); return }
     if (password !== confirm) { error(t('register.errorMismatch')); return }
+    const captchaToken = captchaTokenFor('captcha-register')
+    if (CAPTCHA.config.required && !captchaToken) { error(t('captcha.required')); return }
     const btn = $('submit-register')
     busy(btn, true)
     try {
@@ -1112,9 +1138,13 @@
         return
       }
       error(registerErrorText(body))
+      // 这枚 token 已经被服务端用掉了（无论失败原因是什么），重挂 widget 才能再试。
+      // 不重挂的话用户改完用户名再点提交，带着的还是那枚作废的 token，必然再次失败。
+      refreshCaptchaWidget('captcha-register')
     } catch {
       busy(btn, false)
       error(t('error.network'))
+      refreshCaptchaWidget('captcha-register')
     }
   })
 

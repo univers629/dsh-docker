@@ -211,4 +211,51 @@ try {
   fs.rmSync(sandbox, { recursive: true, force: true })
 }
 
+// ---- 3) 前端：一次性 token 的生命周期 ----
+//
+// Turnstile 的 token 只能用一次：服务端拿去 Cloudflare 校验一次，之后无论那次请求
+// 成功与否都作废。前端若把同一枚再送一次，Cloudflare 回 invalid-input-response，
+// 而界面只显示一句笼统的「操作未完成」，从那条信息看不出是 token 复用。
+//
+// 所以两件事必须成立：取用即消费；提交失败后重挂 widget 拿新 token。
+{
+  const page = fs.readFileSync(path.join(root, 'bin', 'dsh-auth-web', 'index.html'), 'utf8')
+
+  const taker = page.match(/function captchaTokenFor\(containerId\) \{[\s\S]*?\n  \}/)
+  assert.ok(taker, 'index.html 必须定义 captchaTokenFor')
+  assert.match(
+    taker[0],
+    /CAPTCHA\.tokens\[containerId\] = ''/,
+    '取走 token 后必须立刻清空：留着它下次提交还会带上同一枚，必然被 Cloudflare 拒绝',
+  )
+
+  assert.match(page, /function refreshCaptchaWidget\(containerId\)/, '必须有一个重挂 widget 的函数')
+  assert.match(
+    page,
+    /function refreshCaptchaWidget\(containerId\) \{[\s\S]*?renderCaptchaWidget\(containerId\)/,
+    '重挂要真的重建 widget，否则拿不到新 token',
+  )
+
+  // 登录与注册的失败分支都要重挂；漏掉任一条，那条路径就会卡在「再点也没用」。
+  const loginHandler = page.match(/\$\('step-credentials'\)\.addEventListener\('submit'[\s\S]*?\n  \}\)/)
+  assert.ok(loginHandler, '必须能找到登录提交处理器')
+  assert.match(loginHandler[0], /refreshCaptchaWidget\('captcha-login'\)/, '登录失败后必须重挂 widget')
+
+  const registerHandler = page.match(/\$\('step-register'\)\.addEventListener\('submit'[\s\S]*?\n  \}\)/)
+  assert.ok(registerHandler, '必须能找到注册提交处理器')
+  assert.match(registerHandler[0], /refreshCaptchaWidget\('captcha-register'\)/, '注册失败后必须重挂 widget')
+
+  // 取 token 会消费它，所以必须在本地校验之后才取：先取再校验会把好 token 白白作废。
+  const registerBody = registerHandler[0]
+  const takeAt = registerBody.indexOf('captchaTokenFor(')
+  const requiredAt = registerBody.indexOf("t('register.errorRequired')")
+  assert.ok(takeAt > -1 && requiredAt > -1, '注册处理器里两个关键步骤都要在')
+  assert.ok(
+    requiredAt < takeAt,
+    '本地必填校验必须在取 token 之前：captchaTokenFor 会消费 token，先取等于白白作废一枚',
+  )
+
+  console.log('前端 token 生命周期：ok')
+}
+
 console.log('dsh-auth captcha smoke: ok')
