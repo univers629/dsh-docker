@@ -40,12 +40,16 @@ assert.match(worker, /event\.respondWith\(fetch\(event\.request\)\)/)
 assert.doesNotMatch(worker, /cache\.(add|addAll|put)\(/, 'authenticated app traffic must not be cached')
 
 const nginx = read('nginx/dsh-nginx.conf').toString('utf8')
-for (const route of ['/manifest.webmanifest', '/service-worker.js', '/pwa-register.js']) {
+for (const route of ['/manifest.webmanifest', '/service-worker.js', '/pwa-register.js', '/dsh-reload-on-restart.js']) {
   assert.match(nginx, new RegExp(`location = ${route.replaceAll('.', '\\.')}`))
 }
-assert.equal((nginx.match(/auth_basic off;/g) ?? []).length, 5, 'health check and four PWA locations must bypass Basic Auth')
+// 这些静态资源都要绕过 Basic Auth：它们在登录页上就要能取到。
+assert.equal((nginx.match(/auth_basic off;/g) ?? []).length, 6, 'health check and five PWA locations must bypass Basic Auth')
 assert.match(nginx, /manifest\.webmanifest" crossorigin="use-credentials"/)
 assert.match(nginx, /sub_filter '<\/head>' .*pwa-register\.js/)
+// DSH 改了模型配置会重启进程，而重启会换会话令牌；页面必须能自己恢复，否则模型
+// 目录永远停在「正在加载模型…」。这个脚本就是那条恢复路径。
+assert.match(nginx, /sub_filter '<\/head>' .*dsh-reload-on-restart\.js/)
 assert.match(nginx, /proxy_set_header Accept-Encoding ""/)
 
 const dockerfile = read('Dockerfile').toString('utf8')
