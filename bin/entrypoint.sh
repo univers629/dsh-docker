@@ -204,6 +204,10 @@ render_container_skill() {
   temporary="${target}.tmp.$$"
 
   mkdir -p "$(dirname "$target")"
+  # 这个函数在 align_data_ownership 之后跑，而 mkdir -p 是以 root 建目录的：
+  # 不显式对齐的话，新建的 skills/ 归 root:root，降权后的 DSH 写不进去
+  # （现象是 Agent 装技能时 Permission denied）。
+  chown "$DSH_RUN_UID:$DSH_RUN_GID" "$DSH_HOME/skills" "$(dirname "$target")" 2>/dev/null || true
   awk '
     {
       gsub(/@@DSH_SYSTEM_ARCH@@/, ENVIRON["DSH_SYSTEM_ARCH"])

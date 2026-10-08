@@ -241,6 +241,14 @@ assert.match(files.entrypoint, /chmod 750 \/run\/dsh-priv/)
 assert.match(files.entrypoint, /chmod 770 \/run\/dsh-state/)
 assert.match(files.entrypoint, /align_data_ownership/)
 assert.match(files.entrypoint, /chown -R "\$expected"/)
+// render_container_skill 在 align_data_ownership 之后跑，用 mkdir -p 以 root 建
+// $DSH_HOME/skills。不显式对齐的话那个目录归 root:root，降权后的 DSH 写不进去，
+// 现象是 Agent 装技能时 Permission denied——而入口自己不会报任何错。
+assert.match(
+  files.entrypoint,
+  /chown "\$DSH_RUN_UID:\$DSH_RUN_GID" "\$DSH_HOME\/skills"/,
+  'render_container_skill 必须把 mkdir 建出的 skills 目录对齐到运行账户',
+)
 assert.match(files.entrypoint, /exec \/usr\/local\/bin\/dsh-supervisor/)
 assert.match(files.entrypoint, /mkdir -p \/workspace \/data\/dsh\/profiles \/data\/home \/data\/agents \/data\/mcp/)
 assert.doesNotMatch(files.entrypoint, /gosu|node:node|id -u node|DSH_RUN_AS_ROOT/)
