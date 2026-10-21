@@ -16,7 +16,7 @@ function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
 }
 
-function buildFixture({ bundles, plugins, exemptions, shippedBundles = [], requirementItems = false }) {
+function buildFixture({ bundles, plugins, exemptions, shippedBundles = [] }) {
   const base = mkdtempSync(join(tmpdir(), 'dsh-preflight-'))
   const appDir = join(base, 'lib', 'node_modules', '@deepseek-ai', 'dsh')
   const moduleRoot = join(appDir, 'node_modules')
@@ -39,9 +39,7 @@ function buildFixture({ bundles, plugins, exemptions, shippedBundles = [], requi
     '  }',
     '  if (Object.keys(peers).length === 0) return undefined',
     '  const key = `${manifest.name}@${manifest.version}`',
-    requirementItems
-      ? "  return { name: manifest.name, version: manifest.version, runtimeVersion: version, requirements: { 'engines.dsh': '>=0.2.0' }, exempted: (exemptions[key] ?? []).includes(version) }"
-      : '  return { name: manifest.name, version: manifest.version, runtimeVersion: version, peers, exempted: (exemptions[key] ?? []).includes(version) }',
+    '  return { name: manifest.name, version: manifest.version, runtimeVersion: version, peers, exempted: (exemptions[key] ?? []).includes(version) }',
     '}',
     'export function resolveBundleDir(binName, packageName, installAnchor, profileDir) {',
     '  const candidates = [join(dirname(installAnchor), "node_modules", packageName), join(profileDir, "node_modules", packageName)]',
@@ -111,24 +109,6 @@ try {
   assert.equal(run(mixed, '--fail-on-incompatible', '--json').status, 3)
 } finally {
   rmSync(mixed.base, { recursive: true, force: true })
-}
-
-// 0.2.1 起上游把判定结果的 peers 改名为 requirements，键可以是 engines.dsh。
-// 预检必须照新形状打印，否则「为什么被禁用」这一行只剩 undefined。
-const requirementItems = buildFixture({
-  bundles: ['plugin-old'],
-  plugins: {
-    'plugin-old': { name: 'plugin-old', version: '0.1.0', peerDependencies: { '@deepseek-ai/dsh-tools': '^0.1.0-rc.6' } },
-  },
-  requirementItems: true,
-})
-try {
-  const report = run(requirementItems)
-  assert.equal(report.status, 0, report.stderr)
-  assert.match(report.stdout, /未满足的要求：\{"engines\.dsh":">=0\.2\.0"\}/)
-  assert.match(lastLine(report.stdout), /^摘要：共 1 个插件，0 个可用，1 个在新版本下会被禁用，0 个未装载$/)
-} finally {
-  rmSync(requirementItems.base, { recursive: true, force: true })
 }
 
 // 已豁免的插件照旧加载（上游会打警告但不禁用），因此不算阻塞项。

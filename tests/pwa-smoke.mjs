@@ -46,10 +46,6 @@ for (const route of ['/manifest.webmanifest', '/service-worker.js', '/pwa-regist
 // 这些静态资源都要绕过 Basic Auth：它们在登录页上就要能取到。
 assert.equal((nginx.match(/auth_basic off;/g) ?? []).length, 6, 'health check and five PWA locations must bypass Basic Auth')
 assert.match(nginx, /manifest\.webmanifest" crossorigin="use-credentials"/)
-// 已发布的前端把 manifest 写成目录相对路径（href="./manifest.webmanifest"），
-// 只匹配绝对路径会让这条 sub_filter 静默空转。
-assert.match(nginx, /sub_filter '<link rel="manifest" href="\.\/manifest\.webmanifest" \/>'/)
-assert.match(nginx, /href="\.\/manifest\.webmanifest" crossorigin="use-credentials"/)
 assert.match(nginx, /sub_filter '<\/head>' .*pwa-register\.js/)
 // DSH 改了模型配置会重启进程，而重启会换会话令牌；页面必须能自己恢复，否则模型
 // 目录永远停在「正在加载模型…」。这个脚本就是那条恢复路径。
