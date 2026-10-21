@@ -14,9 +14,8 @@ const { artifactPatches } = await import(new URL('../patches/artifact-patches.mj
 // 又不能在 find 里，否则重入判定会把未打的补丁当成打过了。
 const ids = new Set()
 const optionalIds = new Set([
-  'app-boot-realpath-import',
   'app-boot-realpath-package-dir',
-  'public-local-mode',
+  'public-local-mode-transport-owner-node',
 ])
 for (const patch of artifactPatches) {
   assert.ok(patch.id && !ids.has(patch.id), `duplicate or missing id: ${patch.id}`)

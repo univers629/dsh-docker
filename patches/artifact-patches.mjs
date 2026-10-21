@@ -75,16 +75,6 @@ export const artifactPatches = [
     replace: `if (policy.mode === "workspace-write") readWrite.push("/tmp", "/data", policy.workspaceRoot);`,
   },
   {
-    id: "app-boot-realpath-import",
-    optional: true,
-    package: "@deepseek-ai/dsh-app-boot",
-    file: "lib/index.js",
-    why: "配合下一处补丁引入 realpathSync。",
-    marker: `readlinkSync, realpathSync, symlinkSync`,
-    find: `readlinkSync, symlinkSync`,
-    replace: `readlinkSync, realpathSync, symlinkSync`,
-  },
-  {
     id: "app-boot-realpath-package-dir",
     optional: true,
     package: "@deepseek-ai/dsh-app-boot",
@@ -105,16 +95,6 @@ export const artifactPatches = [
 		if (existsSync(join(candidate, "package.json"))) return realpathSync(candidate);
 	}
 }`,
-  },
-  {
-    id: "public-local-mode",
-    optional: true,
-    package: "@deepseek-ai/dsh-client-connection",
-    file: "lib/client.js",
-    why: "已鉴权的反代注入 DSH_PUBLIC_LOCAL_MODE cookie 后，浏览器按 loopback 对待，Host 设置页才可用。",
-    marker: `DSH_PUBLIC_LOCAL_MODE=1`,
-    find: `isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),`,
-    replace: `isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname) || (typeof document !== "undefined" && document.cookie.split(";").some((entry) => entry.trim() === "DSH_PUBLIC_LOCAL_MODE=1")),`,
   },
   {
     id: "workspace-model-pending-attachments-field",
@@ -138,16 +118,26 @@ export const artifactPatches = [
     id: "workspace-model-pending-attachments-create",
     package: "@deepseek-ai/dsh-client-ui-workspace",
     file: "lib/client.js",
-    why: "新版 UI workspace 在 session.create 成功后通知 Workspace model。",
-    marker: `this.workspaces.list.noteSessionAttachment(workspaceId, sessionId);`,
-    find: `\t\t\t\tconst attempt = this.reuseOrCreateBlank(workspace).finally(() => {\n\t\t\t\t\tthis.connecting.delete(workspaceId);\n\t\t\t\t});`,
-    replace: `\t\t\t\tconst attempt = this.reuseOrCreateBlank(workspace).then((sessionId) => {\n\t\t\t\t\tthis.workspaces.list.noteSessionAttachment(workspaceId, sessionId);\n\t\t\t\t\treturn sessionId;\n\t\t\t\t}).finally(() => {\n\t\t\t\t\tthis.connecting.delete(workspaceId);\n\t\t\t\t});`,
+    why: "UI workspace 在 session.create 成功后通知 Workspace model；0.2.1 把 reuseOrCreateBlank 换成 connectBlank → createInWorkspace → createNamed，创建路径统一收敛到 createNamed。",
+    marker: `this.workspaces.list.noteSessionAttachment(request.workspaceId, sessionId);`,
+    find: `\t\t\tasync createNamed(request) {\n\t\t\t\tconst sessionId = await this.sessions.create(request);`,
+    replace: `\t\t\tasync createNamed(request) {\n\t\t\t\tconst sessionId = await this.sessions.create(request);\n\t\t\t\tthis.workspaces.list.noteSessionAttachment(request.workspaceId, sessionId);`,
   },
   {
     id: "public-local-mode-transport-owner",
     package: "@deepseek-ai/dsh-client-connection",
-    file: "lib/client.js",
-    why: "反代注入 DSH_PUBLIC_LOCAL_MODE cookie 后，按新版 transport 所有权逻辑继续视为本地访问。",
+    file: "lib/client.browser.js",
+    why: "反代注入 DSH_PUBLIC_LOCAL_MODE cookie 后，按 transport 所有权逻辑继续视为本地访问；0.2.1 把 client.js 拆成 browser 与 node 两条件，浏览器侧取 browser。",
+    marker: `DSH_PUBLIC_LOCAL_MODE=1`,
+    find: `isLoopback: transport?.ownsHost === true || pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),`,
+    replace: `isLoopback: transport?.ownsHost === true || pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname) || (typeof document !== "undefined" && document.cookie.split(";").some((entry) => entry.trim() === "DSH_PUBLIC_LOCAL_MODE=1")),`,
+  },
+  {
+    id: "public-local-mode-transport-owner-node",
+    optional: true,
+    package: "@deepseek-ai/dsh-client-connection",
+    file: "lib/client.node.js",
+    why: "同一判定的 node 条件；界面走浏览器条件，这条只为两种形态保持一致（没有 document 时该分支恒假）。",
     marker: `DSH_PUBLIC_LOCAL_MODE=1`,
     find: `isLoopback: transport?.ownsHost === true || pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),`,
     replace: `isLoopback: transport?.ownsHost === true || pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname) || (typeof document !== "undefined" && document.cookie.split(";").some((entry) => entry.trim() === "DSH_PUBLIC_LOCAL_MODE=1")),`,
@@ -176,10 +166,15 @@ export const artifactPatches = [
     // SameSite=Strict（不必为了绕开 cookie 往返而放宽成 Lax）；并显式带
     // no-store —— 种 cookie 的响应绝不能进任何共享缓存。
     //
+    // 0.2.1 的签名变化必须跟上，否则补丁会引用到已删除的函数：
+    // requestAuthority(headers) 改为 requestAudience(headers, secure)（secure 时
+    // 返回带 scheme 的 origin，否则 host），isAuthenticated 与 sessionCookie
+    // 都多了 secure 参数。与上游自己的 303 分支保持一致。
+    //
     // marker 取 "res.setHeader("：新形态独有，且上游产物里 0 次出现，
     // 所以旧补丁打过的树不会被误判成「已生效」而静默跳过。
     marker: `res.setHeader(`,
     find: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length > 0) {`,
-    replace: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && req.headers["x-dsh-trusted-proxy"] === "1" && !this.isAuthenticated(req)) {\n\t\t\tconst authority = requestAuthority(req.headers);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.setHeader("set-cookie", sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3)));\n\t\t\t\tres.setHeader("cache-control", "no-store");\n\t\t\t\treturn true;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
+    replace: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && req.headers["x-dsh-trusted-proxy"] === "1" && !this.isAuthenticated(req, secure)) {\n\t\t\tconst authority = requestAudience(req.headers, secure);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.setHeader("set-cookie", sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3), secure));\n\t\t\t\tres.setHeader("cache-control", "no-store");\n\t\t\t\treturn true;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
   },
 ]

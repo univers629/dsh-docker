@@ -172,11 +172,15 @@ for (const name of bundles) {
     results.push({ name, version, status: 'ok' })
     continue
   }
+  // 0.2.1 起上游把 issue.peers 改名为 issue.requirements：键是 "engines.dsh"
+  // 或 "@deepseek-ai/dsh*"，值是要求的版本范围。两种形状都认，否则这一行会印出
+  // undefined —— 而它正是「插件为什么被禁用」的唯一线索。
+  const requirements = issue.requirements ?? issue.peers ?? {}
   results.push({
     name,
     version,
     status: issue.exempted ? 'exempted' : 'incompatible',
-    peers: issue.peers,
+    requirements,
     exemptionKey: `${issue.name}@${issue.version}`,
   })
 }
@@ -203,7 +207,7 @@ if (asJson) {
   for (const row of results) {
     if (row.status !== 'incompatible') continue
     lines.push(`    - ${row.name}@${row.version}`)
-    lines.push(`      未满足的 peer：${JSON.stringify(row.peers)}`)
+    lines.push(`      未满足的要求：${JSON.stringify(row.requirements)}`)
     lines.push(`      处置：升级到支持该 DSH 版本的插件版本，或在 compatibility.json 里写入`)
     lines.push(`            "${row.exemptionKey}": ["${runtimeVersion}"] 授予精确版本豁免（有崩溃或数据损坏风险）`)
   }

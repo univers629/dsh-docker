@@ -76,7 +76,7 @@ Windows: .\dsh.bat [start|update|stop|restart|logs [service]|status|shell|root-s
 - `shell` enters the unprivileged `dsh` account; `root-shell` is a host-side administration channel (it cannot be used to escalate inside the container).
 - `verify` runs the full hardening self-check inside the container; `keys` and `egress` print broker and egress-proxy status; `key-panel` prints the panel URL and its access token.
 - The health check probes both the Nginx entry point and the DSH port itself, so a crash-looping DSH reports `unhealthy`.
-- In-container updates pre-flight profile plugin compatibility before replacing `/app/dsh`: DSH disables plugins whose peer range does not satisfy the new version, and that disablement neither stops the process nor shows up in liveness or rollback, so the result is written to the container log and the update status. See the [DSH 0.2.0-rc.2 migration note](docs/dsh-0.2.0-rc.2-migration.en.md) before moving to a new DSH version.
+- In-container updates pre-flight profile plugin compatibility before replacing `/app/dsh`: DSH disables plugins whose peer range does not satisfy the new version, and that disablement neither stops the process nor shows up in liveness or rollback, so the result is written to the container log and the update status. See the [DSH 0.2.1-rc.2 migration note](docs/dsh-0.2.1-rc.2-migration.en.md) before moving to a new DSH version.
 
 ### Deleting
 
