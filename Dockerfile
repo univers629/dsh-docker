@@ -193,9 +193,9 @@ RUN chmod +x /usr/local/bin/dsh /usr/local/bin/dsh-supervisor /usr/local/bin/res
        > /etc/profile.d/dsh-toolchain.sh
 
 # DSH 本体是上游发布在 npm 上的预构建包，装完直接对产物打补丁，不克隆源码也不编译。
-# 默认固定到已适配的版本；其他版本可由 DSH_VERSION 显式覆盖。
-# 必需补丁锚点失配会阻断构建，不产出缺少持久化补丁的镜像。
-ARG DSH_VERSION=0.2.2-rc.1
+# 默认装 latest：上游改动导致补丁锚点失效时这一步会直接失败，而不是静默产出一个
+# 没打上补丁的镜像。
+ARG DSH_VERSION=latest
 ENV DSH_PATCH_DIR=/etc/dsh-patches \
     DSH_NPM_PACKAGE=@deepseek-ai/dsh \
     DSH_APP_DIR=/app/dsh

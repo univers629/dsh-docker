@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       dsh_version:
-        description: 要安装的 DSH npm 版本或 dist-tag（默认 0.2.2-rc.1）
+        description: 要安装的 DSH npm 版本或 dist-tag（默认 latest）
         required: false
-        default: 0.2.2-rc.1
+        default: latest
   push:
     tags:
       - 'v*'
@@ -41,7 +41,7 @@ jobs:
       - name: Resolve the DSH version and decide whether to build
         id: pick
         env:
-          REQUESTED: ${{ github.event_name == 'schedule' && 'latest' || github.event.inputs.dsh_version || '0.2.2-rc.1' }}
+          REQUESTED: ${{ github.event.inputs.dsh_version || 'latest' }}
           # 手动触发和打标签发版总是重新构建（补丁或工程文件可能变了）；
           # 只有定时检查才按版本去重。
           FORCED: ${{ github.event_name != 'schedule' }}
