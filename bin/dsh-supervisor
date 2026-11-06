@@ -235,17 +235,6 @@ snapshot_plugins() {
   DSH_PLUGIN_SNAPSHOT_NOTE="启动成功" run_unprivileged node "$DSH_PLUGIN_SNAPSHOT" capture >&2 || true
 }
 
-# 带隔离叠加启动 DSH。叠加文件不存在时不加参数，行为和以前完全一致。
-dsh_start_args() {
-  plugin_args=
-  if [ -f "$DSH_PLUGIN_OVERLAY" ]; then
-    plugin_args="--patch $DSH_PLUGIN_OVERLAY"
-    echo "[dsh-supervisor] 本轮带插件隔离叠加启动：$DSH_PLUGIN_OVERLAY" >&2
-  fi
-  printf '%s\n' "$plugin_args"
-}
-
-
 # 特权代理必须以 root 运行：它是降权后的 DSH 唯一的提权入口，按白名单执行 apt
 # 与 DSH 更新，其它命令要求容器 root 密码。
 start_privileged_helper() {
@@ -421,10 +410,72 @@ while [ "$stopping" != true ]; do
   if [ -z "$dsh_pid" ]; then
     started_at=$(date +%s)
     echo "[dsh-supervisor] starting DSH as a managed child process running as $DSH_RUN_USER" >&2
-    # 有隔离清单时带上禁用叠加。参数在启动命令行里展开成多个词，不能加引号包成单个
-    # 参数，否则 DSH 会把整个 "--patch /path" 当成一个未知选项。
-    # shellcheck disable=SC2086
-    set -- "$@" $(dsh_start_args)
+    # rc.1 在第一个 app 参数后停止解析 launcher 选项；隔离叠加必须放在它之前。
+    # 保留 argv 边界，不通过字符串词切分传递 --patch 或路径。
+    if [ -f "$DSH_PLUGIN_OVERLAY" ]; then
+      case "${1:-}" in
+        plugin) ;; # pnpm 管理命令不接收启动器覆盖层。
+        *)
+          case "${1:-}" in
+            --profile=*)
+              dsh_profile=${1#--profile=}
+              shift
+              set -- --profile "$dsh_profile" "$@"
+              ;;
+            ''|-*) ;;
+            *)
+              dsh_profile=$1
+              shift
+              set -- --profile "$dsh_profile" "$@"
+              ;;
+          esac
+          dsh_launcher_count=0
+          dsh_needs_value=false
+          dsh_use_overlay=true
+          for dsh_argument in "$@"; do
+            if [ "$dsh_needs_value" = true ]; then
+              dsh_launcher_count=$((dsh_launcher_count + 1))
+              dsh_needs_value=false
+              continue
+            fi
+            case "$dsh_argument" in
+              --profile|--patch|--from-default-profile)
+                dsh_launcher_count=$((dsh_launcher_count + 1))
+                dsh_needs_value=true
+                ;;
+              --profile=*|--patch=*|--from-default-profile=*|--dump-config|--dump-config-schema|-V|--version)
+                dsh_launcher_count=$((dsh_launcher_count + 1))
+                ;;
+              --dump-default-config)
+                dsh_launcher_count=$((dsh_launcher_count + 1))
+                dsh_use_overlay=false
+                ;;
+              *) break ;;
+            esac
+          done
+          if [ "$dsh_use_overlay" = true ]; then
+            # 参数旋转将系统覆盖放在所有用户 launcher 层之后、app 参数之前。
+            dsh_app_count=$(( $# - dsh_launcher_count ))
+            dsh_rotate_count=$dsh_launcher_count
+            while [ "$dsh_rotate_count" -gt 0 ]; do
+              dsh_argument=$1
+              shift
+              set -- "$@" "$dsh_argument"
+              dsh_rotate_count=$((dsh_rotate_count - 1))
+            done
+            set -- --patch "$DSH_PLUGIN_OVERLAY" "$@"
+            dsh_rotate_count=$((dsh_app_count + 2))
+            while [ "$dsh_rotate_count" -gt 0 ]; do
+              dsh_argument=$1
+              shift
+              set -- "$@" "$dsh_argument"
+              dsh_rotate_count=$((dsh_rotate_count - 1))
+            done
+            echo "[dsh-supervisor] 本轮带插件隔离叠加启动：$DSH_PLUGIN_OVERLAY" >&2
+          fi
+          ;;
+      esac
+    fi
     capture_plugin_log
     # 本轮的 stderr 落一份到文件，隔离时从这里面认凶手。POSIX sh 没有进程替换，所以
     # 不能写 `2> >(tee ...)`；改成重定向到文件，再由一个后台 tail 把它转发回 stderr，

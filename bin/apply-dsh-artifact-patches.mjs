@@ -39,6 +39,8 @@ let applied = 0
 let already = 0
 const failures = []
 const warnings = []
+const completed = new Set()
+const updates = new Map()
 
 for (const [file, patches] of byFile) {
   if (!existsSync(file)) {
@@ -48,29 +50,41 @@ for (const [file, patches] of byFile) {
   const original = readFileSync(file, 'utf8')
   let content = original
   for (const patch of patches) {
-    // marker 先判：插入型补丁的 find 往往仍存在于 replace 里，只看 find
-    // 会导致重入时二次插入。
-    if (content.includes(patch.marker)) {
+    // 插入型补丁的 find 可能仍存在于 replace 中，先识别所有支持形状的 marker。
+    const variants = [patch, ...(patch.alternatives ?? [])]
+    const upstream = patch.upstream
+    if (variants.some(variant => content.includes(variant.marker))
+      || (upstream !== undefined && completed.has(upstream.requires) && content.includes(upstream.marker))) {
       already++
+      completed.add(patch.id)
       continue
     }
-    const hits = content.split(patch.find).length - 1
-    if (hits === 1) {
-      content = content.replace(patch.find, patch.replace)
+    const matches = variants.map(variant => ({ variant, hits: content.split(variant.find).length - 1 }))
+      .filter(match => match.hits > 0)
+    if (matches.length === 1 && matches[0].hits === 1) {
+      const { variant } = matches[0]
+      content = content.replace(variant.find, variant.replace)
       applied++
+      completed.add(patch.id)
       continue
     }
+    const hits = matches.reduce((sum, match) => sum + match.hits, 0)
     ;(patch.optional ? warnings : failures).push(hits === 0
       ? `${patch.id}: 锚点未命中（上游产物可能已变化）`
       : `${patch.id}: 锚点命中 ${hits} 次，必须唯一`)
   }
-  if (!checkOnly && content !== original) writeFileSync(file, content)
+  if (content !== original) updates.set(file, content)
 }
 
 if (failures.length > 0) {
   console.error(`[dsh-patch] ${failures.length} 处补丁无法应用:`)
   for (const failure of failures) console.error(`  - ${failure}`)
   process.exit(1)
+}
+
+// 所有必需锚点校验通过后再写盘，避免新版本失配留下部分补丁。
+if (!checkOnly) {
+  for (const [file, content] of updates) writeFileSync(file, content)
 }
 
 if (warnings.length > 0) {

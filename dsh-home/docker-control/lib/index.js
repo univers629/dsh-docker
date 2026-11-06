@@ -591,6 +591,11 @@ async function scheduleRestart() {
 
 export function apply(ctx) {
   const webServer = ctx.webServer
+  // Bind each WebServer.register disposer to the calling plugin fiber.
+  const registerRoute = (route) => {
+    if (typeof ctx.effect !== 'function') return webServer.register(route)
+    return ctx.effect(() => webServer.register(route), `dsh-docker-control: ${route.path}`)
+  }
   // 保活要在第一个 upgrade 到达之前把 prototype 包好。插件 apply 发生在启动期，
   // 浏览器连上来总在这之后，所以这个顺序是够的。
   if (typeof ctx.effect === 'function') {
@@ -598,7 +603,7 @@ export function apply(ctx) {
   } else {
     installWebSocketKeepalive()
   }
-  webServer.register({
+  registerRoute({
     kind: 'exact',
     path: '/dsh-docker-control/info',
     handler: async (request, response) => {
@@ -630,7 +635,7 @@ export function apply(ctx) {
       }
     },
   })
-  webServer.register({
+  registerRoute({
     kind: 'exact',
     path: '/dsh-docker-control/metrics',
     handler: (request, response) => {
@@ -650,7 +655,7 @@ export function apply(ctx) {
       }
     },
   })
-  webServer.register({
+  registerRoute({
     kind: 'exact',
     path: '/dsh-docker-control/update/status',
     handler: (request, response) => {
@@ -666,7 +671,7 @@ export function apply(ctx) {
       sendJson(response, 200, { ...updateStatus(), ok: true, running: updateRunning() })
     },
   })
-  webServer.register({
+  registerRoute({
     kind: 'exact',
     path: '/dsh-docker-control/update/latest',
     handler: async (request, response) => {
@@ -689,7 +694,7 @@ export function apply(ctx) {
       }
     },
   })
-  webServer.register({
+  registerRoute({
     kind: 'exact',
     path: '/dsh-docker-control/update',
     handler: (request, response) => {
@@ -725,7 +730,7 @@ export function apply(ctx) {
       }
     },
   })
-  webServer.register({
+  registerRoute({
     kind: 'exact',
     path: '/dsh-docker-control/config',
     handler: async (request, response) => {
@@ -790,7 +795,7 @@ export function apply(ctx) {
       }
     },
   })
-  webServer.register({
+  registerRoute({
     kind: 'exact',
     path: '/dsh-docker-control/status',
     handler: (request, response) => {
@@ -802,7 +807,7 @@ export function apply(ctx) {
       sendJson(response, 200, { ok: true, boot: BOOT_ID })
     },
   })
-  webServer.register({
+  registerRoute({
     kind: 'exact',
     path: '/dsh-docker-control/restart',
     handler: async (request, response) => {

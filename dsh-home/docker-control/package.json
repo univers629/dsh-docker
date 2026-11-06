@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "main": "lib/index.js",
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": "0.2.2-rc.1"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./client/client.js",

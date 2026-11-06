@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 把模型密钥代理的部署事实写进 DSH 自己的配置文件里，格式和位置都用 DSH 官方那套：
-//   - $DSH_HOME/settings.yaml 的 llm-pi-ai.providers.<上游名>（WebUI 的"模型"页读写的正是这里）
+//   - $DSH_HOME/settings.yaml 的模型迁移输入（llm-pi-ai.providers.<上游名> 或 llm-deepseek）
 //   - $DSH_HOME/.credentials.yaml 的 refs.<上游名>_API_KEY = 占位密钥
 //   - $DSH_HOME/settings.yaml 的 agent-default-model（只在还没设过的时候）
 // 这样装完就能在 WebUI 里选模型，不用手抄 base_url，也不用把真实密钥填进容器。
@@ -9,6 +9,7 @@
 //   node seed-dsh-model-settings.mjs --home /data/dsh   # 直接读写这个 DSH_HOME，打印中文摘要
 //   node seed-dsh-model-settings.mjs                    # 纯变换：结果连同新文本一起打到 stdout
 // 安装器用第一种（脚本跑在镜像里，DSH_HOME 挂进去），测试用第二种。
+// 纯变换的 profilePatchTexts 按 profile、home 顺序传入已有覆盖文本，不执行其中的 !!js。
 //   printf '%s' '{}' | node seed-dsh-model-settings.mjs --catalog   # 只导出目录快照
 //
 // 依赖解析：yaml 与 pi-ai 目录都按候选根目录去找（镜像里是 /app/dsh/node_modules），
@@ -16,13 +17,13 @@
 
 import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { NATIVE_ROUTES, exactModelIds, planSeed } from './dsh-model-settings-policy.mjs'
 
-const DSH_ROOTS = (process.env.DSH_SEED_MODULE_ROOTS ?? '/app/dsh/node_modules:/opt/dsh-docker-control/node_modules')
-  .split(':')
-  .filter((entry) => entry.length > 0)
+const DSH_ROOTS = process.env.DSH_SEED_MODULE_ROOTS === undefined
+  ? ['/app/dsh/node_modules', '/opt/dsh-docker-control/node_modules']
+  : process.env.DSH_SEED_MODULE_ROOTS.split(delimiter).filter((entry) => entry.length > 0)
 
 /** 在候选根目录里找一个包并加载。yaml 有 CJS 构建，require 最省事。 */
 function loadPackage(specifier) {
@@ -188,6 +189,73 @@ function nativeProfiles(yaml, settings) {
   return profiles
 }
 
+/** 按 settings.update 的规则合并配置：对象递归合并，数组及其它值整体替换。 */
+function mergeSettings(under, over) {
+  const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  if (!isObject(under) || !isObject(over)) return over
+  return Object.fromEntries([...new Set([...Object.keys(under), ...Object.keys(over)])].map((key) => [
+    key,
+    Object.prototype.hasOwnProperty.call(over, key) ? mergeSettings(under[key], over[key]) : under[key],
+  ]))
+}
+
+function hasExpression(value) {
+  if (value === null || typeof value !== 'object') return false
+  if (Object.prototype.hasOwnProperty.call(value, '__jsExpr')) return true
+  return Object.values(value).some(hasExpression)
+}
+
+/** profile/home 的完整 config 覆盖按层次读取；不执行 !!js，也不读取旧 .imported 快照。 */
+function existingSettings(yaml, settings, patchTexts) {
+  if (!Array.isArray(patchTexts) || patchTexts.some((text) => typeof text !== 'string')) {
+    throw new Error('profilePatchTexts 必须是按 profile、home 顺序排列的 YAML 文本数组')
+  }
+  const namespaces = new Set(['llm-pi-ai', 'agent-default-model',
+    ...Object.values(NATIVE_ROUTES).map((native) => native.settingsPath[0])])
+  const sections = {}
+  for (const text of patchTexts) {
+    const document = yaml.parseDocument(text.length === 0 ? '[]' : text, {
+      prettyErrors: true,
+      uniqueKeys: true,
+      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value) => ({ __jsExpr: value }) }],
+    })
+    if (document.errors.length > 0) throw new Error(document.errors[0].message)
+    if (!yaml.isSeq(document.contents)) throw new Error('profile patch 的顶层不是序列，安装器不改它')
+    const collect = (list) => {
+      for (const row of list.items) {
+        if (!yaml.isMap(row)) continue
+        const inserted = row.get('insert', true)
+        if (yaml.isSeq(inserted)) collect(inserted)
+        const config = row.get('config', true)
+        if ((row.get('group') === true || row.get('name') === 'cordis:group') && yaml.isSeq(config)) collect(config)
+        const id = row.get('id')
+        if (!namespaces.has(id) || config === undefined) continue
+        if (!yaml.isMap(config)) throw new Error('profile patch 的 ' + id + '.config 不是映射，安装器不改它')
+        const value = config.toJSON()
+        if (hasExpression(value)) throw new Error('profile patch 的 ' + id + '.config 含未求值的 !!js，安装器不改它')
+        // Cordis config patch 替换整份配置，不能把前一层的字段补回。
+        sections[id] = value
+      }
+    }
+    collect(document.contents)
+  }
+  return {
+    current: loadDocument(yaml, yaml.stringify(mergeSettings(sections, settings.toJSON()))),
+    profile: loadDocument(yaml, yaml.stringify(sections)),
+  }
+}
+
+/** --home 模式读取目标 profile 和 home 覆盖；纯变换只接受传入的文本。 */
+function homeProfilePatchTexts(home, payload) {
+  const profile = payload.profile ?? 'web'
+  if (typeof profile !== 'string' || profile.length === 0 || profile.includes('/') || profile.includes('\\')
+    || profile === '.' || profile === '..' || profile === 'node_modules') {
+    throw new Error('无效的 DSH profile 名称')
+  }
+  const profileDir = process.env.DSH_PROFILE_ROOT ?? join(home, 'profiles', profile)
+  return [readTextOrEmpty(join(profileDir, 'cordis.patch.yml')), readTextOrEmpty(join(home, 'cordis.patch.yml'))]
+}
+
 async function runSeed(payload) {
   const yaml = loadPackage('yaml')
   if (yaml === undefined || typeof yaml.parseDocument !== 'function') {
@@ -199,8 +267,9 @@ async function runSeed(payload) {
     deepseek: { models: nativeModelIds(nativeModule, {}) },
   }
   const settings = loadDocument(yaml, payload.settingsText)
+  const { current: currentSettings, profile: profileSettings } = existingSettings(yaml, settings, payload.profilePatchTexts ?? [])
   const credentials = loadDocument(yaml, payload.credentialsText)
-  const existingProviders = settings.getIn(['llm-pi-ai', 'providers'], true)
+  const existingProviders = currentSettings.getIn(['llm-pi-ai', 'providers'], true)
   const existingRefs = credentials.getIn(['refs'], true)
   const plan = planSeed({
     upstreams: payload.upstreams ?? [],
@@ -217,7 +286,7 @@ async function runSeed(payload) {
         ? existingProviders.toJSON?.() ?? {}
         : {},
       // 第一方命名空间（llm-deepseek）的 profile：回收孤儿凭据引用同样要看它的 baseURL。
-      natives: nativeProfiles(yaml, settings),
+      natives: nativeProfiles(yaml, currentSettings),
       // 传引用的当前值：策略层要能分辨"已经是占位串"和"这里存着一把真实密钥"。
       // 后者会被换回占位串（代理托管的上游在容器里不需要真密钥），并在摘要里点出来。
       refValues: existingRefs && yaml.isMap(existingRefs)
@@ -225,7 +294,7 @@ async function runSeed(payload) {
           (item) => [String(item.key), String(item.value?.value ?? item.value ?? '')],
         ))
         : {},
-      defaultModel: settings.getIn(['agent-default-model'], true) !== undefined,
+      defaultModel: currentSettings.getIn(['agent-default-model'], true) !== undefined,
     },
   })
 
@@ -235,7 +304,7 @@ async function runSeed(payload) {
     // baseURL / apiKeyEnv 跟着部署走，每次都覆盖；其余字段属于用户，只补缺。
     for (const [key, value] of Object.entries(entry.always)) settings.setIn([...base, key], value)
     for (const [key, value] of Object.entries(entry.whenMissing)) {
-      if (settings.getIn([...base, key]) === undefined) settings.setIn([...base, key], value)
+      if (currentSettings.getIn([...base, key]) === undefined) settings.setIn([...base, key], value)
     }
     // 面板保存的清单是"以这次为准"：那张表就是用户在编辑的东西，只补缺的话，改档位、
     // 去掉一个模型、换一批模型全都不会生效。安装器不问清单（sync 为假），保持只补缺。
@@ -253,15 +322,17 @@ async function runSeed(payload) {
     // 不是我们的空缺）。
     const declared = new Map((entry.modelEntries ?? []).map((model) => [model.id, model]))
     if (declared.size > 0) {
-      const seq = settings.getIn([...base, 'models'], true)
+      const seq = settings.getIn([...base, 'models'], true) ?? currentSettings.getIn([...base, 'models'], true)
+      const fields = entry.source === 'native' ? ['inputModalities'] : ['input', 'reasoningEfforts']
       if (seq && yaml.isSeq(seq)) {
         seq.items.forEach((item, index) => {
           if (!yaml.isMap(item)) return
           const model = declared.get(String(item.get('id') ?? ''))
           if (model === undefined) return
-          for (const field of ['input', 'reasoningEfforts']) {
+          for (const field of fields) {
             if (model[field] === undefined) continue
             if (item.get(field) !== undefined) continue
+            if (settings.getIn([...base, 'models']) === undefined) settings.setIn([...base, 'models'], seq.clone())
             settings.setIn([...base, 'models', index, field], model[field])
           }
         })
@@ -301,10 +372,11 @@ async function runSeed(payload) {
     credentials.setIn(['refs', ref], value)
   }
 
-  const providersJson = settings.getIn(['llm-pi-ai', 'providers'], true)?.toJSON?.() ?? {}
+  const validationSettings = loadDocument(yaml, yaml.stringify(mergeSettings(profileSettings.toJSON(), settings.toJSON())))
+  const providersJson = validationSettings.getIn(['llm-pi-ai', 'providers'], true)?.toJSON?.() ?? {}
   const validation = await validateSection(providersJson)
   const nativeFailure = validateNativeSection(
-    nativeModule, settings.getIn(['llm-deepseek'], true)?.toJSON?.(), plan.defaultModel,
+    nativeModule, validationSettings.getIn(['llm-deepseek'], true)?.toJSON?.(), plan.defaultModel,
   )
   return {
     settingsText: String(settings),
@@ -379,6 +451,7 @@ function main() {
     const payload = JSON.parse(input.length > 0 ? input : '{}')
     if (home.length > 0) {
       payload.settingsText = readTextOrEmpty(join(home, 'settings.yaml'))
+      payload.profilePatchTexts = homeProfilePatchTexts(home, payload)
       payload.credentialsText = readTextOrEmpty(join(home, '.credentials.yaml'))
     }
     const result = await runSeed(payload)

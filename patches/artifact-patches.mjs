@@ -8,6 +8,8 @@
 //   marker  已生效的标记；命中即认为这条补丁打过了，可安全重入。
 //   find    必须在目标文件中命中且只命中一次。
 //   replace 替换文本；必须包含 marker。
+//   alternatives 旧产物形状的同类替换；所有形状合计必须只命中一次。
+//   upstream 共享 helper 的已实现分支；依赖补丁成功且 marker 命中才可跳过独立替换。
 // marker 和 find 都不命中时直接失败退出——上游改了产物形状必须被人看见，
 // 绝不静默跳过。
 // optional=true 的条目表示上游可能已经内置该行为，或在新版中移除了目标包；
@@ -38,26 +40,35 @@ export const artifactPatches = [
     id: "sandbox-writable-roots-data",
     package: "@deepseek-ai/dsh-sandbox",
     file: "lib/index.js",
-    why: "/data 是容器的持久挂载根，workspace-write 必须允许写入。",
-    marker: `"/data",
+    why: "workspace-write 必须允许持久化 /data；0.2.2 的共享根派生覆盖 fs、bwrap 和 Landlock，并保留额外根校验。",
+    marker: `return [...new Set([canonicalPath(policy.workspaceRoot), canonicalPath("/data"), ...(policy.additionalWritableRoots ?? []).map(additionalRoot)])];`,
+    find: `return [...new Set([canonicalPath(policy.workspaceRoot), ...(policy.additionalWritableRoots ?? []).map(additionalRoot)])];`,
+    replace: `return [...new Set([canonicalPath(policy.workspaceRoot), canonicalPath("/data"), ...(policy.additionalWritableRoots ?? []).map(additionalRoot)])];`,
+    alternatives: [{
+      marker: `"/data",
 		"/tmp",`,
-    find: `return [...new Set([
+      find: `return [...new Set([
 		policy.workspaceRoot,
 		"/tmp",
 		tmpdir()
 	].map(canonicalPath))];`,
-    replace: `return [...new Set([
+      replace: `return [...new Set([
 		policy.workspaceRoot,
 		"/data",
 		"/tmp",
 		tmpdir()
 	].map(canonicalPath))];`,
+    }],
   },
   {
     id: "sandbox-local-bwrap-data",
     package: "@deepseek-ai/dsh-sandbox-local",
     file: "lib/index.js",
-    why: "bwrap 沙箱同样要绑定 /data，否则持久数据在沙箱内不可写。",
+    why: "旧版 bwrap 需要单独绑定 /data；0.2.2 使用已打补丁的共享 workspaceWritableRoots。",
+    upstream: {
+      marker: `for (const root of workspaceWritableRoots(policy)) args.push("--bind", root, root);`,
+      requires: "sandbox-writable-roots-data",
+    },
     marker: `args.push("--bind", "/data", "/data");`,
     find: `args.push("--tmpfs", "/tmp");
 		args.push("--bind", policy.workspaceRoot, policy.workspaceRoot);`,
@@ -69,10 +80,75 @@ export const artifactPatches = [
     id: "sandbox-local-landlock-data",
     package: "@deepseek-ai/dsh-sandbox-local",
     file: "lib/index.js",
-    why: "Landlock 授权同样要包含 /data。",
+    why: "旧版 Landlock 需要单独授权 /data；0.2.2 使用已打补丁的共享 workspaceWritableRoots。",
+    upstream: {
+      marker: `if (policy.mode === "workspace-write") readWrite.push("/tmp", ...workspaceWritableRoots(policy));`,
+      requires: "sandbox-writable-roots-data",
+    },
     marker: `readWrite.push("/tmp", "/data", policy.workspaceRoot)`,
     find: `if (policy.mode === "workspace-write") readWrite.push("/tmp", policy.workspaceRoot);`,
     replace: `if (policy.mode === "workspace-write") readWrite.push("/tmp", "/data", policy.workspaceRoot);`,
+  },
+  {
+    id: "deepseek-api-key-request-headers-config",
+    package: "@deepseek-ai/dsh-llm-deepseek-api-key",
+    file: "lib/index.js",
+    why: "第一方 DeepSeek 需要显式请求头支持，才能向多用户密钥代理传递实例身份。",
+    marker: `headersBaseURL: z.string().default("").volatile()`,
+    find: `apiKeyEnv: z.string().role("credential-ref").default("DEEPSEEK_API_KEY").volatile()`,
+    replace: `apiKeyEnv: z.string().role("credential-ref").default("DEEPSEEK_API_KEY").volatile(),
+	headers: z.dict(z.string()).default({}).volatile(),
+	headersBaseURL: z.string().default("").volatile()`,
+  },
+  {
+    id: "deepseek-api-key-request-headers-options",
+    package: "@deepseek-ai/dsh-llm-deepseek-api-key",
+    file: "lib/index.js",
+    why: "每次解析当前配置时读取 volatile 请求头与身份头目标，不缓存旧令牌。",
+    marker: `headersBaseURL: config.headersBaseURL.get()`,
+    find: `apiKeyEnv: config.apiKeyEnv.get()`,
+    replace: `apiKeyEnv: config.apiKeyEnv.get(),
+		headers: config.headers.get(),
+		headersBaseURL: config.headersBaseURL.get()`,
+  },
+  {
+    id: "deepseek-api-key-request-headers-connection",
+    package: "@deepseek-ai/dsh-llm-deepseek-api-key",
+    file: "lib/index.js",
+    why: "保留解析后的请求头；实例身份头只发送到种子配置绑定的完整代理路由，改成直连地址时剥离。",
+    marker: `const extraHeaders = new Headers(headers);`,
+    find: `function resolveAdapterOptions(config, environment) {
+	const { modelsTimeoutMs: _timeout, modelsMaxAgeMs: _maxAge, apiKeyEnv, ...messages } = config;
+	const timing = resolveListingTiming(config, "llm-deepseek-api-key");
+	const connection = resolveAdapterOptions$1(messages, environment);
+	const listed = new URL(connection.baseURL).origin === OFFICIAL_ORIGIN && isBuiltInCatalog(connection.models);
+	return {
+		...connection,
+		apiKeyEnv: credentialRef(apiKeyEnv ?? "DEEPSEEK_API_KEY"),`,
+    replace: String.raw`function resolveAdapterOptions(config, environment) {
+	const { modelsTimeoutMs: _timeout, modelsMaxAgeMs: _maxAge, apiKeyEnv, headers = {}, headersBaseURL = "", ...messages } = config;
+	const timing = resolveListingTiming(config, "llm-deepseek-api-key");
+	const connection = resolveAdapterOptions$1(messages, environment);
+	const extraHeaders = new Headers(headers);
+	if (extraHeaders.has("x-dsh-instance-token") && connection.baseURL.replace(/\/+$/, "") !== String(headersBaseURL).replace(/\/+$/, "")) extraHeaders.delete("x-dsh-instance-token");
+	const listed = new URL(connection.baseURL).origin === OFFICIAL_ORIGIN && isBuiltInCatalog(connection.models);
+	return {
+		...connection,
+		headers: Object.fromEntries(extraHeaders),
+		apiKeyEnv: credentialRef(apiKeyEnv ?? "DEEPSEEK_API_KEY"),`,
+  },
+  {
+    id: "deepseek-api-key-request-headers-auth",
+    package: "@deepseek-ai/dsh-llm-deepseek-api-key",
+    file: "lib/index.js",
+    why: "Messages 与 Files 共用请求头；规范化后固定 x-api-key，不允许大小写变体覆盖凭据。",
+    marker: `headers.set("x-api-key", await resolveApiKey(connection));`,
+    find: `resolveAuth: async (connection) => ({ headers: { "x-api-key": await resolveApiKey(connection) } }),`,
+    replace: `resolveAuth: async (connection) => {
+			const headers = new Headers(connection.headers);
+			headers.set("x-api-key", await resolveApiKey(connection));
+			return { headers: Object.fromEntries(headers) };
+		},`,
   },
   {
     id: "app-boot-realpath-import",

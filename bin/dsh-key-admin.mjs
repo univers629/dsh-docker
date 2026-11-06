@@ -380,9 +380,14 @@ function spawnSeed(document) {
   // 当成 seed 的错误回给页面，比丢一个 500 更有用。
   let settingsText
   let credentialsText
+  let profilePatchTexts
   try {
     settingsText = readSeedTarget(settingsFile)
     credentialsText = readSeedTarget(credentialsFile)
+    profilePatchTexts = [
+      readSeedTarget(path.join(DSH_HOME, 'profiles', 'web', 'cordis.patch.yml')),
+      readSeedTarget(path.join(DSH_HOME, 'cordis.patch.yml')),
+    ]
   } catch (error) {
     return Promise.resolve({ skipped: true, failed: true, output: '', warnings: '', error: error.message })
   }
@@ -390,6 +395,7 @@ function spawnSeed(document) {
     ...seedPayload(document, BROKER_BASE, PLACEHOLDER, adminExtraHeaders()),
     settingsText,
     credentialsText,
+    profilePatchTexts,
   })
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [SEED_SCRIPT], {

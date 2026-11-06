@@ -144,6 +144,16 @@ export function modelEntry(model, levels) {
   }
 }
 
+/** 第一方 DeepSeek 模型条目；推理强度由 provider 配置，不写逐模型档位。 */
+export function nativeModelEntry(model) {
+  const record = (model !== null && typeof model === 'object') ? model : { id: model }
+  const inputModalities = normalizeModelModalities(record.inputModalities ?? record.input)
+  return {
+    id: String(record.id ?? '').trim(),
+    ...(inputModalities.length > 0 ? { inputModalities } : {}),
+  }
+}
+
 /** 调用能力（pi-ai 的 `input`）的规范顺序，同时也是白名单。 */
 export const MODEL_MODALITIES = Object.freeze(['text', 'image'])
 
@@ -184,7 +194,7 @@ export function normalizeModelRecords(models) {
     seen.add(id)
     result.push({
       id,
-      input: normalizeModelModalities(record.input),
+      input: normalizeModelModalities(record.inputModalities ?? record.input),
       reasoningEfforts: normalizeThinkingLevels(record.reasoningEfforts),
     })
   }
@@ -250,8 +260,20 @@ export function planProvider(request) {
   const native = NATIVE_ROUTES[name]
   if (native) {
     const nativeWhenMissing = {}
+    const nativeEntries = modelRecords.map((record) => nativeModelEntry(record))
+    const headers = request.extraHeaders && Object.keys(request.extraHeaders).length > 0
+      ? { ...request.extraHeaders }
+      : undefined
+    const hasIdentity = headers !== undefined
+      && Object.keys(headers).some((key) => key.toLowerCase() === 'x-dsh-instance-token')
+    // 身份头绑定到生成时的代理地址，后续改为直连地址时由 provider 剥离。
+    const always = {
+      baseURL,
+      ...(headers === undefined ? {} : { headers }),
+      ...(hasIdentity ? { headersBaseURL: baseURL } : {}),
+    }
     // 用户明确列了模型 id 才写 models：不写就沿用第一方内置的那份清单。
-    if (models.length > 0) nativeWhenMissing.models = entriesOf()
+    if (models.length > 0) nativeWhenMissing.models = nativeEntries
     return {
       ok: true,
       name,
@@ -259,13 +281,13 @@ export function planProvider(request) {
       provider: native.provider,
       path: [...native.settingsPath],
       credentialRef: native.credentialRef,
-      always: { baseURL },
+      always,
       whenMissing: nativeWhenMissing,
       api: '',
       models: models.length > 0 ? models : exactModelIds(request.nativeCatalog?.[name]?.models ?? native.models),
-      modelEntries: entriesOf(),
+      modelEntries: nativeEntries,
       syncModels,
-      reasoningEfforts: thinkingLevelMap(levels),
+      reasoningEfforts: null,
       // 旧版安装器写过的同名 pi-ai 路由要一起收掉，否则重复那行留在页面上。
       supersedes: piAiRoutePath(name),
     }

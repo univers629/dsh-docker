@@ -38,11 +38,12 @@ serves_web=false
 case "${1:-}" in
   web) serves_web=true ;;
   --profile) [ "${2:-}" = web ] && serves_web=true ;;
+  --profile=web) serves_web=true ;;
 esac
 for argument in "$@"; do
   case "$argument" in
     # 这些都是「看一眼就退出」的用法，不会去绑端口。
-    --dump-config|--dump-default-config|plugin|--version|-V|--help|-h)
+    --dump-config|--dump-default-config|--dump-config-schema|plugin|--version|-V|--help|-h)
       serves_web=false
       break
       ;;

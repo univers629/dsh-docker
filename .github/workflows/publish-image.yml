@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       dsh_version:
-        description: 要安装的 DSH npm 版本或 dist-tag（默认 latest）
+        description: 要安装的 DSH npm 版本或 dist-tag（默认 0.2.2-rc.1）
         required: false
-        default: latest
+        default: 0.2.2-rc.1
   push:
     tags:
       - 'v*'
@@ -41,7 +41,7 @@ jobs:
       - name: Resolve the DSH version and decide whether to build
         id: pick
         env:
-          REQUESTED: ${{ github.event.inputs.dsh_version || 'latest' }}
+          REQUESTED: ${{ github.event_name == 'schedule' && 'latest' || github.event.inputs.dsh_version || '0.2.2-rc.1' }}
           # 手动触发和打标签发版总是重新构建（补丁或工程文件可能变了）；
           # 只有定时检查才按版本去重。
           FORCED: ${{ github.event_name != 'schedule' }}
@@ -123,6 +123,116 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.slug }}
           cache-to: type=gha,mode=max,scope=${{ matrix.slug }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Gate the built image in an offline container
+        timeout-minutes: 10
+        shell: bash
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          EXPECTED_VERSION: ${{ needs.resolve.outputs.version }}
+          PLATFORM_SLUG: ${{ matrix.slug }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${REGISTRY}/${IMAGE_NAME}@${BUILD_DIGEST}"
+          container=''
+          cleanup() {
+            local result="$?"
+            if [[ "$container" =~ ^[0-9a-f]{64}$ ]]; then
+              if [ "$result" -ne 0 ]; then
+                docker logs --tail 120 "$container" 2>&1 \
+                  | sed -E 's/([?&]token=)[A-Za-z0-9_-]+/\1[redacted]/g' >&2 || true
+              fi
+              docker rm --force --volumes "$container" >/dev/null || result=1
+            fi
+            return "$result"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          docker pull "$image"
+          container="$(docker create \
+            --name "dsh-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PLATFORM_SLUG}-${RANDOM}" \
+            --network none \
+            --mount type=tmpfs,dst=/data \
+            --mount type=tmpfs,dst=/workspace \
+            --env DSH_DEPLOYMENT_MODE=local --env DSH_WEB_PORT=3081 \
+            "$image")"
+          [[ "$container" =~ ^[0-9a-f]{64}$ ]]
+          docker start "$container" >/dev/null
+
+          # Exchange only this disposable process's printed launch token; never bypass core authentication.
+          probe_js="$(cat <<'NODE'
+          const startup = await new Promise((resolve, reject) => {
+            let text = '';
+            process.stdin.setEncoding('utf8');
+            process.stdin.on('data', chunk => { text += chunk; });
+            process.stdin.on('end', () => resolve(text));
+            process.stdin.on('error', reject);
+          });
+          const origin = 'http://127.0.0.1:3081';
+          const ensure = (ok, message) => { if (!ok) throw new Error(message); };
+          const request = (url, options = {}) => fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(1500), ...options });
+          let phase = 'Nginx';
+          try {
+            ensure((await request('http://127.0.0.1:3080/healthz')).status === 204, 'Nginx must return 204');
+            phase = 'core launch authorization';
+            const announced = [...startup.matchAll(/^dsh web: (\S+)\r?$/gm)].at(-1)?.[1];
+            ensure(announced, 'the core must announce its ready launch URL');
+            const launch = new URL(announced);
+            ensure(launch.origin === origin && launch.pathname === '/', 'the launch URL must use the fixed loopback core');
+            ensure(launch.searchParams.getAll('token').length === 1 && [...launch.searchParams.keys()].length === 1, 'one process token is required');
+            const exchange = await request(launch);
+            ensure(exchange.status === 303 && exchange.headers.get('location') === './', 'normal launch-token exchange must succeed');
+            const cookie = exchange.headers.getSetCookie()[0]?.split(';')[0];
+            ensure(cookie && /^dsh-auth-[A-Za-z0-9_-]+=[A-Za-z0-9._-]+$/.test(cookie), 'the core must issue its signed session cookie');
+            const options = { headers: { cookie } };
+            phase = 'authenticated core index';
+            const index = await request(`${origin}/`, options);
+            ensure(index.status === 200 && /^text\/html\b/.test(index.headers.get('content-type') ?? ''), 'authenticated core HTML must return 200');
+            const html = await index.text();
+            const bootMatch = html.match(/globalThis\["__DSH_BOOT__"\]\s*=\s*([^<]+)<\/script>/);
+            ensure(bootMatch, 'the core must inject its real boot graph');
+            const boot = JSON.parse(bootMatch[1]);
+            ensure(boot.release?.version === process.env.DSH_CI_VERSION, 'the boot graph must identify the built release');
+            ensure(Array.isArray(boot.entries) && boot.entries.some(entry => entry.id === 'dsh-docker-control'), 'docker-control must be in the client graph');
+            phase = 'core frontend assets';
+            const entryScript = html.match(/<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/i);
+            ensure(entryScript, 'the core must serve its frontend entry');
+            const assetUrl = new URL(entryScript[1], `${origin}/`);
+            ensure(assetUrl.origin === origin && assetUrl.pathname.startsWith('/assets/'), 'the frontend asset must stay on the loopback core');
+            const asset = await request(assetUrl, options);
+            ensure(asset.status === 200 && /javascript/.test(asset.headers.get('content-type') ?? '') && (await asset.text()).length > 0, 'the frontend asset must be usable');
+            const batch = Array.isArray(boot.batches) && boot.batches.find(row => Array.isArray(row.entries) && row.entries.includes('dsh-docker-control'));
+            ensure(batch && typeof batch.url === 'string', 'the client graph must contain the plugin batch');
+            const batchUrl = new URL(batch.url, `${origin}/`);
+            ensure(batchUrl.origin === origin, 'the plugin batch must stay on the loopback core');
+            const client = await request(batchUrl, options);
+            ensure(client.status === 200 && /id:\s*['"]dsh-docker-control['"]/.test(await client.text()), 'the plugin client factory must be served');
+            phase = 'docker-control core status';
+            const status = await request(`${origin}/dsh-docker-control/status`, options);
+            ensure(status.status === 200, 'the plugin must answer on the direct core listener');
+            const body = await status.json();
+            ensure(body.ok === true && typeof body.boot === 'string' && body.boot.length > 0, 'the plugin must return its real boot identity');
+            console.log('image health: Nginx 204; authenticated DSH index, boot graph, assets and docker-control status: ok');
+          } catch {
+            console.error(`image health not ready: ${phase}`);
+            process.exitCode = 1;
+          }
+          NODE
+          )"
+          ready=false
+          for ((attempt=1; attempt<=60; attempt+=1)); do
+            [ "$(docker inspect --format '{{.State.Running}}' "$container")" = true ] || break
+            if docker logs "$container" 2>&1 \
+              | docker exec --interactive --env "DSH_CI_VERSION=$EXPECTED_VERSION" "$container" \
+                node --input-type=module -e "$probe_js"; then
+              ready=true
+              break
+            fi
+            sleep 3
+          done
+          [ "$ready" = true ] || { echo 'Offline image health gate failed.' >&2; exit 1; }
 
       - name: Export digest
         run: |

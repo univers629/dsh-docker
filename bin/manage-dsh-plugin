@@ -3,6 +3,8 @@ set -eu
 
 RESTART_EXECUTABLE=${DSH_RESTART_EXECUTABLE:-/usr/local/bin/restart-dsh}
 VALIDATOR=${DSH_PLUGIN_VALIDATOR:-/usr/local/lib/dsh/validate-dsh-profile.mjs}
+PREFLIGHT=${DSH_PLUGIN_PREFLIGHT:-/usr/local/lib/dsh/preflight-profile-plugins.mjs}
+MODULE_ROOT=${DSH_PLUGIN_MODULE_ROOT:-${DSH_APP_DIR:-/app/dsh}/node_modules}
 CLEANUP_EXECUTABLE=${DSH_PLUGIN_CLEANUP_EXECUTABLE:-/usr/local/bin/cleanup-dsh-plugin-transactions}
 LOCK_DIR=${DSH_PLUGIN_LOCK_DIR:-/data/dsh/plugin-transaction.lock}
 transaction_root=
@@ -223,11 +225,13 @@ esac
 
 if [ "$workspace_existed" = true ]; then cp "$workspace_backup" "$workspace"; else rm -f "$workspace"; fi
 
-printf '%s\n' '【DSH 插件】正在验证组合配置、运行时入口和模块导入……'
+printf '%s\n' '【DSH 插件】正在验证目标版本兼容性、组合配置和模块导入……'
+node "$PREFLIGHT" "$MODULE_ROOT" "$stage_profile" --fail-on-incompatible || \
+  fail "插件与目标 DSH 不兼容；${target} 未提交，实时 profile 保持不变。"
 DSH_HOME="$stage_home" dsh --profile web --dump-config >/dev/null || \
   fail "配置解析失败；${target} 未提交，实时 profile 保持不变。"
 node "$VALIDATOR" "$stage_profile" || \
-  fail "插件运行时验证失败；${target} 未提交，实时 profile 保持不变。"
+  fail "插件模块导入检查失败；${target} 未提交，实时 profile 保持不变。"
 
 backup="$profiles_root/.web.previous.$$"
 mv "$profile" "$backup" || fail '无法准备 profile 原子替换。'
@@ -240,6 +244,6 @@ fi
 
 printf '【DSH 插件】事务已提交到持久化 web profile：%s\n' "$target"
 schedule_restart
-printf '%s\n' '【DSH 插件】构建、配置和运行时入口验证均已通过。'
+printf '%s\n' '【DSH 插件】包管理、版本兼容、配置组合与模块导入检查已通过；实际挂载将在重启后确认。'
 printf '%s\n' '【DSH 插件】本轮回复结束后只会重启 DSH 子进程；Debian 容器、Nginx 和已安装系统工具保持运行。'
 printf '%s\n' '【DSH 插件】页面可能短暂断开。请等待约 30～60 秒后刷新；超过 90 秒仍未恢复时，再检查 DSH Supervisor 和插件日志。'
