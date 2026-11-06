@@ -7,8 +7,8 @@
 // 而现有的存活检测看不见这种状态，所以在替换运行时之前先把结果算出来。
 //
 // 判定不在这里重写：从目标运行时树里 import @deepseek-ai/dsh-app-boot，用新版本
-// 自带的 getDshRuntimeVersion() 与 evaluatePluginCompatibility()。这样预检结论与
-// 新版本启动时的判定必然一致，上游改了判定规则也不会出现两套逻辑。
+// 自带的 readProfileCompatibility()、getDshRuntimeVersion() 与 evaluatePluginCompatibility()。
+// 豁免读取和兼容性判定随目标运行时的上游规则变化。
 //
 // 用法：
 //   preflight-profile-plugins.mjs <module-root> [profile-dir] [--json] [--fail-on-incompatible]
@@ -81,8 +81,10 @@ if (appBootPath === undefined) {
 }
 
 const appBoot = await import(pathToFileURL(appBootPath).href)
-if (typeof appBoot.evaluatePluginCompatibility !== 'function' || typeof appBoot.getDshRuntimeVersion !== 'function') {
-  console.error('[preflight] app-boot 不再导出 evaluatePluginCompatibility / getDshRuntimeVersion，预检无法进行')
+if (typeof appBoot.evaluatePluginCompatibility !== 'function'
+  || typeof appBoot.getDshRuntimeVersion !== 'function'
+  || typeof appBoot.readProfileCompatibility !== 'function') {
+  console.error('[preflight] app-boot 不再导出 evaluatePluginCompatibility / getDshRuntimeVersion / readProfileCompatibility，预检无法进行')
   process.exit(1)
 }
 
@@ -112,21 +114,8 @@ if (!existsSync(profileManifestPath)) {
   }
 }
 
-const exemptions = {}
-const compatibilityPath = join(profileDir, 'compatibility.json')
-if (existsSync(compatibilityPath)) {
-  const parsed = readJson(compatibilityPath)
-  if (parsed.error) {
-    warnings.push(`compatibility.json 无法解析，按“没有任何豁免”处理：${parsed.error}`)
-  } else if (parsed.value === null || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
-    warnings.push('compatibility.json 必须是 name@version → DSH 版本列表 的对象，已按“没有任何豁免”处理')
-  } else {
-    for (const [key, versions] of Object.entries(parsed.value)) {
-      if (Array.isArray(versions) && versions.every((version) => typeof version === 'string')) exemptions[key] = versions
-      else warnings.push(`compatibility.json 的 ${key} 不是精确 DSH 版本列表，该条豁免被忽略`)
-    }
-  }
-}
+const { exemptions, warnings: compatibilityWarnings } = appBoot.readProfileCompatibility(profileDir)
+warnings.push(...compatibilityWarnings)
 
 // 内置 bundle（dsh-base、dsh-web-app 等）不在 profile 的 node_modules 里，而是随运行时
 // 一起发布：解析顺序与启动时一致，installation anchor 优先，profile 兜底。用上游的

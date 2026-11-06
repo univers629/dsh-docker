@@ -45,16 +45,16 @@ export const SUPPORTED_ROUTE_PROTOCOLS = Object.freeze([
  * 模型清单沿用它内置的那份，密钥引用还是它默认的 DEEPSEEK_API_KEY
  * （正好等于 deriveCredentialRef('deepseek')，用户在 WebUI 里填真实密钥时也落这里）。
  *
- * 字段口径来自 @deepseek-ai/dsh-llm-deepseek：命名空间 llm-deepseek、profile 就在
- * 命名空间根上、请求路径是 <baseURL>/chat/completions（密钥代理默认放行）、
- * apiKeyEnv 默认 DEEPSEEK_API_KEY、models 默认 deepseek-v4-flash 与 deepseek-v4-pro。
+ * 字段口径来自 @deepseek-ai/dsh-llm-deepseek-api-key；profile entry id 保持 llm-deepseek，
+ * profile 位于命名空间根上，apiKeyEnv 默认 DEEPSEEK_API_KEY。模型默认选择取运行时目录，
+ * 离线兜底清单为 deepseek-flash 与 deepseek-v4-pro。
  */
 export const NATIVE_ROUTES = Object.freeze({
   deepseek: Object.freeze({
     provider: 'deepseek-official',
     settingsPath: Object.freeze(['llm-deepseek']),
     credentialRef: 'DEEPSEEK_API_KEY',
-    models: Object.freeze(['deepseek-v4-flash', 'deepseek-v4-pro']),
+    models: Object.freeze(['deepseek-flash', 'deepseek-v4-pro']),
   }),
 })
 
@@ -196,6 +196,19 @@ export function normalizeModelIds(models) {
   return normalizeModelRecords(models).map((record) => record.id)
 }
 
+/** 提取目录或保留清单的模型 id：只接受非空字符串，不改写原始拼写。 */
+export function exactModelIds(models) {
+  const seen = new Set()
+  const ids = []
+  for (const model of Array.isArray(models) ? models : []) {
+    const id = typeof model === 'string' ? model : model?.id
+    if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue
+    seen.add(id)
+    ids.push(id)
+  }
+  return ids
+}
+
 /**
  * 规划一个上游的 provider profile。
  *
@@ -211,7 +224,8 @@ export function normalizeModelIds(models) {
  * @param request.models 用户填的模型清单：id 字符串，或 { id, input, reasoningEfforts } 记录
  * @param request.reasoningEfforts 整条上游的默认档位（老配置的形状；模型自己声明了就以自己那份为准）
  * @param request.brokerBase 密钥代理的 base（http://dsh-key-broker:8080）
- * @param request.catalog 目录快照
+ * @param request.catalog pi-ai 目录快照
+ * @param request.nativeCatalog 第一方 schema 的目录快照（上游名 → { models: [id] }）
  * @param request.extraHeaders 每条生成路由都要带的请求头（例如实例身份令牌）：{ [id]: { api, models: [id] } }
  * @param request.sync 模型清单是不是"以这次给的为准"（面板保存时是；安装器不问模型清单，
  *   所以它保持"只在缺失时写"的老口径，免得把用户在 WebUI 里改过的清单冲掉）
@@ -248,7 +262,7 @@ export function planProvider(request) {
       always: { baseURL },
       whenMissing: nativeWhenMissing,
       api: '',
-      models: models.length > 0 ? models : [...native.models],
+      models: models.length > 0 ? models : exactModelIds(request.nativeCatalog?.[name]?.models ?? native.models),
       modelEntries: entriesOf(),
       syncModels,
       reasoningEfforts: thinkingLevelMap(levels),
@@ -279,7 +293,7 @@ export function planProvider(request) {
       always,
       whenMissing,
       api: catalogEntry.api ?? '',
-      models: models.length > 0 ? models : normalizeModelIds(catalogEntry.models),
+      models: models.length > 0 ? models : exactModelIds(catalogEntry.models),
       modelEntries: entriesOf(),
       syncModels,
       reasoningEfforts: thinkingLevelMap(levels),
@@ -336,7 +350,8 @@ function brokerRouteCandidates(providers, natives) {
  *   记录，reasoningEfforts 是整条上游的默认档位（逐模型的声明优先），sync 见 planProvider）
  * @param request.brokerBase 密钥代理 base
  * @param request.placeholder 占位密钥字面值
- * @param request.catalog 目录快照
+ * @param request.catalog pi-ai 目录快照
+ * @param request.nativeCatalog 第一方 schema 的目录快照（上游名 → { models: [id] }）
  * @param request.existing { providers: 已有的 llm-pi-ai.providers（名字 → profile 对象）, natives: 已有的第一方命名空间 profile（上游名 → profile 对象）, refValues: 已有的凭据引用（名字 → 当前值）, defaultModel: 已有的 agent-default-model }
  * @returns { entries, skipped, refs, reclaimed, defaultModel, removals }
  */
@@ -359,6 +374,7 @@ export function planSeed(request) {
       sync: upstream.sync === true,
       brokerBase: request.brokerBase,
       catalog: request.catalog,
+      nativeCatalog: request.nativeCatalog,
       extraHeaders: request.extraHeaders,
     })
     if (!plan.ok) {
@@ -434,10 +450,19 @@ export function planSeed(request) {
   // 每次重新配置都改回来就成了骚扰。
   let defaultModel = null
   if (!existing.defaultModel) {
-    const seed = entries.find((entry) => entry.models.length > 0)
-    // provider 用的是 WebUI 的路由 id：第一方命名空间那条不叫 deepseek，
-    // 叫 deepseek-official，写错了默认模型就指向一个不存在的路由。
-    if (seed) defaultModel = { provider: seed.provider, model: seed.models[0] }
+    for (const entry of entries) {
+      const profile = entry.source === 'native'
+        ? existing.natives?.[entry.name]
+        : existingProviders[entry.name]
+      // 只补缺时默认选择必须来自被保留的清单，不能指向本次没有写进去的模型。
+      const models = !entry.syncModels && profile?.models !== undefined
+        ? exactModelIds(profile.models)
+        : entry.models
+      if (models.length === 0) continue
+      // 第一方 WebUI 路由 id 为 deepseek-official，不是上游名 deepseek。
+      defaultModel = { provider: entry.provider, model: models[0] }
+      break
+    }
   }
 
   return { entries, skipped, refs, reclaimed, defaultModel, removals, existingProviders }

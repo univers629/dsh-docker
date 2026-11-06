@@ -18,7 +18,7 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { NATIVE_ROUTES, planSeed } from './dsh-model-settings-policy.mjs'
+import { NATIVE_ROUTES, exactModelIds, planSeed } from './dsh-model-settings-policy.mjs'
 
 const DSH_ROOTS = (process.env.DSH_SEED_MODULE_ROOTS ?? '/app/dsh/node_modules:/opt/dsh-docker-control/node_modules')
   .split(':')
@@ -98,30 +98,44 @@ async function validateSection(providers) {
   return { failure: '', protocols: [] }
 }
 
-/**
- * 第一方 DeepSeek 命名空间也过一遍它自己导出的 Config：写坏这一节的后果比 pi-ai
- * 更重——它是开箱默认选中的供应商，配置被拒等于装完一个模型都用不了。
- * @returns 空串表示通过（也包括"这次没加载到这个包"）。
- */
-async function validateNativeSection(section) {
-  if (section === undefined) return ''
+/** profile entry id 为 llm-deepseek，但实际配置 schema 由 API-key provider 导出。 */
+async function loadNativePackage() {
   for (const root of DSH_ROOTS) {
-    const entry = root + '/@deepseek-ai/dsh-llm-deepseek/lib/index.js'
-    let module
+    const entry = root + '/@deepseek-ai/dsh-llm-deepseek-api-key/lib/index.js'
     try {
-      module = await import(pathToFileURL(entry).href)
+      const module = await import(pathToFileURL(entry).href)
+      if (typeof module.Config === 'function') return module
     } catch {
-      continue
-    }
-    if (typeof module.Config !== 'function') return ''
-    try {
-      module.Config(section)
-      return ''
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error)
+      // 换下一个根目录。
     }
   }
-  return ''
+  return undefined
+}
+
+/** Config.models 是 Volatile；取当前清单并保留模型 id 的原始拼写。 */
+function nativeModelIds(module, section) {
+  const config = module.Config(section)
+  const models = typeof config.models?.get === 'function' ? config.models.get() : config.models
+  if (!Array.isArray(models)) throw new Error('第一方 DeepSeek Config.models 不是模型清单')
+  return exactModelIds(models)
+}
+
+/**
+ * 第一方 DeepSeek 使用实际 API-key schema 校验，并确认新默认选择存在于最终清单。
+ * 已有默认选择只保留，不在种子写入时迁移或修正。
+ * @returns 校验失败时返回错误信息；未加载包、缺少 section 或校验未报错时返回空串。
+ */
+function validateNativeSection(module, section, defaultModel) {
+  if (section === undefined || module === undefined) return ''
+  try {
+    const models = nativeModelIds(module, section)
+    if (defaultModel?.provider === NATIVE_ROUTES.deepseek.provider && !models.includes(defaultModel.model)) {
+      throw new Error('第一方默认模型 ' + defaultModel.model + ' 不在 llm-deepseek 的模型清单中')
+    }
+    return ''
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
 }
 
 function readStdin() {
@@ -180,6 +194,10 @@ async function runSeed(payload) {
     throw new Error('找不到 yaml 库（候选根目录：' + DSH_ROOTS.join(' ') + '）')
   }
   const catalog = await loadCatalog()
+  const nativeModule = await loadNativePackage()
+  const nativeCatalog = nativeModule === undefined ? {} : {
+    deepseek: { models: nativeModelIds(nativeModule, {}) },
+  }
   const settings = loadDocument(yaml, payload.settingsText)
   const credentials = loadDocument(yaml, payload.credentialsText)
   const existingProviders = settings.getIn(['llm-pi-ai', 'providers'], true)
@@ -191,6 +209,7 @@ async function runSeed(payload) {
     // 部署要求的额外请求头（例如实例身份令牌）：代理据此识别调用者
     extraHeaders: payload.extraHeaders && typeof payload.extraHeaders === 'object' ? payload.extraHeaders : undefined,
     catalog,
+    nativeCatalog,
     existing: {
       // 传整份 profile（不只是名字）：判断某条同名 pi-ai 路由是不是安装器自己写的
       // 重复行，要看它的 baseURL 指向哪里。
@@ -206,7 +225,7 @@ async function runSeed(payload) {
           (item) => [String(item.key), String(item.value?.value ?? item.value ?? '')],
         ))
         : {},
-      defaultModel: settings.getIn(['agent-default-model', 'model']) !== undefined,
+      defaultModel: settings.getIn(['agent-default-model'], true) !== undefined,
     },
   })
 
@@ -284,7 +303,9 @@ async function runSeed(payload) {
 
   const providersJson = settings.getIn(['llm-pi-ai', 'providers'], true)?.toJSON?.() ?? {}
   const validation = await validateSection(providersJson)
-  const nativeFailure = await validateNativeSection(settings.getIn(['llm-deepseek'], true)?.toJSON?.())
+  const nativeFailure = validateNativeSection(
+    nativeModule, settings.getIn(['llm-deepseek'], true)?.toJSON?.(), plan.defaultModel,
+  )
   return {
     settingsText: String(settings),
     credentialsText: String(credentials),
@@ -295,6 +316,7 @@ async function runSeed(payload) {
     credentialRefs: Object.keys(plan.refs),
     reclaimedRefs: [...plan.reclaimed],
     catalogAvailable: Object.keys(catalog).length > 0,
+    nativeCatalogAvailable: nativeModule !== undefined,
     // 空数组表示这次没能加载 llm-pi-ai，validationFailure 为空串也不代表校验过了。
     supportedProtocols: validation.protocols,
     validationFailure: validation.failure.length > 0 ? validation.failure : nativeFailure,

@@ -117,6 +117,15 @@ export const artifactPatches = [
     replace: `isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname) || (typeof document !== "undefined" && document.cookie.split(";").some((entry) => entry.trim() === "DSH_PUBLIC_LOCAL_MODE=1")),`,
   },
   {
+    id: "workspace-model-delete-rpc",
+    package: "@deepseek-ai/dsh-api-workspace-controller",
+    file: "lib/client.js",
+    why: "修复旧关联补丁遗漏的 Workspace 删除 RPC，兼容已打过补丁的产物。",
+    marker: `\t\t\tasync delete(workspaceId) {\n\t\t\t\tconst result = await this.remote.delete({ workspaceId });`,
+    find: `\t\t\tasync delete(workspaceId) {\n\t\t\t\tif (result.ok) this.remove(workspaceId, true);`,
+    replace: `\t\t\tasync delete(workspaceId) {\n\t\t\t\tconst result = await this.remote.delete({ workspaceId });\n\t\t\t\tif (result.ok) this.remove(workspaceId, true);`,
+  },
+  {
     id: "workspace-model-pending-attachments-field",
     package: "@deepseek-ai/dsh-api-workspace-controller",
     file: "lib/client.js",
@@ -132,7 +141,57 @@ export const artifactPatches = [
     why: "新版 Workspace controller 在 session.create 成功后立即发布待确认归属。",
     marker: `noteSessionAttachment(workspaceId, sessionId) {`,
     find: `\t\t\tasync delete(workspaceId) {\n\t\t\t\tconst result = await this.remote.delete({ workspaceId });`,
-    replace: `\t\t\tnoteSessionAttachment(workspaceId, sessionId) {\n\t\t\t\tif (this.removedIds.has(workspaceId)) return;\n\t\t\t\tconst index = this.items.findIndex((item) => item.workspaceId === workspaceId);\n\t\t\t\tconst workspace = this.items[index];\n\t\t\t\tif (workspace === void 0 || workspace.sessionIds.includes(sessionId)) return;\n\t\t\t\tconst pending = this.pendingSessionAttachments.get(workspaceId) ?? [];\n\t\t\t\tif (!pending.includes(sessionId)) this.pendingSessionAttachments.set(workspaceId, [sessionId, ...pending]);\n\t\t\t\tthis.items = this.items.map((item, position) => position === index ? { ...item, sessionIds: [sessionId, ...item.sessionIds] } : item);\n\t\t\t\tthis.invalidate();\n\t\t\t}\n\t\t\tasync delete(workspaceId) {`,
+    replace: `\t\t\tnoteSessionAttachment(workspaceId, sessionId) {\n\t\t\t\tif (this.removedIds.has(workspaceId)) return;\n\t\t\t\tconst index = this.items.findIndex((item) => item.workspaceId === workspaceId);\n\t\t\t\tconst workspace = this.items[index];\n\t\t\t\tif (workspace === void 0 || workspace.sessionIds.includes(sessionId)) return;\n\t\t\t\tconst pending = this.pendingSessionAttachments.get(workspaceId) ?? [];\n\t\t\t\tif (!pending.includes(sessionId)) this.pendingSessionAttachments.set(workspaceId, [sessionId, ...pending]);\n\t\t\t\tthis.items = this.items.map((item, position) => position === index ? { ...item, sessionIds: [sessionId, ...item.sessionIds] } : item);\n\t\t\t\tthis.invalidate();\n\t\t\t}\n\t\t\tasync delete(workspaceId) {\n\t\t\t\tconst result = await this.remote.delete({ workspaceId });`,
+  },
+  {
+    id: "workspace-model-pending-attachments-reconcile",
+    package: "@deepseek-ai/dsh-api-workspace-controller",
+    file: "lib/client.js",
+    why: "Host 确认前保留新会话关联，确认后移除叠加状态并遵循 Host 顺序。",
+    marker: `mergePendingSessionAttachments(view) {`,
+    find: `\t\t\tupsert(view) {
+\t\t\t\tif (this.removedIds.has(view.workspaceId)) return;
+\t\t\t\tconst index = this.items.findIndex((item) => item.workspaceId === view.workspaceId);
+\t\t\t\tconst installed = this.items[index];
+\t\t\t\tif (installed !== void 0 && Date.parse(view.updatedAt) < Date.parse(installed.updatedAt)) return;`,
+    replace: `\t\t\tmergePendingSessionAttachments(view) {
+\t\t\t\tconst pending = this.pendingSessionAttachments.get(view.workspaceId);
+\t\t\t\tif (pending === void 0) return view;
+\t\t\t\tconst remaining = pending.filter((sessionId) => !view.sessionIds.includes(sessionId));
+\t\t\t\tif (remaining.length === 0) this.pendingSessionAttachments.delete(view.workspaceId);
+\t\t\t\telse this.pendingSessionAttachments.set(view.workspaceId, remaining);
+\t\t\t\treturn remaining.length === 0 ? view : { ...view, sessionIds: [...remaining, ...view.sessionIds] };
+\t\t\t}
+\t\t\tupsert(view) {
+\t\t\t\tif (this.removedIds.has(view.workspaceId)) return;
+\t\t\t\tconst index = this.items.findIndex((item) => item.workspaceId === view.workspaceId);
+\t\t\t\tconst installed = this.items[index];
+\t\t\t\tif (installed !== void 0 && Date.parse(view.updatedAt) < Date.parse(installed.updatedAt)) return;
+\t\t\t\tview = this.mergePendingSessionAttachments(view);`,
+  },
+  {
+    id: "workspace-model-pending-attachments-baseline",
+    package: "@deepseek-ai/dsh-api-workspace-controller",
+    file: "lib/client.js",
+    why: "重连快照保留未确认关联，并清理已经不在 Workspace 基线中的状态。",
+    marker: `installed.set(view.workspaceId, this.mergePendingSessionAttachments(view));`,
+    find: `\t\t\t\tfor (const view of views) if (!this.removedIds.has(view.workspaceId)) installed.set(view.workspaceId, view);
+\t\t\t\tthis.items = [...installed.values()];`,
+    replace: `\t\t\t\tfor (const view of views) if (!this.removedIds.has(view.workspaceId)) installed.set(view.workspaceId, this.mergePendingSessionAttachments(view));
+\t\t\t\tfor (const workspaceId of this.pendingSessionAttachments.keys()) if (!installed.has(workspaceId)) this.pendingSessionAttachments.delete(workspaceId);
+\t\t\t\tthis.items = [...installed.values()];`,
+  },
+  {
+    id: "workspace-model-pending-attachments-remove",
+    package: "@deepseek-ai/dsh-api-workspace-controller",
+    file: "lib/client.js",
+    why: "Workspace 移除时清理待确认关联，保留原有删除墓碑与同步通知。",
+    marker: `this.removedIds.add(workspaceId);\n\t\t\t\tthis.pendingSessionAttachments.delete(workspaceId);`,
+    find: `\t\t\tremove(workspaceId, immediate = false) {
+\t\t\t\tthis.removedIds.add(workspaceId);`,
+    replace: `\t\t\tremove(workspaceId, immediate = false) {
+\t\t\t\tthis.removedIds.add(workspaceId);
+\t\t\t\tthis.pendingSessionAttachments.delete(workspaceId);`,
   },
   {
     id: "workspace-model-pending-attachments-create",
