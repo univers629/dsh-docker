@@ -260,6 +260,11 @@ function isWritable(directory) {
  * 开关一个插件。禁用写补丁层的 `disabled: true` 块（清单不动，安装记录留着）；
  * 启用时删掉该块，并把包重新挂回 dsh.profile.bundles——0.2.x 只挂载清单里的包，
  * 只删禁用块而包已移出清单时，开关显示为开，实际不会加载。
+ *
+ * 带 `dsh.bundle.patch` 的包还要第二个动作：它的 bundle 层可能覆盖官方行的
+ * inject/config（vision-router 给 connection 加了 visionRouterWebConnectionReady），
+ * 而补丁层的 disabled 只关插件自己的行、关不掉那层覆盖。禁用时把包从
+ * dsh.profile.bundles 摘掉，bundle 层因此不再被应用；启用时再挂回去。
  */
 export function setPluginEnabled(profileDir, name, enabled) {
   if (typeof name !== 'string' || name === '') throw new PluginConfigError('缺少插件名')
@@ -301,21 +306,25 @@ export function setPluginEnabled(profileDir, name, enabled) {
     writeAtomic(file, text)
   }
 
+  // 纯依赖没有 cordis.patch.yml，挂上去或摘下来都没有意义。
+  const isBundle = existsSync(join(profileDir, 'node_modules', name, 'cordis.patch.yml'))
   let mounted = false
-  if (enabled && !bundlesOf(manifest).includes(name)) {
-    // 只有真的是 bundle 的包才能挂回清单：纯依赖没有 cordis.patch.yml，挂上去
-    // 会让整棵插件树解析失败。
-    const isBundle = existsSync(join(profileDir, 'node_modules', name, 'cordis.patch.yml'))
-    if (isBundle) {
-      manifest.dsh = manifest.dsh && typeof manifest.dsh === 'object' ? manifest.dsh : {}
-      manifest.dsh.profile = manifest.dsh.profile && typeof manifest.dsh.profile === 'object' ? manifest.dsh.profile : {}
-      const bundles = bundlesOf(manifest)
-      manifest.dsh.profile.bundles = [...bundles, name]
+  let detached = false
+  if (isBundle && enabled && !bundlesOf(manifest).includes(name)) {
+    manifest.dsh = manifest.dsh && typeof manifest.dsh === 'object' ? manifest.dsh : {}
+    manifest.dsh.profile = manifest.dsh.profile && typeof manifest.dsh.profile === 'object' ? manifest.dsh.profile : {}
+    manifest.dsh.profile.bundles = [...bundlesOf(manifest), name]
+    writeManifest(profileDir, manifest, raw)
+    mounted = true
+  } else if (isBundle && !enabled) {
+    const bundles = bundlesOf(manifest)
+    if (bundles.includes(name)) {
+      manifest.dsh.profile.bundles = bundles.filter((bundle) => bundle !== name)
       writeManifest(profileDir, manifest, raw)
-      mounted = true
+      detached = true
     }
   }
-  return { name, enabled, rows: targets, changed: changed || mounted, mounted }
+  return { name, enabled, rows: targets, changed: changed || mounted || detached, mounted, detached }
 }
 
 /**

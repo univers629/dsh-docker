@@ -58,6 +58,9 @@ services:
       # 多用户模式的入口是 dsh-ingress（而不是单管理员的 dsh-authgate）：
       # 改错这个名字，按 IP 的限速会在解析失败后关闭。
       DSH_AUTH_TRUSTED_PROXIES: "${DSH_AUTH_TRUSTED_PROXIES:-dsh-ingress}"
+      # 首启写进 root 的口令；state.json 已存在时不再读取。auth 层已透传同名变量，
+      # 这里再写一次是为了让多用户叠层单独可读。
+      DSH_AUTH_INITIAL_PASSWORD: "${DSH_AUTH_INITIAL_PASSWORD:-}"
     # 多用户模式没有插件面板：每个用户是独立实例、独立 profile，网关这一侧没有
     # 「唯一那份 profile」可开关。因此摘掉 auth 层为面板加的 profile 与重启目录，
     # 只留认证状态目录。

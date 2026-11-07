@@ -33,6 +33,8 @@ GENERATED_BASIC_USER=""
 GENERATED_BASIC_PASSWORD=""
 GENERATED_ROOT_PASSWORD=""
 TARGET_DIR="${DSH_INSTALL_DIR:-dsh-docker}"
+# --dir 显式给过路径时不再改 TARGET_DIR；否则在工程目录里直接跑脚本时改用当前目录。
+TARGET_DIR_GIVEN=false
 PROMPT_RESULT=""
 PENDING_BASIC_USER="${DSH_BASIC_AUTH_USER:-}"
 PENDING_BASIC_PASSWORD="${DSH_BASIC_AUTH_PASSWORD:-}"
@@ -288,8 +290,9 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "[错误] --dir 缺少值。" >&2; exit 2; }
       shift
       TARGET_DIR="$1"
+      TARGET_DIR_GIVEN=true
       ;;
-    --dir=*) TARGET_DIR="${1#*=}" ;;
+    --dir=*) TARGET_DIR="${1#*=}"; TARGET_DIR_GIVEN=true ;;
     --help|-h)
       usage
       exit 0
@@ -1580,7 +1583,18 @@ fetch_into_existing_dir() {
   rm -f -- "$TARGET_DIR/$DELETE_KEEP_MARKER"
 }
 
+# 默认的工程目录名是相对路径，在工程目录里直接跑脚本会去找 <工程>/dsh-docker。
+# 当前目录已是一份完整工程时改用它；安装与各维护动作共用这一处判断。
+adopt_current_project() {
+  [ "$TARGET_DIR_GIVEN" = true ] && return 0
+  [ -f "$TARGET_DIR/docker-compose.yml" ] && return 0
+  if [ -f docker-compose.yml ] && [ -f Dockerfile ] && [ -f install.sh ]; then
+    TARGET_DIR="."
+  fi
+}
+
 require_project() {
+  adopt_current_project
   if [ ! -f "$TARGET_DIR/docker-compose.yml" ]; then
     echo "[错误] 未找到 $TARGET_DIR。请先在向导中选择安装。" >&2
     exit 1
@@ -1940,9 +1954,7 @@ prune_project_keep() {
 # 判断，而向导里选「卸载」要等向导跑完才知道。两条路径的清理动作必须完全一致，
 # 所以只能有一份实现。
 handle_delete_action() {
-  if [ ! -f "$TARGET_DIR/docker-compose.yml" ] && [ -f docker-compose.yml ] && [ -f Dockerfile ] && [ -f install.sh ]; then
-    TARGET_DIR="."
-  fi
+  adopt_current_project
   if [ "${DSH_DELETE_DETACHED:-}" = 1 ]; then
     trap 'rm -f -- "$0"' EXIT
   else
@@ -1975,8 +1987,7 @@ enter_project() {
 }
 
 case "$ACTION" in
-  install|configure) ;;
-  '') ;;
+  install|configure|'') adopt_current_project ;;
   delete) ;;
   *) enter_project || exit $? ;;
 esac

@@ -163,7 +163,12 @@ const previousReport = readJson(reportFile)
 const sourceHash = hashTree(source)
 const profileHashBefore = hashTree(target)
 fs.mkdirSync(path.dirname(target), { recursive: true })
-fs.cpSync(source, target, { recursive: true, force: true })
+// 目标路径上可能已经有上一版：pnpm 会把它装成符号链接、镜像种子会留下真实目录，
+// 直接 cpSync 到已存在的路径会抛 ERR_FS_CP_EEXIST 并以非零码退出，所以整目录替换。
+if (!replaceTreeInto(source, target)) {
+  process.stderr.write(`[dsh][warn] ${target} holds something other than dsh-docker-control; the profile copy was left untouched\n`)
+  process.exit(0)
+}
 const profileHashAfter = hashTree(target)
 
 const sourceChanged = typeof previousReport?.sourceHash === 'string' && previousReport.sourceHash !== sourceHash

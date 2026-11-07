@@ -315,10 +315,19 @@ export const artifactPatches = [
     // requestAudience(headers, secure)（secure 时返回带 scheme 的 origin，
     // 否则 host），isAuthenticated 与 sessionCookie 都多了 secure 参数。
     //
-    // marker 取 "res.setHeader("：新形态独有，且上游产物里 0 次出现，
+    // marker 取 header( 调用的写法：新形态独有，且上游产物里 0 次出现，
     // 所以旧补丁打过的树不会被误判成「已生效」而静默跳过。
-    marker: `res.setHeader(`,
+    //
+    // 取值必须走产物自带的 header(headers, name)：这条路径传进来的 req 是
+    // Fetch 风格 Request，headers 是 Headers 实例，按对象下标取值恒为
+    // undefined，分支永不成立。
+    marker: `header(req.headers, "x-dsh-trusted-proxy") === "1"`,
     find: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length > 0) {`,
-    replace: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && req.headers["x-dsh-trusted-proxy"] === "1" && !this.isAuthenticated(req, secure)) {\n\t\t\tconst authority = requestAudience(req.headers, secure);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.setHeader("set-cookie", sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3), secure));\n\t\t\t\tres.setHeader("cache-control", "no-store");\n\t\t\t\treturn true;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
+    replace: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && header(req.headers, "x-dsh-trusted-proxy") === "1" && !this.isAuthenticated(req, secure)) {\n\t\t\tconst authority = requestAudience(req.headers, secure);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.setHeader("set-cookie", sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3), secure));\n\t\t\t\tres.setHeader("cache-control", "no-store");\n\t\t\t\treturn true;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
+    alternatives: [{
+      marker: `header(req.headers, "x-dsh-trusted-proxy") === "1"`,
+      find: `\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && req.headers["x-dsh-trusted-proxy"] === "1" && !this.isAuthenticated(req, secure)) {`,
+      replace: `\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && header(req.headers, "x-dsh-trusted-proxy") === "1" && !this.isAuthenticated(req, secure)) {`,
+    }],
   },
 ]

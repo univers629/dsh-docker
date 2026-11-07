@@ -35,6 +35,9 @@ services:
       DSH_AUTH_STATE: "/data/auth/state.json"
       DSH_AUTH_TOTP_KEY: "/data/auth/totp.key"
       DSH_AUTH_WEB_DIR: "/usr/local/lib/dsh/dsh-auth-web"
+      # 首启写进 root 的口令；state.json 已存在时不再读取。未设置时随机生成，
+      # 明文落 /data/auth/initial-password（0600）。
+      DSH_AUTH_INITIAL_PASSWORD: "${DSH_AUTH_INITIAL_PASSWORD:-}"
       # 网关前面那一跳的名字。单管理员模式是 dsh-authgate；多用户模式的入口是
       # dsh-ingress，由 docker-compose.multiuser.yml 覆写。只有对端地址属于这个
       # 列表时才采信 x-real-ip / x-forwarded-for；解析不到会让按 IP 的限速整个
