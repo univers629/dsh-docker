@@ -292,42 +292,39 @@ export const artifactPatches = [
     package: "@deepseek-ai/dsh-client-connection",
     file: "lib/index.js",
     why: "外层（Cloudflare Access / VPN / Basic Auth / local）已经完成认证时，由项目反代断言「这个请求已被放行」，DSH 据此在自己的响应里种下浏览器会话 cookie，免除人工取 token。",
-    // 设计要点：**不重定向**。
+    // 种 cookie 只能落在拒绝路径上。
     //
-    // 上游 ?token= 流程要 303 回 "/"，唯一理由是必须把地址栏里那一串洗掉 ——
-    // 凭证来自 URL，所以得再发一次「干净」请求。而这条路的凭证来自请求头，
-    // URL 里没有任何秘密可洗。照抄那次 303 的唯一后果，是把「种 cookie」和
-    // 「跳转」耦合成了死循环的唯一来源：只要浏览器没把 cookie 送回来
-    // （跨站导航链、隐私设置、扩展……），就会无限 303 打回 "/"，也就是
-    // ERR_TOO_MANY_REDIRECTS。
+    // 这条路上的 res 不是 Node 的 ServerResponse，而是
+    // @deepseek-ai/dsh-host-frontend-static 造的最小 shim，只有
+    // writeHead(status, headers) 与 end(text)。authorizeIndex 返回 true 时，
+    // 调用方用自己的 { "content-type": ... } 发首页，shim 上写过的头全部丢弃；
+    // setHeader 在 shim 上不存在，直接调用会抛异常。
     //
-    // 正确做法是利用 authorizeIndex 已有的契约：它在 dist 的
-    // res.writeHead(200, ...) 之前执行，返回 true 即「调用方可以发首页」。
-    // 所以 setHeader 种 cookie 后直接 return true —— 同一个响应既种 cookie
-    // 又给首页。没有重定向，这个错误在结构上不可能出现，与接入方式和浏览器
-    // 策略都无关，也不需要一次性标记之类的兜底。
+    // 因此形态与上游 ?token= 一致：writeHead(303, { location: "./", set-cookie })
+    // + end() + return false。差别只在凭证来源是请求头而非查询串，
+    // 303 的作用是让浏览器带着刚种下的 cookie 重发一次首页请求。
     //
-    // 顺带两点：可以用回上游自己的 sessionCookie()，因此保留它的
-    // SameSite=Strict（不必为了绕开 cookie 往返而放宽成 Lax）；并显式带
-    // no-store —— 种 cookie 的响应绝不能进任何共享缓存。
+    // cookie 用上游自己的 sessionCookie()，保留 SameSite=Strict 与 Secure
+    // 跟随监听协议的语义；响应带 no-store，种 cookie 的 303 不进任何缓存。
     //
     // 签名跟随上游：requestAuthority(headers) 已改为
     // requestAudience(headers, secure)（secure 时返回带 scheme 的 origin，
     // 否则 host），isAuthenticated 与 sessionCookie 都多了 secure 参数。
     //
-    // marker 取 header( 调用的写法：新形态独有，且上游产物里 0 次出现，
-    // 所以旧补丁打过的树不会被误判成「已生效」而静默跳过。
-    //
     // 取值必须走产物自带的 header(headers, name)：这条路径传进来的 req 是
     // Fetch 风格 Request，headers 是 Headers 实例，按对象下标取值恒为
     // undefined，分支永不成立。
-    marker: `header(req.headers, "x-dsh-trusted-proxy") === "1"`,
+    // marker 取这段拒绝路径独有的收尾：上游 token 流程虽然也是 writeHead(303,
+    // { location: "./", set-cookie })，但后面直接 return false，不跟
+    // 「} } if (tokens.length > 0) {」。旧补丁形态（setHeader + return true）
+    // 也不匹配，因此会被 alternatives 修好而不是误判为「已生效」。
+    marker: `res.end();\n\t\t\t\treturn false;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
     find: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length > 0) {`,
-    replace: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && header(req.headers, "x-dsh-trusted-proxy") === "1" && !this.isAuthenticated(req, secure)) {\n\t\t\tconst authority = requestAudience(req.headers, secure);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.setHeader("set-cookie", sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3), secure));\n\t\t\t\tres.setHeader("cache-control", "no-store");\n\t\t\t\treturn true;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
+    replace: `\t\tconst tokens = url.searchParams.getAll(TOKEN_QUERY);\n\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && header(req.headers, "x-dsh-trusted-proxy") === "1" && !this.isAuthenticated(req, secure)) {\n\t\t\tconst authority = requestAudience(req.headers, secure);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.writeHead(303, {\n\t\t\t\t\t"cache-control": "no-store",\n\t\t\t\t\t"location": "./",\n\t\t\t\t\t"referrer-policy": "no-referrer",\n\t\t\t\t\t"set-cookie": sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3), secure)\n\t\t\t\t});\n\t\t\t\tres.end();\n\t\t\t\treturn false;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
     alternatives: [{
-      marker: `header(req.headers, "x-dsh-trusted-proxy") === "1"`,
-      find: `\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && req.headers["x-dsh-trusted-proxy"] === "1" && !this.isAuthenticated(req, secure)) {`,
-      replace: `\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && header(req.headers, "x-dsh-trusted-proxy") === "1" && !this.isAuthenticated(req, secure)) {`,
+      marker: `res.end();\n\t\t\t\treturn false;\n\t\t\t}\n\t\t}\n\t\tif (tokens.length > 0) {`,
+      find: `\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && header(req.headers, "x-dsh-trusted-proxy") === "1" && !this.isAuthenticated(req, secure)) {\n\t\t\tconst authority = requestAudience(req.headers, secure);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.setHeader("set-cookie", sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3), secure));\n\t\t\t\tres.setHeader("cache-control", "no-store");\n\t\t\t\treturn true;\n\t\t\t}\n\t\t}`,
+      replace: `\t\tif (tokens.length === 0 && req.method === "GET" && url.pathname === "/" && header(req.headers, "x-dsh-trusted-proxy") === "1" && !this.isAuthenticated(req, secure)) {\n\t\t\tconst authority = requestAudience(req.headers, secure);\n\t\t\tif (authority !== void 0) {\n\t\t\t\tconst issuedAt = Date.now();\n\t\t\t\tconst expiresAt = issuedAt + this.maxAgeMilliseconds;\n\t\t\t\tconst value = encodeCookie({ version: COOKIE_PAYLOAD_VERSION, authority, issuedAt, expiresAt }, this.secret);\n\t\t\t\tres.writeHead(303, {\n\t\t\t\t\t"cache-control": "no-store",\n\t\t\t\t\t"location": "./",\n\t\t\t\t\t"referrer-policy": "no-referrer",\n\t\t\t\t\t"set-cookie": sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1e3), secure)\n\t\t\t\t});\n\t\t\t\tres.end();\n\t\t\t\treturn false;\n\t\t\t}\n\t\t}`,
     }],
   },
 ]

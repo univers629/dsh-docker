@@ -32,30 +32,38 @@ for (const patch of artifactPatches) {
   assert.ok(!patch.file.startsWith('/') && !patch.file.includes('..'), `${patch.id}: file must be package-relative`)
 }
 
-// 反代自动登录必须是「同一个响应里既种 cookie 又返回首页」，而不是「种 cookie
-// 之后 303 打回 /」。后者把「发 cookie」和「跳转」耦合在一起：只要浏览器没把
-// cookie 送回来（跨站导航链、隐私设置、扩展、时钟偏差……），就会无限 303，
-// 也就是 ERR_TOO_MANY_REDIRECTS。上游的 ?token= 流程要 303 是因为凭证在 URL
-// 里、必须洗掉地址栏；这条路的凭证在请求头里，URL 里没有秘密可洗，那次跳转
-// 纯属照抄，去掉它才让这个错误在结构上不可能出现。这条断言把该决定钉住。
+// 反代自动登录只能落在 authorizeIndex 的拒绝路径上：这条路上的 res 是
+// @deepseek-ai/dsh-host-frontend-static 造的最小 shim，只有 writeHead 与 end。
+// authorizeIndex 返回 true 时调用方用自己的 content-type 发首页，shim 上写过的
+// 头全部丢弃，setHeader 在 shim 上也不存在。形态因此与上游 ?token= 一致：
+// writeHead(303, { location: "./", set-cookie }) + end() + return false，
+// 由浏览器带着刚种下的 cookie 重发一次首页请求。这条断言把该形态钉住。
 const trustedProxy = artifactPatches.find((patch) => patch.id === 'trusted-proxy-auto-browser-auth')
 assert.ok(trustedProxy, 'trusted-proxy-auto-browser-auth patch is missing')
 assert.ok(
-  trustedProxy.replace.includes('res.setHeader("set-cookie"'),
-  'trusted-proxy 分支必须在响应头里种 cookie，由调用方在同一个响应里发首页',
+  trustedProxy.replace.includes('res.writeHead(303, {'),
+  'trusted-proxy 分支必须在 shim 上 writeHead 303',
 )
 assert.ok(
-  trustedProxy.replace.includes('return true;'),
-  'trusted-proxy 分支必须 return true，让调用方直接返回首页',
+  trustedProxy.replace.includes('"set-cookie": sessionCookie(cookieName(authority)'),
+  'trusted-proxy 分支必须在这个 303 上种浏览器会话 cookie',
 )
 assert.ok(
-  !/writeHead\(\s*3\d\d/.test(trustedProxy.replace) && !trustedProxy.replace.includes('"location"'),
-  'trusted-proxy 分支不得重定向：没有重定向，ERR_TOO_MANY_REDIRECTS 才在结构上不可能出现',
+  trustedProxy.replace.includes('"location": "./"'),
+  'trusted-proxy 分支的 303 必须回到首页',
+)
+assert.ok(
+  trustedProxy.replace.includes('res.end();') && trustedProxy.replace.includes('return false;'),
+  'trusted-proxy 分支必须结束响应并把所有权交回调用方',
+)
+assert.ok(
+  !trustedProxy.replace.includes('res.setHeader(') && !trustedProxy.replace.includes('return true;'),
+  'shim 上没有 setHeader；返回 true 时写的响应头会被调用方丢弃',
 )
 assert.ok(
   !trustedProxy.replace.includes('dsh-proxy-auth')
   && !trustedProxy.replace.includes('SameSite=Lax'),
-  'trusted-proxy 分支不得再引入一次性标记或放宽 SameSite（去掉重定向后两者都不需要）',
+  'trusted-proxy 分支不得引入一次性标记或放宽 SameSite',
 )
 
 const run = (moduleRoot, ...args) => spawnSync(process.execPath, [applier, moduleRoot, ...args], {
