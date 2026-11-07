@@ -413,6 +413,17 @@
     font-family: inherit; font-size: 13px; cursor: pointer;
   }
 
+  /* 页头与卡片底部的操作按钮：与表单主按钮同一套边框和配色，
+     尺寸按行内文字收紧，避免在页头出现 50px 高的按钮。 */
+  .head-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .head-actions .button,
+  .auth-actions .button {
+    height: auto; padding: 6px 13px; border-radius: 9px;
+    font-size: 12.5px; font-weight: 500; line-height: 1.45;
+  }
+  .head-actions .button--primary,
+  .auth-actions .button--primary { box-shadow: 0 6px 16px rgba(57, 100, 254, 0.24); }
+
   .auth-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; }
   .auth-actions--stack { flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; max-width: 100%; }
   .auth-actions--stack > * { max-width: 100%; }
@@ -488,3 +499,81 @@
 .captcha-slot { display: flex; flex-direction: column; gap: 8px; }
 .captcha-slot__hint { font-size: 12px; color: var(--muted); line-height: 1.6; }
 .captcha-slot iframe { border-radius: 8px; }
+
+/* ===== 插件开关页：沿用登录卡片的玻璃材质与圆角，宽度放宽以容纳列表 ===== */
+#plugins-panel .plugins-card {
+  position: relative;
+  z-index: 1;
+  padding: 20px 24px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  /* 顶部一层品牌色渐变 + 外层一圈同色投影，与登录卡片的悬浮感一致 */
+  background: linear-gradient(180deg, color-mix(in srgb, var(--brand) 9%, transparent), transparent 150px), var(--surface);
+  backdrop-filter: blur(22px) saturate(140%);
+  box-shadow: var(--shadow), 0 22px 70px color-mix(in srgb, var(--brand) 15%, transparent);
+}
+#plugins-panel .plugins-card .inline-alert { margin: 16px 0 0; }
+#plugins-panel .plugins-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 10px;
+  margin: 0 -10px;
+  border-top: 1px solid var(--border);
+  border-radius: 14px;
+  transition: background .2s var(--ease-out);
+}
+#plugins-panel .plugins-row:first-child { border-top: 0; }
+#plugins-panel .plugins-row:hover { background: var(--surface-2); }
+#plugins-panel .plugins-row__main { display: grid; gap: 4px; min-width: 0; flex: 1 1 auto; }
+#plugins-panel .plugins-row__name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 14.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+#plugins-panel .plugins-row__name .plugins-row__meta { margin-left: 0; font-weight: 400; }
+#plugins-panel .plugins-row__meta { color: var(--muted); font-size: 12.5px; line-height: 1.6; overflow-wrap: anywhere; }
+#plugins-panel .plugins-row__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border: 1px solid color-mix(in srgb, var(--brand) 34%, transparent);
+  border-radius: 999px;
+  color: var(--brand-bright);
+  background: var(--brand-soft);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+#plugins-panel .plugins-row__badge--off {
+  border-color: var(--border);
+  color: var(--muted);
+  background: var(--surface-2);
+}
+#plugins-panel .plugins-row__badge--locked {
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+#plugins-panel .plugins-row .button { flex: 0 0 auto; }
+#plugins-panel .plugins-toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+#plugins-panel .plugins-toolbar .button { flex: 0 0 auto; }
+
+/* 列表与工具栏的按钮沿用登录表单的配色，但尺寸按文字行高收紧：
+   登录页那套 50px 固定高度会把每一行撑成两倍行高，比例也不对。 */
+#plugins-panel .button {
+  height: auto;
+  min-height: 0;
+  padding: 5px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+#plugins-panel .button--primary { box-shadow: 0 4px 12px rgba(57, 100, 254, 0.24); }
+#plugins-panel .plugins-row .button { padding: 4px 11px; font-size: 12px; }
+#plugins-panel .plugins-toolbar .button { padding: 6px 13px; font-size: 12.5px; }

@@ -113,7 +113,7 @@ DSH 自身不提供登录认证，安装器默认把 3080 绑定到 `127.0.0.1`�
 把 `.env` 的 `DSH_ACCESS_MODE` 改成 `password`、`DSH_MULTI_USER=off`，再跑一次 `./install.sh upgrade -y --dir .`，入口就换成登录页（`dsh-auth` + `dsh-authgate` 两个容器，对外端口不变）。首次启动的口令取自 `DSH_AUTH_INITIAL_PASSWORD`；没设时随机生成并写进 `data/auth/initial-password`（0600）。
 
 - **找回口令**：`docker exec -u 1000 dsh-auth node /usr/local/lib/dsh/dsh-auth.mjs --reset-password` 会按口令策略生成新口令、递增 `authVersion` 让旧会话全部失效、把明文写到 `data/auth/reset-password`（0600）。登录页底部也有这条命令的提示。
-- **插件开关面板**：登录后、进入工作台之前可以打开 `/plugins`（账户页也有入口）。它直接读写 `data/dsh/profiles/web` 的补丁层与 `dsh.profile.bundles`，不经过 DSH 进程——插件把启动搞崩、工作台只剩 503 时，这是唯一还能改配置的地方。面板提供逐项开关、「安全模式」（停用全部第三方插件）与「重启工作台」（由容器内 Supervisor 执行）。
+- **插件开关面板**：登录后、进入工作台之前可以打开 `/plugins`（账户页也有入口）。它直接读写 `data/dsh/profiles/web` 的补丁层与 `dsh.profile.bundles`，不经过 DSH 进程——插件把启动搞崩、工作台只剩 503 时，这是唯一还能改配置的地方。面板提供逐项开关、「禁用第三方插件」（一次性停用全部第三方插件）与「重启工作台」（由容器内 Supervisor 执行）。
 - **可信代理**：`DSH_AUTH_TRUSTED_PROXIES` 默认已是 `dsh-authgate`。只有对端地址属于这个列表时才采信 `x-real-ip` / `x-forwarded-for`；解析不到会让按 IP 的登录限速在重试 30 秒后整个关闭，只剩按账户的桶。改名入口容器时才需要改它。
 
 ### 多用户模式

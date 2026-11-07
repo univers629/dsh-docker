@@ -9,7 +9,6 @@
 
   const I18N = {
     zh: {
-      loading: '正在读取 profile…',
       enabled: '已启用',
       disabled: '已禁用',
       fixedOn: '启用',
@@ -18,13 +17,11 @@
       reasonMissing: '没有加载行：客户端插件，开关在 profile 之外',
       reasonOfficial: '官方组件，随镜像提供',
       reasonManaged: '市场自管行，改这里会被覆盖',
-      safeMode: '安全模式：禁用所有第三方插件',
+      safeMode: '禁用第三方插件',
       safeModeDone: '已禁用 {count} 个第三方插件',
       restart: '重启工作台',
       restartDone: '已请求重启，Supervisor 会在几秒内重新拉起 DSH',
       refresh: '刷新',
-      profile: 'profile：{path}',
-      patch: '补丁层：{file}',
       readOnly: '补丁层不可写，请检查 data/dsh 的挂载与属主',
       empty: '这个 profile 里没有可开关的插件',
       failed: '操作失败：{message}',
@@ -32,7 +29,6 @@
       restartPending: '已请求重启，等待 Supervisor 拉起',
     },
     en: {
-      loading: 'Reading the profile…',
       enabled: 'Enabled',
       disabled: 'Disabled',
       fixedOn: 'Enable',
@@ -41,13 +37,11 @@
       reasonMissing: 'No loader entry: client-side plugin, switched elsewhere',
       reasonOfficial: 'Shipped with the image',
       reasonManaged: 'Managed by the market, edits here get overwritten',
-      safeMode: 'Safe mode: disable all third-party plugins',
+      safeMode: 'Disable third-party plugins',
       safeModeDone: 'Disabled {count} third-party plugins',
       restart: 'Restart workspace',
       restartDone: 'Restart requested; the supervisor will bring DSH back shortly',
       refresh: 'Refresh',
-      profile: 'profile: {path}',
-      patch: 'patch layer: {file}',
       readOnly: 'The patch layer is not writable; check the data/dsh mount and its owner',
       empty: 'No switchable plugins in this profile',
       failed: 'Failed: {message}',
@@ -77,27 +71,8 @@
       let state = null
       let busy = false
 
-      const style = document.createElement('style')
-      style.textContent = `
-        .plugins-card { position: relative; z-index: 2; border-radius: 16px; padding: 18px 20px; background: color-mix(in oklab, var(--card, #111) 88%, transparent); border: 1px solid color-mix(in oklab, var(--border, #2a2f3d) 80%, transparent); }
-        .plugins-card + .plugins-card { margin-top: 14px; }
-        .plugins-meta { font-size: 12.5px; color: var(--muted); line-height: 1.7; word-break: break-all; }
-        .plugins-toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
-        .plugins-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-top: 1px solid color-mix(in oklab, var(--border, #2a2f3d) 60%, transparent); }
-        .plugins-row:first-of-type { border-top: 0; }
-        .plugins-row__main { min-width: 0; }
-        .plugins-row__name { font-weight: 600; font-size: 14px; word-break: break-all; }
-        .plugins-row__meta { font-size: 12px; color: var(--muted); margin-top: 3px; word-break: break-all; }
-        .plugins-row__badge { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 500; background: color-mix(in oklab, var(--accent, #4a7) 16%, transparent); }
-        .plugins-row__badge--off { background: color-mix(in oklab, var(--muted, #888) 20%, transparent); }
-        .plugins-row__badge--locked { background: color-mix(in oklab, var(--danger, #d55) 16%, transparent); }
-      `
-      root.appendChild(style)
-
       const card = document.createElement('div')
       card.className = 'plugins-card'
-      const meta = document.createElement('div')
-      meta.className = 'plugins-meta'
       const alert = document.createElement('div')
       alert.className = 'inline-alert inline-alert--danger'
       alert.style.display = 'none'
@@ -105,7 +80,7 @@
       list.style.marginTop = '10px'
       const toolbar = document.createElement('div')
       toolbar.className = 'plugins-toolbar'
-      card.append(meta, alert, list, toolbar)
+      card.append(alert, list, toolbar)
       root.appendChild(card)
 
       function setError(message) {
@@ -121,7 +96,7 @@
 
       function button(label, kind, onClick, disabled = false) {
         const el = document.createElement('button')
-        el.className = kind === 'primary' ? 'button button--primary' : kind === 'danger' ? 'button button--secondary' : 'button--link'
+        el.className = kind === 'primary' ? 'button button--primary' : 'button button--secondary'
         el.type = 'button'
         el.textContent = label
         el.disabled = disabled || busy
@@ -130,9 +105,6 @@
       }
 
       function render() {
-        meta.textContent = state
-          ? `${t('profile', { path: state.profile })} · ${t('patch', { file: state.patch })}`
-          : t('loading')
         list.replaceChildren()
         toolbar.replaceChildren()
 
