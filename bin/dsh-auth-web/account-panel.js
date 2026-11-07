@@ -12,6 +12,8 @@
 // 调用：window.DSHAccountPanel.mount(container, { lang, onSignOut })
 ;(() => {
   const CSRF_COOKIE = 'dsh_auth_csrf'
+  // HTTPS 下服务端签发的 CSRF 双提交 Cookie 带 __Host- 前缀，两种名字都要认。
+  const HOST_CSRF_COOKIE = '__Host-' + CSRF_COOKIE
   const STYLE_ID = 'dsh-account-panel-style'
 
   const CSS = `
@@ -306,7 +308,7 @@
     const t = (key) => I18N[lang][key] ?? I18N.en[key] ?? key
     const fill = (key, values) => Object.entries(values).reduce((text, [name, value]) => text.replace(`{${name}}`, String(value)), t(key))
 
-    let csrf = readCookie(CSRF_COOKIE)
+    let csrf = readCookie(HOST_CSRF_COOKIE) || readCookie(CSRF_COOKIE)
     let user = null
     let capabilities = {}
     let sessions = []
@@ -808,7 +810,7 @@
       capabilities = status.ok ? status.body : {}
       sessions = sessionList.ok ? (sessionList.body.sessions || []) : []
       passkeys = passkeyList.ok ? (passkeyList.body.passkeys || []) : []
-      csrf = readCookie(CSRF_COOKIE) || csrf
+      csrf = readCookie(HOST_CSRF_COOKIE) || readCookie(CSRF_COOKIE) || csrf
       const passkeyEnabled = capabilities.passkeyAvailable === true
       passkey.fields.style.display = passkeyEnabled ? '' : 'none'
       passkey.actions.style.display = passkeyEnabled ? '' : 'none'

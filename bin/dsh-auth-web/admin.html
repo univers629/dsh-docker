@@ -1231,7 +1231,7 @@ $('captcha-save').addEventListener('click', () => { void saveCaptcha() })
     const session = await api('/api/auth/session', { method: 'GET' })
     if (!session.response.ok) { window.location.replace('/login?redirect=/admin'); return }
     if (session.body.user?.role !== 'root') { error(t('admin.error.forbidden')); return }
-    const match = document.cookie.match(/(?:^|;\s*)dsh_auth_csrf=([^;]*)/)
+    const match = document.cookie.match(/(?:^|;\s*)(?:__Host-)?dsh_auth_csrf=([^;]*)/)
     csrfToken = match ? decodeURIComponent(match[1]) : ''
     applyLang()
     // 用户列表与注册策略一起加载：注册开关就在用户标签页底部，首屏要直接可见

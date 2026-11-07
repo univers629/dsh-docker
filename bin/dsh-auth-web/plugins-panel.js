@@ -6,6 +6,8 @@
  */
 (() => {
   const CSRF_COOKIE = 'dsh_auth_csrf'
+  // HTTPS 下服务端签发的 CSRF 双提交 Cookie 带 __Host- 前缀，两种名字都要认。
+  const HOST_CSRF_COOKIE = '__Host-' + CSRF_COOKIE
 
   const I18N = {
     zh: {
@@ -192,7 +194,7 @@
 
       async function call(path, body) {
         const headers = { 'content-type': 'application/json' }
-        const csrf = readCookie(CSRF_COOKIE)
+        const csrf = readCookie(HOST_CSRF_COOKIE) || readCookie(CSRF_COOKIE)
         if (csrf) headers['x-csrf-token'] = csrf
         const response = await fetch(path, {
           method: body === undefined ? 'GET' : 'POST',
