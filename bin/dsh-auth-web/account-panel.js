@@ -57,23 +57,24 @@
     .ap-recovery .ap-codes span { padding: 8px 10px; font-size: 12.5px; letter-spacing: .06em; user-select: all; }
     .ap-ack { display: flex; align-items: center; gap: 9px; font-size: 12.5px; cursor: pointer; padding: 5px 8px; margin: 0 -5px; border-radius: 8px; transition: background 150ms var(--ease-out, ease-out); }
     .ap-ack:hover { background: color-mix(in srgb, currentColor 7%, transparent); }
-    .ap-ack input { position: absolute; opacity: 0; width: 19px; height: 19px; margin: 0; cursor: pointer; }
-    /* 自绘复选框：与 app.css 的 .check 同一视觉语言（面板样式自带，不依赖宿主 CSS） */
-    .ap-ack input::before {
-      content: ""; display: block; width: 19px; height: 19px;
-      border-radius: 6px; background: transparent;
-      border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+    .ap-ack { position: relative; }
+    .ap-ack input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+    /* 复选框外观画在同级的 .ap-ack-box 上：input 是替换元素，伪元素不会被渲染 */
+    .ap-ack-box {
+      flex: none; position: relative; width: 19px; height: 19px; box-sizing: border-box;
+      border-radius: 6px; border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
       transition: background 150ms var(--ease-out, ease-out), border-color 150ms var(--ease-out, ease-out);
     }
-    .ap-ack input::after {
-      content: ""; position: absolute; left: 5px; top: 5.5px;
+    .ap-ack-box::after {
+      content: ""; position: absolute; left: 5px; top: 3px;
       width: 5px; height: 9px;
       border-right: 2px solid #fff; border-bottom: 2px solid #fff;
       transform: rotate(45deg) scale(0);
       transition: transform 150ms var(--ease-out, ease-out);
     }
-    .ap-ack input:checked::before { background: var(--brand, #4d6bfe); border-color: var(--brand, #4d6bfe); }
-    .ap-ack input:checked::after { transform: rotate(45deg) scale(1); }
+    .ap-ack input:checked + .ap-ack-box { background: var(--brand, #4d6bfe); border-color: var(--brand, #4d6bfe); }
+    .ap-ack input:checked + .ap-ack-box::after { transform: rotate(45deg) scale(1); }
+    .ap-ack input:focus-visible + .ap-ack-box { outline: 2px solid var(--brand, #4d6bfe); outline-offset: 2px; }
     .ap-copy-state { font-size: 11.5px; opacity: .7; }
     .ap-codes span { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; padding: 5px 7px; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 7px; text-align: center; }
     .ap-note { font-size: 12px; line-height: 1.6; }
@@ -420,8 +421,9 @@
     recovery.appendChild(recoveryGrid)
     const recoveryAck = el('input'); recoveryAck.type = 'checkbox'
     const recoveryAckLabel = el('label', 'ap-ack')
+    const recoveryAckBox = el('span', 'ap-ack-box')
     const recoveryAckText = el('span', null, t('recovery.ack'))
-    recoveryAckLabel.append(recoveryAck, recoveryAckText)
+    recoveryAckLabel.append(recoveryAck, recoveryAckBox, recoveryAckText)
     recovery.appendChild(recoveryAckLabel)
     const recoveryActions = el('div', 'ap-actions')
     // 「完成」不再只是收起这一块：它是唯一会真正启用两步验证的动作，
