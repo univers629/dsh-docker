@@ -48,6 +48,12 @@ services:
       DSH_MODEL_BROKER: "${DSH_MODEL_BROKER:-off}"
       DSH_MODEL_BROKER_BASE: "${DSH_MODEL_BROKER_BASE:-http://dsh-key-broker:8080}"
       DSH_EGRESS_MODE: "${DSH_EGRESS_MODE:-open}"
+      # 侧边栏浏览器（镜像内预装 Chromium + Xvfb + x11vnc）。默认不自动启动：
+      # 一块 1280x800 的桌面占用数百 MB 内存。
+      DSH_BROWSER_PANEL_AUTOSTART: "${DSH_BROWSER_PANEL_AUTOSTART:-0}"
+      DSH_BROWSER_PANEL_IDLE_MINUTES: "${DSH_BROWSER_PANEL_IDLE_MINUTES:-30}"
+      DSH_BROWSER_WIDTH: "${DSH_BROWSER_WIDTH:-1280}"
+      DSH_BROWSER_HEIGHT: "${DSH_BROWSER_HEIGHT:-800}"
       NODE_PATH: "/app/dsh/node_modules:/data/dsh/profiles/node_modules"
     volumes:
       - ./data/dsh:/data/dsh

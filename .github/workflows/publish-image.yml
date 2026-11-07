@@ -170,6 +170,7 @@ jobs:
             const boot = JSON.parse(bootMatch[1]);
             ensure(boot.release?.version === process.env.DSH_CI_VERSION, 'the boot graph must identify the built release');
             ensure(Array.isArray(boot.entries) && boot.entries.some(entry => entry.id === 'dsh-docker-control'), 'docker-control must be in the client graph');
+            ensure(boot.entries.some(entry => entry.id === 'dsh-browser-panel'), 'the browser panel must be in the client graph');
             phase = 'core frontend assets';
             const entryScript = html.match(/<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/i);
             ensure(entryScript, 'the core must serve its frontend entry');
@@ -188,7 +189,13 @@ jobs:
             ensure(status.status === 200, 'the plugin must answer on the direct core listener');
             const body = await status.json();
             ensure(body.ok === true && typeof body.boot === 'string' && body.boot.length > 0, 'the plugin must return its real boot identity');
-            console.log('image health: Nginx 204; authenticated DSH index, boot graph, assets and docker-control status: ok');
+            phase = 'browser panel status';
+            const panel = await request(`${origin}/dsh-browser-panel/status`, options);
+            ensure(panel.status === 200, 'the browser panel must answer on the direct core listener');
+            const panelBody = await panel.json();
+            ensure(panelBody.state === 'stopped' && panelBody.ports?.rfb === 5900 && panelBody.ports?.cdp === 9222, 'the browser panel must report its idle state and ports');
+            ensure(panelBody.novnc !== false, 'the image must ship noVNC');
+            console.log('image health: Nginx 204; authenticated DSH index, boot graph, assets, docker-control status and browser panel status: ok');
           } catch {
             console.error(`image health not ready: ${phase}`);
             process.exitCode = 1;

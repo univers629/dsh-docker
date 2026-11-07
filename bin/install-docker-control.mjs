@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -193,14 +194,57 @@ writeReport({
   profileTampered,
 })
 
+// 上面那份直接写进 profile 的 node_modules，而 pnpm 重算 node_modules 时只保留依赖图
+// 里的包：任何一次 pnpm add/install（在面板里安装插件即触发）都会移除这个目录，bundles
+// 里那条记录于是指向一个没有对应依赖的不存在目录。dsh-app-boot 的 resolveBundleDir 只查
+// node_modules 里是否存在该目录、不读 package.json 的声明，因此启动校验失败、安装事务
+// 回滚，返回"更新失败：… bundle package is not installed"。
+//
+// 把它登记成一条 file: 依赖后，pnpm 每次重算都会把它放回来；file: 指回数据目录，
+// 因此"改 /data/dsh/docker-control 再重启"这条机制保持不变。
+function ensureBundleDependency(manifest) {
+  const spec = `file:${source}`
+  const dependencies = manifest.dependencies ?? (manifest.dependencies = {})
+  if (dependencies['dsh-docker-control'] === spec) return false
+  dependencies['dsh-docker-control'] = spec
+  return true
+}
+
+// 面板的回滚与修复走 `pnpm install --frozen-lockfile`，package.json 改变而锁文件未跟进会
+// 返回 ERR_PNPM_OUTDATED_LOCKFILE。锁文件存在时顺带对齐；没有 pnpm、离线或超时只记录一条
+// 告警：下一次真正的安装同样会重写锁文件，不能因此阻塞容器启动。
+function refreshLockfile() {
+  const lockfile = path.join(profile, 'pnpm-lock.yaml')
+  if (!fs.existsSync(lockfile)) return
+  try {
+    if (fs.readFileSync(lockfile, 'utf8').includes('dsh-docker-control')) return
+  } catch { return }
+  const result = spawnSync(process.env.DSH_PNPM_BIN ?? 'pnpm',
+    ['install', '--lockfile-only', '--ignore-scripts'],
+    { cwd: profile, encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] })
+  if (result.error !== undefined || result.status !== 0) {
+    const detail = (result.error?.message ?? result.stderr ?? '').trim().split('\n').at(-1)
+    process.stderr.write(`[dsh][warn] could not refresh ${lockfile} for the built-in plugin (${detail === undefined || detail === '' ? `exit ${result.status}` : detail}); the next plugin install will do it\n`)
+  }
+}
+
 try {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
   const bundles = manifest.dsh?.profile?.bundles
   if (!Array.isArray(bundles)) process.exit(0)
+  let changed = false
   if (!bundles.includes('dsh-docker-control')) {
     manifest.dsh.profile.bundles = [...bundles, 'dsh-docker-control']
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+    changed = true
     process.stderr.write('[dsh] enabled built-in Docker control plugin\n')
+  }
+  if (ensureBundleDependency(manifest)) {
+    changed = true
+    process.stderr.write('[dsh] registered dsh-docker-control as a profile dependency\n')
+  }
+  if (changed) {
+    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+    refreshLockfile()
   }
 } catch {
   process.stderr.write('[dsh] Docker control plugin could not update the web profile\n')

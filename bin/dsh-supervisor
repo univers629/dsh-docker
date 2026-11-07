@@ -189,6 +189,8 @@ prepare_dsh() {
   [ ! -x /usr/local/bin/cleanup-dsh-plugin-transactions ] || run_stage "prepare-cleanup-transactions" run_unprivileged /usr/local/bin/cleanup-dsh-plugin-transactions
   [ ! -f /usr/local/bin/prepare-profile-modules.mjs ] || run_stage "prepare-profile-modules" run_unprivileged node /usr/local/bin/prepare-profile-modules.mjs
   [ ! -f /usr/local/bin/install-docker-control.mjs ] || run_stage "prepare-install-docker-control" run_unprivileged node /usr/local/bin/install-docker-control.mjs
+  # 侧边栏浏览器插件同样是镜像内置插件：先同步进 profile，DSH 才认得这个 bundle。
+  [ ! -f /usr/local/bin/install-browser-panel.mjs ] || run_stage "prepare-install-browser-panel" run_unprivileged node /usr/local/bin/install-browser-panel.mjs
   [ ! -f /usr/local/bin/patch-profile-plugins.mjs ] || run_stage "prepare-patch-profile-plugins" run_unprivileged node /usr/local/bin/patch-profile-plugins.mjs
   # 被隔离插件的禁用叠加必须在 DSH 启动前刷新，否则进度日志里记下的凶手不会真的被挡掉。
   [ ! -f /usr/local/bin/dsh-plugin-quarantine.mjs ] || run_stage "prepare-plugin-quarantine" run_unprivileged node /usr/local/bin/dsh-plugin-quarantine.mjs apply

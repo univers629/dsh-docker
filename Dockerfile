@@ -72,6 +72,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
        make \
        gcc \
        g++ \
+       # 侧边栏浏览器：Xvfb 提供虚拟屏，openbox 管窗口，x11vnc 把屏转成 RFB，
+       # websockify（noVNC 的依赖）把 RFB 转成 WebSocket 并发出 vnc.html。
+       # 必须在镜像里安装：运行时用 apt 安装的包不会随容器重建保留。
+       # novnc 会顺带拉 Debian 的 nodejs，但 PATH 里 /usr/local/bin 在前，DSH 仍用镜像自带的那份。
+       chromium \
+       xvfb \
+       x11vnc \
+       openbox \
+       novnc \
+       # websockify 在 Debian 里只是 novnc 的 Recommends，--no-install-recommends 不会带上。
+       websockify \
+       fonts-noto-cjk \
     && if [ -n "$NPM_REGISTRY" ]; then \
          npm config set registry "$NPM_REGISTRY"; \
          echo "npm 源已替换为 $NPM_REGISTRY"; \
@@ -123,6 +135,7 @@ COPY bin/configure-nginx-auth /usr/local/bin/configure-nginx-auth
 COPY bin/patch-profile-plugins.mjs /usr/local/bin/patch-profile-plugins.mjs
 COPY bin/watch-profile-plugins.mjs /usr/local/bin/watch-profile-plugins.mjs
 COPY bin/install-docker-control.mjs /usr/local/bin/install-docker-control.mjs
+COPY bin/install-browser-panel.mjs /usr/local/bin/install-browser-panel.mjs
 # 旁路服务：真实模型密钥只存在于 dsh-key-broker 容器，出站白名单由 dsh-egress
 # 容器执行。两者复用同一个镜像（都只用 Node 内置模块），但以独立容器、非 root、
 # 零能力运行，和 DSH 容器之间只有 HTTP，没有共享卷。
@@ -149,6 +162,10 @@ COPY bin/dsh-instances.mjs /usr/local/lib/dsh/dsh-instances.mjs
 COPY bin/dsh-auth-web/ /usr/local/lib/dsh/dsh-auth-web/
 COPY dsh-home/ /usr/local/share/dsh-home/
 COPY dsh-home/docker-control/ /opt/dsh-docker-control/
+# 侧边栏浏览器插件：宿主（DSH 进程内）负责管线与进程，client 半边注册官方
+# sidebar-right 的 tab 类型。真正的 Chromium 由 apt 装进镜像，画面经 x11vnc 的
+# RFB、websockify 的 WebSocket 出去，所以插件本身不含任何渲染器。
+COPY dsh-home/browser-panel/ /opt/dsh-browser-panel/
 COPY nginx/dsh-nginx.conf /usr/local/share/dsh/nginx.conf
 COPY nginx/dsh-ingress.conf /usr/local/share/dsh/ingress.conf
 COPY nginx/dsh-multiuser.conf /usr/local/share/dsh/nginx-multiuser.conf
@@ -160,6 +177,7 @@ RUN chmod +x /usr/local/bin/dsh /usr/local/bin/dsh-supervisor /usr/local/bin/res
       /usr/local/bin/entrypoint.sh /usr/local/bin/configure-nginx-auth \
       /usr/local/bin/patch-profile-plugins.mjs /usr/local/bin/watch-profile-plugins.mjs \
       /usr/local/bin/install-docker-control.mjs \
+      /usr/local/bin/install-browser-panel.mjs \
       /usr/local/bin/dsh-plugin-snapshot.mjs /usr/local/bin/dsh-plugin-quarantine.mjs \
       /usr/local/bin/install-dsh-runtime /usr/local/bin/update-dsh \
       /usr/local/lib/dsh/update-dsh.sh /usr/local/bin/dsh-root /usr/local/bin/apt \
