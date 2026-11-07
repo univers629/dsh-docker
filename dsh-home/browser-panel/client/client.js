@@ -219,7 +219,9 @@ window.__ModuleLoader__.load({
       const running = state === 'running'
       const busy = phase === 'busy' || state === 'starting' || state === 'stopping'
       const novncReady = status?.novnc !== false
-      const frameSource = `/dsh-browser-panel/vnc/vnc.html?autoconnect=1&resize=scale&reconnect=1&view_only=0&path=dsh-browser-panel/vnc/websockify`
+      // 查询串里的值会被 noVNC 原样存成字符串，view_only=0 也一样是真值，
+      // 于是 RFB 进入只读模式，鼠标与键盘事件都不会发送。不带该参数时保持可交互。
+      const frameSource = `/dsh-browser-panel/vnc/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=dsh-browser-panel/vnc/websockify`
 
       // 工具栏动作共用这一条出口：失败时把错误显示在按钮下方。
       const act = React.useCallback(async (path, body) => {

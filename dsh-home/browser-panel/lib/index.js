@@ -180,7 +180,7 @@ class BrowserPanel {
       const vncReady = await waitFor(() => portOpen(RFB_PORT), 8000)
       if (!vncReady) throw new Error(`x11vnc 在 8s 内没有就绪（127.0.0.1:${RFB_PORT}）`)
 
-      if (!existsSync(NOVNC_ENTRY())) throw new Error(`镜像里缺少 noVNC（${NOVNC_ENTRY()}）`)
+      if (!existsSync(novncEntry())) throw new Error(`镜像里缺少 noVNC（${novncEntry()}）`)
       this.spawnChild('web', this.websockifyCommand(), [
         '--web', NOVNC_DIR,
         `127.0.0.1:${WEB_PORT}`,

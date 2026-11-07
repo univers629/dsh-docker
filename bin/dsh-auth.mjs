@@ -2560,10 +2560,10 @@ async function handlePluginToggle(state, req, res) {
     action: 'plugin.toggle',
     result: 'success',
     ip: requestClientIp(req),
-    change: `${body.name}:${body.enabled ? 'on' : 'off'}`,
+    change: `${body.name}:${body.enabled ? 'on' : 'off'}${result.changed ? '' : ' (no change)'}`,
   })
   commitState(state)
-  send(res, 200, { ok: true, toggle: result, ...pluginState() })
+  send(res, 200, { ok: true, changed: result.changed, toggle: result, ...pluginState() })
 }
 
 async function handlePluginSafeMode(state, req, res) {

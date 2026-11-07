@@ -56,6 +56,10 @@ function backupOnce(file) {
 /**
  * 补丁层里已有的禁用/强制启用行。按行扫描而不是解析 YAML：
  * 这层允许注释、`- insert:` 块与任意键顺序，行扫描不会因为形状变化而写坏文件。
+ *
+ * 同一个 id 可能出现多次（手工编辑、面板反复开关都会留下重复块）。dsh 按顺序
+ * 应用整层，因此最后一段生效；这里也按同样规则取值，否则开关显示的状态会
+ * 和实际加载结果相反。
  */
 export function scanPatch(text) {
   const disables = new Set()
@@ -67,9 +71,13 @@ export function scanPatch(text) {
     for (let cursor = index + 1; cursor < lines.length && !/^- /.test(lines[cursor]); cursor += 1) {
       const flag = DISABLE_LINE.exec(lines[cursor])
       if (!flag) continue
-      if (flag[1] === 'true') disables.add(head[1])
-      else forced.add(head[1])
-      break
+      if (flag[1] === 'true') {
+        disables.add(head[1])
+        forced.delete(head[1])
+      } else {
+        forced.add(head[1])
+        disables.delete(head[1])
+      }
     }
   }
   return { disables, forced }
@@ -116,26 +124,48 @@ function appendDisable(text, rowId) {
   return `${text}${text.endsWith('\n') ? '' : '\n'}${row}`
 }
 
-function removeDisable(text, rowId) {
-  const idLine = new RegExp(`^- id:\\s*['"]?${rowId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]?\\s*$`, 'u')
+function rowPattern(rowId) {
+  return new RegExp(`^- id:\\s*['"]?${rowId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]?\\s*$`, 'u')
+}
+
+/**
+ * 删掉某个加载行上的 `disabled:` 行。pattern 决定删哪一种取值：启用时删
+ * `true`，禁用时连 `false` 一起删（避免同一个 id 留下越来越长的重复块）。
+ *
+ * 同一个 id 在补丁层里可能有多段（整层按顺序应用，最后一段生效），所以这里
+ * 逐段处理到底，不能在第一段没有目标行时提前返回。
+ */
+function stripDisableLines(text, rowId, pattern) {
+  const idLine = rowPattern(rowId)
   const lines = String(text ?? '').split('\n')
+  let changed = false
   for (let index = 0; index < lines.length; index += 1) {
     if (!idLine.test(lines[index])) continue
     let end = index + 1
     while (end < lines.length && !/^- /.test(lines[end])) end += 1
     const row = lines.slice(index, end)
-    const at = row.findIndex((line, position) => position > 0 && /^ {2}disabled:\s*true\s*$/u.test(line))
-    if (at < 0) return { text, changed: false }
-    const kept = row.filter((_, position) => position !== at)
+    const kept = row.filter((line, position) => position === 0 || !pattern.test(line))
+    if (kept.length === row.length) continue
     const stillHasKeys = kept.slice(1).some((line) => line.trim() !== '')
     lines.splice(index, end - index, ...(stillHasKeys ? kept : []))
-    const merged = lines.join('\n')
-    // 空补丁文件会让整个 profile 起不来，删空时必须补回占位。
-    const body = withoutComments(merged)
-    const restored = body === '' ? `${merged.trim() === '' ? '' : merged.replace(/\s+$/u, '\n')}[]\n` : merged
-    return { text: restored, changed: true }
+    end = index + (stillHasKeys ? kept.length : 0)
+    changed = true
+    index = end - 1
   }
-  return { text, changed: false }
+  if (!changed) return { text, changed: false }
+  const merged = lines.join('\n')
+  // 空补丁文件会让整个 profile 起不来，删空时必须补回占位。
+  const body = withoutComments(merged)
+  const restored = body === '' ? `${merged.trim() === '' ? '' : merged.replace(/\s+$/u, '\n')}[]\n` : merged
+  return { text: restored, changed: true }
+}
+
+function removeDisable(text, rowId) {
+  return stripDisableLines(text, rowId, /^ {2}disabled:\s*true\s*$/u)
+}
+
+function clearDisableFlags(text, rowId) {
+  return stripDisableLines(text, rowId, /^ {2}disabled:\s*(?:true|false)\s*$/u)
 }
 
 function readManifest(profileDir) {
@@ -297,7 +327,10 @@ export function setPluginEnabled(profileDir, name, enabled) {
       continue
     }
     if (state.disables.has(id)) continue
-    text = appendDisable(text, id)
+    // 先清掉这一段已有的 disabled 行（可能是手工加的 disabled: false），
+    // 再追加唯一一条 true，避免同一个 id 越写越长、后写的值盖住前面的。
+    const cleared = clearDisableFlags(text, id)
+    text = appendDisable(cleared.text, id)
     state.disables.add(id)
     changed = true
   }

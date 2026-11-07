@@ -27,6 +27,7 @@
       failed: '操作失败：{message}',
       pending: '处理中…',
       restartPending: '已请求重启，等待 Supervisor 拉起',
+      unchanged: '补丁层里没有需要改的行，状态已经是目标值',
     },
     en: {
       enabled: 'Enabled',
@@ -47,6 +48,7 @@
       failed: 'Failed: {message}',
       pending: 'Working…',
       restartPending: 'Restart requested, waiting for the supervisor',
+      unchanged: 'Nothing to change in the patch layer; the state already matches',
     },
   }
 
@@ -228,6 +230,12 @@
         await run(async () => {
           const payload = await call('/api/auth/plugins/toggle', { name: plugin.name, enabled: !plugin.enabled })
           state = payload
+          if (payload.changed === false) {
+            setError('')
+            alert.className = 'inline-alert inline-alert--info'
+            alert.textContent = t('unchanged')
+            alert.style.display = 'block'
+          }
         })
       }
 
