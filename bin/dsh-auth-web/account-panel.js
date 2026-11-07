@@ -96,7 +96,7 @@
       'password.current': '当前密码', 'password.next': '新密码', 'password.confirm': '确认新密码',
       'password.submit': '修改密码', 'password.required': '请填写当前密码与新密码。',
       'password.mismatch': '两次输入的新密码不一致。', 'password.wrong': '当前密码不正确。',
-      'password.weak': '密码至少 6 位。', 'password.unchanged': '新密码不能与当前密码相同。',
+      'password.weak': '密码需 6–256 位，且同时包含字母和数字。', 'password.composition': '密码需要同时包含字母和数字。', 'password.unchanged': '新密码不能与当前密码相同。',
       'totp.title': '两步验证（TOTP）', 'totp.hint': '用验证器 App 扫描下方二维码，或手动输入密钥。开启时会一次性给出恢复码。',
       'totp.state': '当前状态', 'totp.on': '已开启', 'totp.off': '未开启', 'totp.start': '开启两步验证',
       'totp.scan': '用验证器扫描',
@@ -146,7 +146,7 @@
       'password.current': 'Current password', 'password.next': 'New password', 'password.confirm': 'Confirm new password',
       'password.submit': 'Change password', 'password.required': 'Enter the current and the new password.',
       'password.mismatch': 'The two new passwords do not match.', 'password.wrong': 'The current password is incorrect.',
-      'password.weak': 'Use at least 6 characters.', 'password.unchanged': 'The new password must differ from the current one.',
+      'password.weak': 'Password must be 6-256 characters with both a letter and a digit.', 'password.composition': 'Password must contain both a letter and a digit.', 'password.unchanged': 'The new password must differ from the current one.',
       'totp.title': 'Two-step verification (TOTP)', 'totp.hint': 'Scan the code with your authenticator app, or enter the secret manually. Enabling it shows one-time recovery codes.',
       'totp.state': 'Status', 'totp.on': 'enabled', 'totp.off': 'not enabled', 'totp.start': 'Enable two-factor authentication',
       'totp.scan': 'Scan with your authenticator',
@@ -513,7 +513,7 @@
       if (pwNext.value !== pwConfirm.value) return error(t('password.mismatch'))
       const result = await api('/api/auth/password', 'POST', { currentPassword: pwCurrent.value, newPassword: pwNext.value })
       if (result.ok) return window.location.replace('/login?reason=password')
-      if (result.body.code === 'weak_password') return error(t('password.weak'))
+      if (result.body.code === 'weak_password') return error(t(result.body.reason === 'composition' ? 'password.composition' : 'password.weak'))
       if (result.body.code === 'invalid_credentials') return error(t('password.wrong'))
       if (result.body.code === 'password_unchanged') return error(t('password.unchanged'))
       error(t('failed'))

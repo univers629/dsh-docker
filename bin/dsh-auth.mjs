@@ -155,6 +155,25 @@ const MAX_HEADER_SIZE = 64 * 1024
 // 失败计数映射的键数上限（prune 里按最久不活跃淘汰）。正常部署的键数是
 // 「账户数 × 2 + 活跃来源 IP 数」的量级；到上限只能说明有人在批量伪造用户名。
 const MAX_FAILURE_KEYS = 10000
+
+// 全局并发哈希上限：每次口令校验都是一次 Argon2id（64 MiB 内存 + 毫秒级 CPU），
+// 并发数等于峰值内存。默认只放行 1 个槽、硬上限 8；超出的请求立即返回 1 秒重试，
+// 而不是排队占住连接把内存推过 cgroup 上限。
+const MAX_CONCURRENT_HASHES = Math.min(8, Math.max(1, Number(process.env.DSH_AUTH_MAX_CONCURRENT_HASHES ?? 1) || 1))
+
+// 每来源在同一登录窗口内允许触发的哈希次数。与失败计数分开：成功登录也计入，
+// 否则口令正确本身即是一条免代价的计算通道。表按来源数封顶。
+const MAX_COMPUTE_SOURCES = 4096
+
+// 账户维度的失败上限是来源维度的十倍：单个来源很快被挡住，
+// 而唯一的 root 账户不会因为别人在猜口令而被锁死一整个窗口。
+const ACCOUNT_FAILURE_MULTIPLIER = 10
+
+// 一次性凭据（TOTP/passkey 挑战）的数量上限。挑战由匿名请求签发，
+// 不封顶等于允许任何人把 state.json 撑大。
+const MAX_FLOWS = 256
+const MAX_FLOWS_BY_PURPOSE = { passkey_register: 64, passkey_login: 48 }
+const MAX_FLOWS_PER_SOURCE = 4
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' }
 
@@ -164,12 +183,15 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=u
  * frame-ancestors 'none' 与 X-Frame-Options 同时下发：前者是标准写法，后者覆盖尚未实现 CSP 的浏览器。
  * 会话 Cookie 是 SameSite=Strict，跨站 iframe 带不上会话，这两条阻止其他站点嵌套登录页伪造界面。
  * nosniff 阻止浏览器把未知类型当脚本执行，referrer-policy 避免把带查询串的地址带给第三方。
+ * 登录页不申请任何设备能力，permissions-policy 一次关掉全部；coop 隔离顶层窗口引用。
  */
 const PAGE_SECURITY_HEADERS = {
   'x-frame-options': 'DENY',
   'content-security-policy': "frame-ancestors 'none'",
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'same-origin',
+  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=()',
+  'cross-origin-opener-policy': 'same-origin',
 }
 
 const store = openStore(CONFIG.stateFile)
@@ -178,6 +200,53 @@ CONFIG.dummyHash = hashPassword(randomToken(24))
 
 function now() {
   return Date.now()
+}
+
+/** 在途的哈希计算数。进程内计数，不落盘：重启后归零没有安全含义。 */
+let activeHashComputations = 0
+
+/**
+ * 非阻塞地占用一个全局哈希槽。
+ * @returns {boolean} 是否占到位子；false 表示此刻已有足够的计算在跑。
+ */
+function acquireHashSlot() {
+  if (activeHashComputations >= MAX_CONCURRENT_HASHES) return false
+  activeHashComputations += 1
+  return true
+}
+
+/** 释放一个哈希槽；没有占位时是空操作。 */
+function releaseHashSlot() {
+  if (activeHashComputations > 0) activeHashComputations -= 1
+}
+
+/** 来源 → 当前窗口内已批准的哈希次数。 */
+const computeBudgets = new Map()
+
+/**
+ * 判断某个来源还能不能触发一次口令哈希。
+ *
+ * 与失败桶分工不同：失败桶回答「这个来源猜错了几次」，这里回答「这个来源触发了
+ * 多少次计算」。后者包含成功登录，因为算力消耗与猜测结果无关。
+ * @param {string} source 客户端地址；空串表示来源不可区分，此时不施加这道门。
+ * @param {number} at 当前时间。
+ * @returns {boolean} 是否批准本次计算。
+ */
+function admitPasswordComputation(source, at = now()) {
+  if (!source) return true
+  for (const [key, budget] of computeBudgets) {
+    if (budget.start + CONFIG.loginWindowMs <= at) computeBudgets.delete(key)
+  }
+  const limit = Math.max(2, Number(process.env.DSH_AUTH_COMPUTE_BUDGET ?? 0) || CONFIG.maxLoginFailures * 2)
+  const budget = computeBudgets.get(source)
+  if (!budget) {
+    if (computeBudgets.size >= MAX_COMPUTE_SOURCES) return false
+    computeBudgets.set(source, { start: at, used: 1 })
+    return true
+  }
+  if (budget.used >= limit) return false
+  budget.used += 1
+  return true
 }
 
 // 统一的客户端地址推导：只有直接对端是可信代理（默认入口容器）时才采信转发头。
@@ -321,6 +390,17 @@ function commitState(state) {
   state.__rev = store.revision()
 }
 
+/**
+ * 写一条审计，并带上当前请求的标识。
+ * 请求标识只用于把同一次调用在响应头、审计行与日志之间对上，不是凭据。
+ * @param {object} state 状态。
+ * @param {object} req 请求。
+ * @param {object} event 审计字段。
+ */
+function auditRequest(state, req, event) {
+  appendAudit(state, { ...event, requestId: req.requestId })
+}
+
 /** 统一失败响应：文案不分「用户不存在 / 密码错 / 被限速以外」的差异（威胁 T2）。 */
 function fail(res, status, code, extra = {}) {
   send(res, status, { ok: false, code, ...extra })
@@ -374,6 +454,26 @@ function isHttps(req) {
   return req.headers['x-forwarded-proto'] === 'https' || Boolean(req.socket.encrypted)
 }
 
+/** 回环地址判断：容器内探活与本地调试走这一条。 */
+function isLoopbackAddress(address) {
+  const value = typeof address === 'string' ? address : ''
+  return value === '::1' || value.startsWith('127.') || value.startsWith('::ffff:127.')
+}
+
+/**
+ * 是否在安全通道上。
+ *
+ * 明文里签发的会话等于把令牌放在明面上，因此除回环（本机调试、容器内探活）外
+ * 一律不签发；`DSH_AUTH_ALLOW_INSECURE_TRANSPORT=1` 用于确实跑在内网明文上的部署。
+ * @param {object} req 请求。
+ * @returns {boolean} 是否允许在这个请求上签发会话。
+ */
+function transportSecure(req) {
+  if (isHttps(req)) return true
+  if (process.env.DSH_AUTH_ALLOW_INSECURE_TRANSPORT === '1') return true
+  return isLoopbackAddress(req.socket.remoteAddress)
+}
+
 function headerText(value) {
   if (Array.isArray(value)) return value[0] ?? ''
   return typeof value === 'string' ? value : ''
@@ -403,8 +503,34 @@ function sameOrigin(headers) {
   return false
 }
 
+/**
+ * 会话 Cookie 的名字。HTTPS 下带 __Host- 前缀：浏览器据此强制 Path=/、拒绝 Domain，
+ * 并要求 Secure，于是「从兄弟子域投放同名 Cookie」这条路走不通。
+ * 明文回环调试仍用原名——__Host- 需要 Secure，浏览器会直接丢弃它。
+ * @param {object} req 请求。
+ * @returns {string} Cookie 名。
+ */
+function sessionCookieName(req) {
+  return isHttps(req) ? `__Host-${SESSION_COOKIE}` : SESSION_COOKIE
+}
+
+/** CSRF Cookie 的名字，规则同 sessionCookieName。 */
+function csrfCookieName(req) {
+  return isHttps(req) ? `__Host-${CSRF_COOKIE}` : CSRF_COOKIE
+}
+
+/**
+ * 从请求里取出会话令牌。两种前缀都认：浏览器升级配置前后下发的 Cookie 都还在有效期。
+ * @param {object} req 请求。
+ * @returns {string} 令牌；缺失时为空串。
+ */
+function sessionToken(req) {
+  const jar = cookies(req)
+  return jar[sessionCookieName(req)] ?? jar[SESSION_COOKIE] ?? ''
+}
+
 function sessionCookie(value, req, maxAgeSeconds) {
-  const bits = [`${SESSION_COOKIE}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Strict', `Max-Age=${maxAgeSeconds}`]
+  const bits = [`${sessionCookieName(req)}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Strict', `Max-Age=${maxAgeSeconds}`]
   if (isHttps(req)) bits.push('Secure')
   return bits.join('; ')
 }
@@ -420,7 +546,7 @@ function sessionCookie(value, req, maxAgeSeconds) {
 const CSRF_COOKIE = 'dsh_auth_csrf'
 
 function csrfCookie(value, req, maxAgeSeconds) {
-  const bits = [`${CSRF_COOKIE}=${encodeURIComponent(value)}`, 'Path=/', 'SameSite=Strict', `Max-Age=${maxAgeSeconds}`]
+  const bits = [`${csrfCookieName(req)}=${encodeURIComponent(value)}`, 'Path=/', 'SameSite=Strict', `Max-Age=${maxAgeSeconds}`]
   if (isHttps(req)) bits.push('Secure')
   return bits.join('; ')
 }
@@ -431,9 +557,16 @@ function loginCookies(token, csrf, req) {
   return [sessionCookie(token, req, maxAge), csrfCookie(csrf, req, maxAge)]
 }
 
-/** 清除两个 Cookie（登出、改密、关闭两步验证）。 */
+/** 清除两个 Cookie（登出、改密、关闭两步验证）。两种前缀都清，避免留下失效副本。 */
 function clearedCookies(req) {
-  return [sessionCookie('', req, 0), csrfCookie('', req, 0)]
+  const secure = isHttps(req) ? '; Secure' : ''
+  const maxAge = '; Max-Age=0; Path=/'
+  return [
+    sessionCookie('', req, 0),
+    csrfCookie('', req, 0),
+    `${SESSION_COOKIE}=${maxAge}${secure}`,
+    `${CSRF_COOKIE}=${maxAge}${secure}`,
+  ]
 }
 
 function prune(state) {
@@ -491,7 +624,7 @@ function prune(state) {
 
 /** 解析当前会话：令牌摘要命中 + 未过期 + 用户启用 + auth_version 未变（级联失效）。 */
 function resolveSession(state, req) {
-  const token = cookies(req)[SESSION_COOKIE]
+  const token = sessionToken(req)
   if (!token) return null
   const digest = tokenDigest(token)
   const session = state.sessions.find((s) => constantTimeEqual(s.tokenHash, digest))
@@ -503,6 +636,8 @@ function resolveSession(state, req) {
 }
 
 function issueSession(state, user, req) {
+  // 明文非回环不签发：签了也只是把令牌交到明面上（见 transportSecure）。
+  if (!transportSecure(req)) return null
   const token = randomToken(32)
   const csrf = randomToken(32)
   const at = now()
@@ -698,16 +833,36 @@ function flowSecret() {
   return totpKey.toString('hex')
 }
 
-function createFlow(state, purpose, userId, payload = '') {
+/**
+ * 签发一次性凭据。
+ *
+ * 挑战由匿名请求触发，因此按总量、按用途、按来源三层封顶：没有上限时，任何人不登录
+ * 也能把 state.json 撑大，而状态库每次写入都要整份序列化。
+ * @param {object} state 状态。
+ * @param {string} purpose 用途。
+ * @param {string} userId 归属账户，可为空。
+ * @param {string} payload 附带数据。
+ * @param {string} source 请求来源地址，用于按来源封顶；空串表示不可区分。
+ * @returns {string | null} 令牌；超出上限时为 null。
+ */
+function createFlow(state, purpose, userId, payload = '', source = '') {
+  const at = now()
+  state.flows = (state.flows ?? []).filter((f) => f.expiresAt > at && !f.consumedAt)
+  if (state.flows.length >= MAX_FLOWS) return null
+  const purposeLimit = MAX_FLOWS_BY_PURPOSE[purpose]
+  if (purposeLimit && state.flows.filter((f) => f.purpose === purpose).length >= purposeLimit) return null
+  // 按来源封顶只用于匿名挑战：这类入口不需要口令即可创建凭据，单来源的并发需要压住。
+  // 登录二因子在口令通过之后创建，重复尝试属于正常路径，由总量与用途上限兜底。
+  if (source && purpose.startsWith('passkey_') && state.flows.filter((f) => f.purpose === purpose && f.source === source).length >= MAX_FLOWS_PER_SOURCE) return null
   const token = randomToken(32)
-  state.flows = state.flows ?? []
   state.flows.push({
     purpose,
     digest: flowDigest(flowSecret(), purpose, token),
     userId,
     payload,
-    createdAt: now(),
-    expiresAt: now() + (FLOW_TTL_MS[purpose] ?? 5 * 60_000),
+    source,
+    createdAt: at,
+    expiresAt: at + (FLOW_TTL_MS[purpose] ?? 5 * 60_000),
     consumedAt: null,
   })
   return token
@@ -1064,7 +1219,8 @@ async function handleTotpSetup(state, req, res) {
   }
   if (resolved.user.totp?.enabled) return fail(res, 409, 'totp_already_enabled')
   const secret = generateTotpSecret()
-  const challenge = createFlow(state, 'totp_setup', resolved.user.id, secret)
+  const challenge = createFlow(state, 'totp_setup', resolved.user.id, secret, requestClientIp(req))
+  if (!challenge) return fail(res, 429, 'flow_capacity')
   commitState(state)
   const otpauthUri = buildOtpAuthUri(resolved.user.username, secret)
   send(res, 200, {
@@ -1542,7 +1698,9 @@ async function handleRegister(state, req, res) {
  * @returns {Promise<void>} 无返回值。
  */
 async function completeLogin(state, user, req, res, auditChange = null) {
-  const { token, csrf } = issueSession(state, user, req)
+  const issued = issueSession(state, user, req)
+  if (!issued) return fail(res, 403, 'insecure_transport')
+  const { token, csrf } = issued
   user.lastLoginAt = now()
   appendAudit(state, { actorId: user.id, action: 'login', result: 'ok', ip: requestClientIp(req), change: auditChange })
   commitState(state)
@@ -2081,7 +2239,8 @@ async function handlePasskeyRegisterBegin(state, req, res) {
     rpId: ctx.rpId,
     rpName: 'DeepSeek Harness',
   })
-  const challenge = createFlow(state, 'passkey_register', resolved.user.id, options.challenge)
+  const challenge = createFlow(state, 'passkey_register', resolved.user.id, options.challenge, requestClientIp(req))
+  if (!challenge) return fail(res, 429, 'flow_capacity')
   commitState(state)
   send(res, 200, { ok: true, publicKey: options, challenge, expiresInSeconds: Math.floor(PASSKEY_TTL_MS / 1000) })
 }
@@ -2153,7 +2312,8 @@ async function handlePasskeyLoginBegin(state, req, res) {
   // 用户枚举防护：用户名不存在时也签发一个不带 allowCredentials 的选项，响应形态一致
   const allowCredentials = (user?.passkeys ?? []).map((p) => ({ credentialID: p.id, transports: p.transports }))
   const options = await beginAuthentication({ allowCredentials, rpId: ctx.rpId })
-  const challenge = createFlow(state, 'passkey_login', user?.id ?? '', options.challenge)
+  const challenge = createFlow(state, 'passkey_login', user?.id ?? '', options.challenge, requestClientIp(req))
+  if (!challenge) return fail(res, 429, 'flow_capacity')
   commitState(state)
   send(res, 200, { ok: true, publicKey: options, challenge })
 }
@@ -2196,7 +2356,8 @@ async function handlePasskeyLoginFinish(state, req, res) {
 
   // 已启用 TOTP 的账户：passkey 只是第一因子，仍需第二因子
   if (found.user.totp?.enabled) {
-    const challenge = createFlow(state, 'totp_login', found.user.id)
+    const challenge = createFlow(state, 'totp_login', found.user.id, '', requestClientIp(req))
+    if (!challenge) return fail(res, 429, 'flow_capacity')
     appendAudit(state, { actorId: found.user.id, action: 'login.passkey', result: 'second_factor_required' })
     commitState(state)
     return send(res, 200, { ok: true, secondFactor: { challenge, method: 'totp' } })
@@ -2321,10 +2482,14 @@ async function handleLogin(state, req, res) {
   const { ipKey, accountKey } = loginKeys(requestClientIp(req), body.username, { trustedProxiesResolved: sourceDistinguishable() })
   const at = now()
   state.failures = state.failures ?? {}
-  const ipBucket = evaluateFailureBucket(state.failures[ipKey], at, CONFIG.loginWindowMs, CONFIG.maxLoginFailures)
-  const accountBucket = evaluateFailureBucket(state.failures[accountKey], at, CONFIG.loginWindowMs, CONFIG.maxLoginFailures)
-  const ipExhausted = ipBucket.kept.length + inFlightCount(inFlightAttempts.ip, ipKey) >= CONFIG.maxLoginFailures
-  const accountExhausted = accountBucket.kept.length + inFlightCount(inFlightAttempts.account, accountKey) >= CONFIG.maxLoginFailures
+  // 两个维度的额度不同：来源按 maxLoginFailures，账户按它的十倍。
+  // 这样单个来源很快被挡住，而从别处登录的本人不会因为有人在猜他的口令被锁死。
+  const ipLimit = CONFIG.maxLoginFailures
+  const accountLimit = CONFIG.maxLoginFailures * ACCOUNT_FAILURE_MULTIPLIER
+  const ipBucket = evaluateFailureBucket(state.failures[ipKey], at, CONFIG.loginWindowMs, ipLimit)
+  const accountBucket = evaluateFailureBucket(state.failures[accountKey], at, CONFIG.loginWindowMs, accountLimit)
+  const ipExhausted = ipBucket.kept.length + inFlightCount(inFlightAttempts.ip, ipKey) >= ipLimit
+  const accountExhausted = accountBucket.kept.length + inFlightCount(inFlightAttempts.account, accountKey) >= accountLimit
   if (!ipBucket.allowed || !accountBucket.allowed || ipExhausted || accountExhausted) {
     // 被拒的请求不写回任何桶：调用者提供的用户名可以任意捏造，若在门禁前就落键，
     // 每个不同的用户名都会在状态库里留下一个空桶（审计实测 1000 请求 → 1250 个键，
@@ -2348,9 +2513,27 @@ async function handleLogin(state, req, res) {
     const captcha = await enforceCaptcha(state, req, body, 'login')
     if (!captcha.ok) return fail(res, 403, captcha.code, captcha.reason ? { reason: captcha.reason } : undefined)
 
+    // 算力门禁分两级：先占全局哈希槽（并发上限，失败只需重试 1 秒），
+    // 再按来源计预算（窗口上限，失败要等整个窗口）。
+    if (!admitPasswordComputation(ipKey, at)) {
+      appendAudit(state, { action: 'login', result: 'rate_limited', ip: requestClientIp(req), change: { account: accountKey, blockedBy: 'compute' } })
+      commitState(state)
+      return fail(res, 429, 'rate_limited', { retryAfter: Math.ceil(CONFIG.loginWindowMs / 1000) })
+    }
+    if (!acquireHashSlot()) {
+      appendAudit(state, { action: 'login', result: 'rate_limited', ip: requestClientIp(req), change: { account: accountKey, blockedBy: 'hash_slot' } })
+      commitState(state)
+      return fail(res, 429, 'rate_limited', { retryAfter: 1 })
+    }
+
     const user = state.users.find((u) => u.username.toLowerCase() === body.username.trim().toLowerCase())
-    const hash = user?.passwordHash ?? CONFIG.dummyHash
-    const ok = verifyPassword(body.password, hash) && Boolean(user) && user.status === 'enabled'
+    let ok = false
+    try {
+      const hash = user?.passwordHash ?? CONFIG.dummyHash
+      ok = verifyPassword(body.password, hash) && Boolean(user) && user.status === 'enabled'
+    } finally {
+      releaseHashSlot()
+    }
 
     if (!ok) {
       if (ipKey) state.failures[ipKey] = [...ipBucket.kept, at]
@@ -2367,7 +2550,8 @@ async function handleLogin(state, req, res) {
 
     // 密码因子通过。若已启用 TOTP，则签发一次性挑战，等第二因子再建会话。
     if (user.totp?.enabled) {
-      const challenge = createFlow(state, 'totp_login', user.id)
+      const challenge = createFlow(state, 'totp_login', user.id, '', requestClientIp(req))
+      if (!challenge) return fail(res, 429, 'flow_capacity')
       appendAudit(state, { actorId: user.id, action: 'login', result: 'second_factor_required', ip: requestClientIp(req) })
       commitState(state)
       return send(res, 200, { ok: true, secondFactor: { challenge, method: 'totp' } })
@@ -2380,7 +2564,7 @@ async function handleLogin(state, req, res) {
 }
 
 function handleLogout(state, req, res) {
-  const token = cookies(req)[SESSION_COOKIE]
+  const token = sessionToken(req)
   if (token) {
     const digest = tokenDigest(token)
     const before = state.sessions.length
@@ -2406,19 +2590,26 @@ function handleChangePassword(state, req, res) {
       return fail(res, 400, 'invalid_request')
     }
     if (!verifyPassword(body.currentPassword, resolved.user.passwordHash)) {
-      appendAudit(state, { actorId: resolved.user.id, action: 'password.change', result: 'failure' })
+      auditRequest(state, req, { actorId: resolved.user.id, action: 'password.change', result: 'failure' })
       commitState(state)
       return fail(res, 401, 'invalid_credentials')
     }
     if (constantTimeEqual(body.currentPassword, body.newPassword)) return fail(res, 400, 'password_unchanged')
     const weak = validatePassword(body.newPassword)
     if (weak) return fail(res, 400, 'weak_password', { reason: weak })
+    // 先落 intent 再改口令：审计写不进去时整次操作不执行，避免出现改成功但查不到记录。
+    auditRequest(state, req, { actorId: resolved.user.id, action: 'password.change', result: 'intent' })
+    try {
+      commitState(state)
+    } catch {
+      return fail(res, 503, 'audit_unavailable')
+    }
     resolved.user.passwordHash = hashPassword(body.newPassword)
     // auth_version 级联：改密即让该用户全部旧会话失效（new-api UserSession 同款）
     resolved.user.authVersion += 1
     resolved.user.updatedAt = now()
     state.sessions = state.sessions.filter((s) => s.userId !== resolved.user.id)
-    appendAudit(state, { actorId: resolved.user.id, action: 'password.change', result: 'ok' })
+    auditRequest(state, req, { actorId: resolved.user.id, action: 'password.change', result: 'ok' })
     commitState(state)
     send(res, 200, { ok: true }, { 'set-cookie': clearedCookies(req) })
   })
@@ -2544,18 +2735,31 @@ async function handlePluginToggle(state, req, res) {
   if (!requireCsrf(admin, req, res)) return
   const body = await readBody(req)
   if (!body || typeof body.name !== 'string' || typeof body.enabled !== 'boolean') return fail(res, 400, 'invalid_request')
+  // 先落 intent 再改补丁层：审计写不进去时不动文件，避免出现改成功但查不到记录。
+  auditRequest(state, req, {
+    actorId: admin.user.id,
+    action: 'plugin.toggle',
+    result: 'intent',
+    ip: requestClientIp(req),
+    change: `${body.name}:${body.enabled ? 'on' : 'off'}`,
+  })
+  try {
+    commitState(state)
+  } catch {
+    return fail(res, 503, 'audit_unavailable')
+  }
   let result
   try {
     result = setPluginEnabled(CONFIG.profileDir, body.name, body.enabled)
   } catch (error) {
     if (error instanceof PluginConfigError) {
-      appendAudit(state, { actorId: admin.user.id, action: 'plugin.toggle', result: 'failure', ip: requestClientIp(req), change: body.name })
+      auditRequest(state, req, { actorId: admin.user.id, action: 'plugin.toggle', result: 'failure', ip: requestClientIp(req), change: body.name })
       commitState(state)
       return fail(res, error.status, 'plugin_toggle_failed', { message: error.message })
     }
     throw error
   }
-  appendAudit(state, {
+  auditRequest(state, req, {
     actorId: admin.user.id,
     action: 'plugin.toggle',
     result: 'success',
@@ -2637,6 +2841,9 @@ const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, async (req,
     return res.end()
   }
   const p = url.pathname
+  // 每个响应带一个请求标识：响应头、审计行与日志能对上同一次调用。
+  req.requestId = randomToken(8)
+  res.setHeader('x-request-id', req.requestId)
   let state
   try {
     state = readState()
@@ -2770,6 +2977,11 @@ if (migrateAdminIdentity(freshState())) {
 const configChanges = syncDeploymentConfig(freshState())
 // 授权表是派生数据：启动时按当前账户重写一次，避免它与状态库脱节
 await syncBrokerGrants(freshState())
+// 服务端超时：慢速请求头与慢速请求体会一直占着连接与内存，入口是唯一后端，
+// 这类连接不需要放开。响应侧给足一次 Argon2id 与状态写入的时间。
+server.headersTimeout = 20_000
+server.requestTimeout = 30_000
+server.keepAliveTimeout = 5_000
 server.listen(Number(port), host, () => {
   const users = store.read().users.length
   if (Object.keys(configChanges).length > 0) {

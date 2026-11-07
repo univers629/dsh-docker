@@ -38,18 +38,19 @@ export function isValidUsername(username) {
 }
 
 /**
- * 校验密码长度。返回 null 表示通过，否则返回面向用户的短原因。
+ * 校验密码长度与基本组成。返回 null 表示通过，否则返回面向用户的短原因。
  *
- * 只校验长度：组成复杂度会把人推向 `Password1!` 这类可预测组合，强度提升有限
- * 却挡住注册。强度提示由界面承担，见 passwordAdvice。
+ * 组成只要求「至少一个 ASCII 字母 + 至少一个数字」，不要求大小写混用、也不要求符号：
+ * 复杂度规则会把人推向 `Password1!` 这类可预测组合，强度提示交给界面（见 passwordAdvice）。
  *
  * @param {string} password 待校验密码。
- * @returns {null | 'length'} 失败原因。
+ * @returns {null | 'length' | 'composition'} 失败原因。
  */
 export function validatePassword(password) {
   if (typeof password !== 'string') return 'length'
   const bytes = Buffer.byteLength(password, 'utf8')
   if (bytes < PASSWORD_MIN || bytes > PASSWORD_MAX) return 'length'
+  if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) return 'composition'
   return null
 }
 

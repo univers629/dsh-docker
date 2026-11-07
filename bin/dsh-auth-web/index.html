@@ -269,7 +269,7 @@
       'register.errorRequired': '请填写用户名与密码。',
       'register.errorMismatch': '两次输入的密码不一致。',
       'register.errorUsername': '用户名需 3–32 位，以字母或数字开头，只能包含字母、数字、点、下划线和连字符。',
-      'register.errorWeak': '密码至少 6 位。',
+      'register.errorWeak': '密码需 6–256 位，且同时包含字母和数字。', 'register.errorComposition': '密码需要同时包含字母和数字。',
       // 强度建议：显示但不阻止提交。
       'password.advice.shortSimple': '这个密码较短、且只用了单一字符集。能用，但建议加长或混入字母、数字、符号。',
       'password.advice.short': '密码偏短。能用，加长一些会更安全。',
@@ -349,7 +349,7 @@
       'register.errorRequired': 'Enter a username and password.',
       'register.errorMismatch': 'The two passwords do not match.',
       'register.errorUsername': 'Username must be 3–32 characters, start with a letter or digit, and contain only letters, digits, dots, underscores or hyphens.',
-      'register.errorWeak': 'Password must be at least 6 characters.',
+      'register.errorWeak': 'Password must be 6-256 characters with both a letter and a digit.', 'register.errorComposition': 'Password must contain both a letter and a digit.',
       // Strength advice: shown, never blocking.
       'password.advice.shortSimple': 'This password is short and uses a single character class. It works, but a longer one — or one mixing letters, digits and symbols — would be safer.',
       'password.advice.short': 'This password is on the short side. It works, but a longer one would be safer.',
@@ -892,7 +892,7 @@
   function registerErrorText(body) {
     const code = body && body.code
     if (code === 'invalid_username') return t('register.errorUsername')
-    if (code === 'weak_password') return t('register.errorWeak')
+    if (code === 'weak_password') return t(body.reason === 'composition' ? 'register.errorComposition' : 'register.errorWeak')
     if (code === 'username_taken') return t('register.errorTaken')
     if (code === 'invalid_invite') return t('register.errorInvite')
     // 管理员关了注册：用户手里的邀请码可能完全正确，必须给出不同的提示，
