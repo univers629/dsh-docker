@@ -35,6 +35,11 @@ services:
       DSH_AUTH_STATE: "/data/auth/state.json"
       DSH_AUTH_TOTP_KEY: "/data/auth/totp.key"
       DSH_AUTH_WEB_DIR: "/usr/local/lib/dsh/dsh-auth-web"
+      # 网关前面那一跳的名字。单管理员模式是 dsh-authgate；多用户模式的入口是
+      # dsh-ingress，由 docker-compose.multiuser.yml 覆写。只有对端地址属于这个
+      # 列表时才采信 x-real-ip / x-forwarded-for；解析不到会让按 IP 的限速整个
+      # 关闭（重试 30 秒后放弃，只剩按账户的桶），审计里的来源地址也随之失真。
+      DSH_AUTH_TRUSTED_PROXIES: "${DSH_AUTH_TRUSTED_PROXIES:-dsh-authgate}"
       # 单管理员：不开放注册
       DSH_MULTI_USER: "off"
       DSH_REGISTER_GATE: "open"
@@ -42,6 +47,11 @@ services:
       DSH_AUTH_WORKSPACE: "on"
       DSH_AUTH_PUBLIC_ORIGIN: "${DSH_PUBLIC_ORIGIN:-}"
       DSH_ADMIN_INSTANCE_NAME: "dsh"
+      # 插件开关面板改的正是这份 profile：网关自己读写补丁层，不经过 DSH 进程。
+      # 插件把启动搞崩时工作台进不去，这个页面是唯一还能改配置的地方。
+      DSH_AUTH_PROFILE_DIR: "/data/profiles/web"
+      # 重启请求：网关写、容器里的 Supervisor 读，两边看到的是同一个宿主目录。
+      DSH_AUTH_RESTART_FILE: "/data/plugin-panel/restart"
       DSH_AUTH_SESSION_TTL_SECONDS: "${DSH_SESSION_TTL_SECONDS:-604800}"
       DSH_AUTH_IDLE_TTL_SECONDS: "${DSH_SESSION_IDLE_TTL_SECONDS:-86400}"
       # 入口↔网关共享密钥：设置后 verify 端点要求调用者携带同一个值。
@@ -51,6 +61,10 @@ services:
       DSH_ADMIN_BROKER_TOKEN: "${DSH_ADMIN_BROKER_TOKEN:-}"
     volumes:
       - ./data/auth:/data/auth
+      # profile 目录读写：只为了插件面板能改补丁层与 bundles。
+      # 只挂 web 这一层，多用户模式在 docker-compose.multiuser.yml 里摘掉。
+      - ./data/dsh/profiles/web:/data/profiles/web
+      - ./data/dsh/plugin-panel:/data/plugin-panel
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m

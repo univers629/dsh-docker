@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0e17" />
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#eef3fd" />
+<title>插件开关 · DeepSeek Harness</title>
+<link rel="stylesheet" href="/app.css" />
+<style>
+  .plugins-shell { position: relative; z-index: 2; max-width: 860px; margin: 0 auto; padding: 28px 24px 64px; }
+  .plugins-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+  .plugins-head__title { display: flex; align-items: center; gap: 12px; font-size: 18px; font-weight: 600; }
+  .plugins-head__title small { display: block; font-size: 12.5px; color: var(--muted); font-weight: 400; margin-top: 3px; }
+</style>
+</head>
+<body>
+<div class="backdrop"><canvas class="stars"></canvas><div class="orb orb--a"></div><div class="orb orb--b"></div></div>
+
+<div class="plugins-shell">
+  <div class="plugins-head">
+    <div class="plugins-head__title">
+      <span class="auth-card__icon" aria-hidden="true">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M10.6 2h2.8v3.4h-2.8V2Zm0 16.6h2.8V22h-2.8v-3.4ZM2 10.6h3.4v2.8H2v-2.8Zm16.6 0H22v2.8h-3.4v-2.8ZM6.2 6.2h2.6v2.6H6.2V6.2Zm9 0h2.6v2.6h-2.6V6.2Zm-9 9h2.6v2.6H6.2v-2.6Zm9 0h2.6v2.6h-2.6v-2.6ZM9.4 9.4h5.2v5.2H9.4V9.4Z"/></svg>
+      </span>
+      <div>
+        <span data-i18n="title">插件开关</span>
+        <small data-i18n="subtitle">登录后、进入工作台之前，直接改 profile 的加载配置</small>
+      </div>
+    </div>
+    <div class="auth-actions" style="margin:0;gap:10px">
+      <button class="button--link" type="button" id="to-workspace" data-i18n="workspace">进入工作台</button>
+      <button class="button--link" type="button" id="do-logout" data-i18n="logout">退出登录</button>
+    </div>
+  </div>
+
+  <div id="plugins-panel"></div>
+</div>
+
+<script src="/backdrop.js"></script>
+<script src="/plugins-panel.js"></script>
+<script>
+(() => {
+  const I18N = {
+    zh: { title: '插件开关', subtitle: '登录后、进入工作台之前，直接改 profile 的加载配置', workspace: '进入工作台', logout: '退出登录' },
+    en: { title: 'Plugins', subtitle: 'Edit the profile loading config before the workspace starts', workspace: 'Open workspace', logout: 'Sign out' },
+  }
+  const lang = String(navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en'
+  const t = (key) => I18N[lang][key] ?? key
+  document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en'
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n) })
+
+  const root = document.documentElement
+  try {
+    const stored = localStorage.getItem('dsh-login-theme')
+    if (stored) root.dataset.theme = stored
+    else if (window.matchMedia('(prefers-color-scheme: light)').matches) root.dataset.theme = 'light'
+  } catch { /* 保持默认 */ }
+
+  document.getElementById('to-workspace').addEventListener('click', () => window.location.assign('/'))
+  document.getElementById('do-logout').addEventListener('click', async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' })
+    } catch { /* 仍然回到登录页 */ }
+    window.location.replace('/login')
+  })
+
+  window.DSHPluginsPanel.mount(document.getElementById('plugins-panel'), { lang })
+})()
+</script>
+</body>
+</html>

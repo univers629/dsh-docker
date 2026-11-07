@@ -273,6 +273,7 @@ data/
 | 注册 | /register | 多用户模式 | 与登录同壳：用户名/密码/确认/邀请码（如启用） |
 | 实例唤醒等待 | 登录流程内嵌 | 停实例唤醒时 | 进度态 + 60s 超时提示 |
 | 账户安全 | /account | 登录用户 | 改密/TOTP/passkey/本人会话管理 |
+| 插件开关 | /plugins | 单管理员模式的 root | 逐项开关 + 安全模式 + 重启工作台（不依赖 DSH 在跑） |
 | 用户管理 | /admin/users | root | 列表/创建/停用/删除/重置密码 |
 | 审计 | /admin/audit | root | 时间线 + 过滤 |
 | 实例状态 | /admin/instances | root | 在线/停止/内存水位/磁盘用量 |
@@ -316,6 +317,7 @@ data/
 | M3 多用户 | `bin/dsh-instances-policy.mjs`、`bin/dsh-instances.mjs`（唯一持 socket 者）、注册与邀请码、实例唤起与就绪轮询 | `dsh-instances-policy-smoke`、`dsh-instances-smoke`（假 docker）、`dsh-auth-multiuser-smoke` |
 | M4 管理面板 | `/api/admin/*`（用户、审计、实例、邀请码；含最后管理员与自助操作守卫）、`bin/dsh-auth-web/admin.html` | `dsh-auth-multiuser-smoke` |
 | M5 部署接线 | `nginx/dsh-multiuser.conf`、`docker-compose.multiuser.yml`、Dockerfile 装载、安装器多用户向导 | `dsh-multiuser-compose-smoke`（compose 校验 + 真实 `nginx -t`）、`dsh-multiuser-e2e-smoke`（真实容器端到端）、`install-multiuser-smoke`（含 bash 行为验证） |
+| M6 插件开关面板 | `bin/dsh-auth-plugins.mjs`（补丁层行扫描、禁用块增删、bundles 重挂、原子写与备份）、`/api/auth/plugins{/toggle,/safe-mode,/restart}`、`bin/dsh-auth-web/plugins.html` + `plugins-panel.js`、`dsh-auth` 挂载 profile 与重启目录、Supervisor 轮询重启请求 | 单测覆盖列表/开关/挂回/安全模式/占位符/损坏拒绝；网关端到端覆盖权限、CSRF、同源、404/403、重启文件与审计 |
 
 ### 10.2 真实执行中发现并修正的问题
 

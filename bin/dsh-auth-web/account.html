@@ -29,6 +29,7 @@
       </div>
     </div>
     <div class="auth-actions" style="margin:0;gap:10px">
+      <button class="button--link" type="button" id="to-plugins" data-i18n="plugins" hidden>插件开关</button>
       <button class="button--link" type="button" id="to-workspace" data-i18n="workspace">进入工作台</button>
       <button class="button--link" type="button" id="do-logout" data-i18n="logout">退出登录</button>
     </div>
@@ -43,8 +44,8 @@
 <script>
 (() => {
   const I18N = {
-    zh: { title: '账户安全', subtitle: '密码、两步验证、通行密钥与登录会话', workspace: '进入工作台', logout: '退出登录' },
-    en: { title: 'Account security', subtitle: 'Password, two-step verification, passkeys and sessions', workspace: 'Open workspace', logout: 'Sign out' },
+    zh: { title: '账户安全', subtitle: '密码、两步验证、通行密钥与登录会话', workspace: '进入工作台', logout: '退出登录', plugins: '插件开关' },
+    en: { title: 'Account security', subtitle: 'Password, two-step verification, passkeys and sessions', workspace: 'Open workspace', logout: 'Sign out', plugins: 'Plugins' },
   }
   const lang = String(navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en'
   const t = (key) => I18N[lang][key] ?? key
@@ -59,6 +60,16 @@
   } catch { /* 保持默认 */ }
 
   document.getElementById('to-workspace').addEventListener('click', () => window.location.assign('/'))
+  // 插件面板只存在于单管理员部署：多用户模式每个用户是独立 profile，网关没有可开关的那一份。
+  fetch('/api/auth/status', { credentials: 'same-origin' })
+    .then((response) => (response.ok ? response.json() : null))
+    .then((status) => {
+      if (!status || status.multiUser) return
+      const link = document.getElementById('to-plugins')
+      link.hidden = false
+      link.addEventListener('click', () => window.location.assign('/plugins'))
+    })
+    .catch(() => { /* 读不到状态就不显示入口 */ })
   document.getElementById('do-logout').addEventListener('click', async () => {
     try {
       await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' })

@@ -61,6 +61,14 @@ import {
 } from './dsh-auth-passkey.mjs'
 import { brokerTokenDigest } from './dsh-broker-grants.mjs'
 import {
+  PluginConfigError,
+  disableThirdParty,
+  listPlugins,
+  requestRestart,
+  restartRequestedAt,
+  setPluginEnabled,
+} from './dsh-auth-plugins.mjs'
+import {
   CAPTCHA_PROVIDERS,
   isCaptchaProvider,
   openCaptchaSecret,
@@ -92,6 +100,11 @@ const CONFIG = {
   brokerUrl: (process.env.DSH_BROKER_URL ?? 'http://dsh-key-broker:8080').replace(/\/+$/, ''),
   // root 的工作台实例由部署方维护，不归 dsh-instances 管理
   adminInstance: process.env.DSH_ADMIN_INSTANCE_NAME ?? 'dsh-admin',
+  // 插件开关面板读写的 profile 目录。挂在网关容器里只为了这一件事：插件把 DSH 的
+  // 启动搞崩时，工作台进不去，唯一还能改配置的就是这个独立运行的进程。
+  profileDir: process.env.DSH_AUTH_PROFILE_DIR ?? '/data/profiles/web',
+  // 重启请求文件：网关写、容器内 Supervisor 读。两边看到的是同一个宿主目录。
+  restartFile: process.env.DSH_AUTH_RESTART_FILE ?? '/data/plugin-panel/restart',
   // 入口后面是否有工作台：多用户模式必有；单用户模式由部署方显式开启。
   workspace: process.env.DSH_MULTI_USER === 'on' || process.env.DSH_AUTH_WORKSPACE === 'on',
   // 唤醒一个实例最多等多久（dsh-instances 自身也有超时，这里留少量余量）
@@ -2214,6 +2227,77 @@ async function handlePasskeyDelete(state, req, res) {
 
 // ---------------------------------------------------------------- routes
 
+/**
+ * 在途登录请求按桶计数。
+ *
+ * 门禁放行到失败落盘之间要经过一次人机验证（异步），并发的请求会在同一段空窗里
+ * 全部通过判定，每个都换来一次密码猜测——窗口内的额度就不再是上限。把「正在处理」
+ * 的请求计入同一份额度，第 maxLoginFailures+1 个并发请求在门禁处就被拒。
+ * 计数只存在于进程内存：重启后归零，而重启本身已经中断了那批在途请求。
+ */
+const inFlightAttempts = { ip: new Map(), account: new Map() }
+
+function inFlightCount(bucket, key) {
+  return key ? bucket.get(key) ?? 0 : 0
+}
+
+function trackInFlight(bucket, key, delta) {
+  if (!key) return
+  const next = (bucket.get(key) ?? 0) + delta
+  if (next > 0) bucket.set(key, next)
+  else bucket.delete(key)
+}
+
+/**
+ * 预留一次尝试额度。
+ * @param {string} ipKey IP 桶键（可能为空：来源不可区分时不计 IP 维度）。
+ * @param {string} accountKey 账户桶键。
+ * @returns {() => void} 幂等的释放函数，处理函数的每条出口路径都必须调用。
+ */
+function reserveLoginAttempt(ipKey, accountKey) {
+  trackInFlight(inFlightAttempts.ip, ipKey, 1)
+  trackInFlight(inFlightAttempts.account, accountKey, 1)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    trackInFlight(inFlightAttempts.ip, ipKey, -1)
+    trackInFlight(inFlightAttempts.account, accountKey, -1)
+  }
+}
+
+/**
+ * 管理员口令重置（单管理员找回入口）：`node dsh-auth.mjs --reset-password`。
+ *
+ * 通过 `/data/auth/state.json` 直接改写，清掉该账户的全部会话（递增 authVersion），
+ * 并把新口令写到状态库同目录的 0600 文件——与首启的 initial-password 同一套做法，
+ * 明文不写进日志。服务进程无需重启：下一次请求读到的就是新状态。
+ * @param {object} state 已加载的状态库快照。
+ */
+function resetAdminPassword(state) {
+  const target = process.argv.find((arg) => arg.startsWith('--username='))?.split('=')[1] ?? 'root'
+  const user = state.users.find((u) => u.username.toLowerCase() === target.trim().toLowerCase())
+  if (!user) {
+    process.stderr.write(`[dsh-auth] no such user: ${target}\n`)
+    process.exit(1)
+  }
+  const fromEnv = process.env.DSH_AUTH_RESET_PASSWORD
+  const password = typeof fromEnv === 'string' && fromEnv.length > 0 ? fromEnv : generatePassword()
+  const weak = validatePassword(password)
+  if (weak) {
+    process.stderr.write(`[dsh-auth] refused: password rejected by policy (${weak})\n`)
+    process.exit(1)
+  }
+  user.passwordHash = hashPassword(password)
+  user.authVersion += 1
+  user.updatedAt = now()
+  appendAudit(state, { actorId: 'system', action: 'password.reset', result: 'ok', change: { username: user.username } })
+  commitState(state)
+  const file = path.join(path.dirname(CONFIG.stateFile), 'reset-password')
+  fs.writeFileSync(file, `${password}\n`, { mode: 0o600 })
+  process.stdout.write(`[dsh-auth] password reset for ${user.username}; new password written to ${file} (read it, then delete)\n`)
+}
+
 async function handleLogin(state, req, res) {
   if (!sameOrigin(req.headers)) return fail(res, 403, 'origin_mismatch')
   const body = await readBody(req)
@@ -2225,51 +2309,60 @@ async function handleLogin(state, req, res) {
   state.failures = state.failures ?? {}
   const ipBucket = evaluateFailureBucket(state.failures[ipKey], at, CONFIG.loginWindowMs, CONFIG.maxLoginFailures)
   const accountBucket = evaluateFailureBucket(state.failures[accountKey], at, CONFIG.loginWindowMs, CONFIG.maxLoginFailures)
-  if (!ipBucket.allowed || !accountBucket.allowed) {
+  const ipExhausted = ipBucket.kept.length + inFlightCount(inFlightAttempts.ip, ipKey) >= CONFIG.maxLoginFailures
+  const accountExhausted = accountBucket.kept.length + inFlightCount(inFlightAttempts.account, accountKey) >= CONFIG.maxLoginFailures
+  if (!ipBucket.allowed || !accountBucket.allowed || ipExhausted || accountExhausted) {
     // 被拒的请求不写回任何桶：调用者提供的用户名可以任意捏造，若在门禁前就落键，
     // 每个不同的用户名都会在状态库里留下一个空桶（审计实测 1000 请求 → 1250 个键，
     // 且每次写入都要重新序列化整份文档）。旧时间戳的过期由 prune 兜底。
-    const retryAfter = Math.ceil(Math.max(ipBucket.retryAfterMs, accountBucket.retryAfterMs) / 1000)
-    appendAudit(state, { action: 'login', result: 'rate_limited', ip: requestClientIp(req), change: { account: accountKey, blockedBy: !ipBucket.allowed ? 'ip' : 'account' } })
+    const inFlightOnly = ipBucket.allowed && accountBucket.allowed
+    const retryAfter = Math.ceil(Math.max(ipBucket.retryAfterMs, accountBucket.retryAfterMs, inFlightOnly ? 1000 : 0) / 1000)
+    const blockedBy = !ipBucket.allowed ? 'ip' : !accountBucket.allowed ? 'account' : 'in_flight'
+    appendAudit(state, { action: 'login', result: 'rate_limited', ip: requestClientIp(req), change: { account: accountKey, blockedBy } })
     commitState(state)
     return fail(res, 429, 'rate_limited', { retryAfter })
   }
-  // 通过门禁才写回裁剪后的桶（把过期时间戳挤掉）。
-  // ipKey 为空表示来源不可区分：此时故意不写 IP 桶——写进去就是一个全局可耗尽的桶，
-  // 任一调用者都能用它锁死全站登录。宁可不设 IP 维度，只保留按账户的桶。
-  if (ipKey) state.failures[ipKey] = ipBucket.kept
-  state.failures[accountKey] = accountBucket.kept
+  const releaseAttempt = reserveLoginAttempt(ipKey, accountKey)
+  try {
+    // 通过门禁才写回裁剪后的桶（把过期时间戳挤掉）。
+    // ipKey 为空表示来源不可区分：此时故意不写 IP 桶——写进去就是一个全局可耗尽的桶，
+    // 任一调用者都能用它锁死全站登录。宁可不设 IP 维度，只保留按账户的桶。
+    if (ipKey) state.failures[ipKey] = ipBucket.kept
+    state.failures[accountKey] = accountBucket.kept
 
-  // 人机验证排在密码比对之前：让自动化在消耗一次 Argon2id 之前就被挡住
-  const captcha = await enforceCaptcha(state, req, body, 'login')
-  if (!captcha.ok) return fail(res, 403, captcha.code, captcha.reason ? { reason: captcha.reason } : undefined)
+    // 人机验证排在密码比对之前：让自动化在消耗一次 Argon2id 之前就被挡住
+    const captcha = await enforceCaptcha(state, req, body, 'login')
+    if (!captcha.ok) return fail(res, 403, captcha.code, captcha.reason ? { reason: captcha.reason } : undefined)
 
-  const user = state.users.find((u) => u.username.toLowerCase() === body.username.trim().toLowerCase())
-  const hash = user?.passwordHash ?? CONFIG.dummyHash
-  const ok = verifyPassword(body.password, hash) && Boolean(user) && user.status === 'enabled'
+    const user = state.users.find((u) => u.username.toLowerCase() === body.username.trim().toLowerCase())
+    const hash = user?.passwordHash ?? CONFIG.dummyHash
+    const ok = verifyPassword(body.password, hash) && Boolean(user) && user.status === 'enabled'
 
-  if (!ok) {
-    if (ipKey) state.failures[ipKey] = [...ipBucket.kept, at]
-    state.failures[accountKey] = [...accountBucket.kept, at]
-    appendAudit(state, { action: 'login', result: 'failure', ip: requestClientIp(req), change: { account: accountKey } })
-    commitState(state)
-    return fail(res, 401, 'invalid_credentials')
+    if (!ok) {
+      if (ipKey) state.failures[ipKey] = [...ipBucket.kept, at]
+      state.failures[accountKey] = [...accountBucket.kept, at]
+      appendAudit(state, { action: 'login', result: 'failure', ip: requestClientIp(req), change: { account: accountKey } })
+      commitState(state)
+      return fail(res, 401, 'invalid_credentials')
+    }
+
+    // 只清除该账户自己的失败桶。绝不删除 ipKey：它被「同一来源对其他账户的全部尝试」
+    // 共享，删掉它等于让任一账户的持有者随时续期自己的尝试额度，进而逐个把其他账户
+    // 的账户桶推满上限。
+    delete state.failures[accountKey]
+
+    // 密码因子通过。若已启用 TOTP，则签发一次性挑战，等第二因子再建会话。
+    if (user.totp?.enabled) {
+      const challenge = createFlow(state, 'totp_login', user.id)
+      appendAudit(state, { actorId: user.id, action: 'login', result: 'second_factor_required', ip: requestClientIp(req) })
+      commitState(state)
+      return send(res, 200, { ok: true, secondFactor: { challenge, method: 'totp' } })
+    }
+
+    await completeLogin(state, user, req, res)
+  } finally {
+    releaseAttempt()
   }
-
-  // 只清除该账户自己的失败桶。绝不删除 ipKey：它被「同一来源对其他账户的全部尝试」
-  // 共享，删掉它等于让任一账户的持有者随时续期自己的尝试额度，进而逐个把其他账户
-  // 的账户桶钉在上限（审计复现：12/12 账户被锁死且管理员重置无法解除）。
-  delete state.failures[accountKey]
-
-  // 密码因子通过。若已启用 TOTP，则签发一次性挑战，等第二因子再建会话。
-  if (user.totp?.enabled) {
-    const challenge = createFlow(state, 'totp_login', user.id)
-    appendAudit(state, { actorId: user.id, action: 'login', result: 'second_factor_required', ip: requestClientIp(req) })
-    commitState(state)
-    return send(res, 200, { ok: true, secondFactor: { challenge, method: 'totp' } })
-  }
-
-  await completeLogin(state, user, req, res)
 }
 
 function handleLogout(state, req, res) {
@@ -2400,6 +2493,93 @@ function handleStatus(state, req, res) {
   })
 }
 
+/**
+ * 插件开关面板的权限：单管理员模式下的 root 会话。
+ *
+ * 多用户模式没有这块面板——每个用户的工作台是独立实例与独立 profile，网关这一侧
+ * 没有「唯一那份 profile」可以开关，给出来只会是错的。
+ */
+function requirePluginAdmin(state, req, res) {
+  if (state.setup.multiUser) {
+    fail(res, 404, 'not_available')
+    return null
+  }
+  const resolved = requireSession(state, req, res)
+  if (!resolved) return null
+  if (resolved.user.role !== 'root') {
+    fail(res, 403, 'forbidden')
+    return null
+  }
+  return resolved
+}
+
+function pluginState() {
+  const listed = listPlugins(CONFIG.profileDir)
+  return { ...listed, restartAt: restartRequestedAt(CONFIG.restartFile) }
+}
+
+function handlePluginsList(state, req, res) {
+  if (!requirePluginAdmin(state, req, res)) return
+  send(res, 200, { ok: true, ...pluginState() })
+}
+
+async function handlePluginToggle(state, req, res) {
+  if (!sameOrigin(req.headers)) return fail(res, 403, 'origin_mismatch')
+  const admin = requirePluginAdmin(state, req, res)
+  if (!admin) return
+  if (!requireCsrf(admin, req, res)) return
+  const body = await readBody(req)
+  if (!body || typeof body.name !== 'string' || typeof body.enabled !== 'boolean') return fail(res, 400, 'invalid_request')
+  let result
+  try {
+    result = setPluginEnabled(CONFIG.profileDir, body.name, body.enabled)
+  } catch (error) {
+    if (error instanceof PluginConfigError) {
+      appendAudit(state, { actorId: admin.user.id, action: 'plugin.toggle', result: 'failure', ip: requestClientIp(req), change: body.name })
+      commitState(state)
+      return fail(res, error.status, 'plugin_toggle_failed', { message: error.message })
+    }
+    throw error
+  }
+  appendAudit(state, {
+    actorId: admin.user.id,
+    action: 'plugin.toggle',
+    result: 'success',
+    ip: requestClientIp(req),
+    change: `${body.name}:${body.enabled ? 'on' : 'off'}`,
+  })
+  commitState(state)
+  send(res, 200, { ok: true, toggle: result, ...pluginState() })
+}
+
+async function handlePluginSafeMode(state, req, res) {
+  if (!sameOrigin(req.headers)) return fail(res, 403, 'origin_mismatch')
+  const admin = requirePluginAdmin(state, req, res)
+  if (!admin) return
+  if (!requireCsrf(admin, req, res)) return
+  const result = disableThirdParty(CONFIG.profileDir)
+  appendAudit(state, {
+    actorId: admin.user.id,
+    action: 'plugin.safe_mode',
+    result: 'success',
+    ip: requestClientIp(req),
+    change: result.disabled.join(',') || null,
+  })
+  commitState(state)
+  send(res, 200, { ok: true, disabled: result.disabled, skipped: result.skipped, ...pluginState() })
+}
+
+async function handlePluginRestart(state, req, res) {
+  if (!sameOrigin(req.headers)) return fail(res, 403, 'origin_mismatch')
+  const admin = requirePluginAdmin(state, req, res)
+  if (!admin) return
+  if (!requireCsrf(admin, req, res)) return
+  const at = requestRestart(CONFIG.restartFile)
+  appendAudit(state, { actorId: admin.user.id, action: 'plugin.restart', result: 'success', ip: requestClientIp(req) })
+  commitState(state)
+  send(res, 200, { ok: true, restartAt: at })
+}
+
 function serveStatic(req, res, pathname) {
   // `/` 在真实部署里由 nginx 交给 DSH 工作台；这里只做本地直连时的兜底跳转。
   // 绝不能把登录页当成 `/` 的内容：登录页会在检测到已登录时跳回 `/`，两者互为终点
@@ -2411,8 +2591,9 @@ function serveStatic(req, res, pathname) {
   }
   const name = pathname === '/login' || pathname === '/register' || pathname === '/waking' ? 'index.html'
     : pathname === '/admin' || pathname === '/admin/' ? 'admin.html'
-      : pathname === '/account' || pathname === '/account/' ? 'account.html'
-        : pathname.replace(/^\/+/, '')
+      : pathname === '/plugins' || pathname === '/plugins/' ? 'plugins.html'
+        : pathname === '/account' || pathname === '/account/' ? 'account.html'
+          : pathname.replace(/^\/+/, '')
   if (name.includes('..')) {
     res.writeHead(400).end()
     return
@@ -2481,6 +2662,11 @@ const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, async (req,
       if (req.method === 'GET' && p === '/api/auth/instance') return await handleInstanceState(state, req, res)
       if (req.method === 'POST' && p === '/api/auth/instance/wake') return await handleInstanceWake(state, req, res)
       if (req.method === 'POST' && p === '/api/auth/password') return handleChangePassword(state, req, res)
+      // 插件开关面板：改的是 profile 的补丁层，不依赖 DSH 进程是否活着
+      if (req.method === 'GET' && p === '/api/auth/plugins') return handlePluginsList(state, req, res)
+      if (req.method === 'POST' && p === '/api/auth/plugins/toggle') return await handlePluginToggle(state, req, res)
+      if (req.method === 'POST' && p === '/api/auth/plugins/safe-mode') return await handlePluginSafeMode(state, req, res)
+      if (req.method === 'POST' && p === '/api/auth/plugins/restart') return await handlePluginRestart(state, req, res)
       if (req.method === 'GET' && p === '/__dsh_auth/verify') return handleVerify(state, req, res)
       // 路由裁剪：单管理员模式不暴露注册与多用户管理面（威胁 T12 的攻击面收敛）
       // 管理面：仅 root 可达，且只部署在多用户模式
@@ -2524,6 +2710,15 @@ const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, async (req,
         return res.end()
       }
     }
+    // 插件面板：单管理员模式的 root 专属页面，未登录先送去登录页而不是给空壳。
+    if (p === '/plugins' || p === '/plugins/' || p === '/plugins/index.html') {
+      if (state.setup.multiUser) return fail(res, 404, 'not_available')
+      const resolved = resolveSession(state, req)
+      if (!resolved || resolved.user.role !== 'root') {
+        res.writeHead(302, { location: '/login?redirect=/plugins', 'cache-control': 'no-store', 'content-length': '0' })
+        return res.end()
+      }
+    }
     return serveStatic(req, res, p)
   } catch (error) {
     process.stderr.write(`[dsh-auth] request failed: ${error?.message ?? error}\n`)
@@ -2539,6 +2734,12 @@ const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, async (req,
 })
 
 const [host, port] = CONFIG.listen.includes(':') ? CONFIG.listen.split(':') : ['0.0.0.0', CONFIG.listen]
+// 找回入口：不启动服务，只改状态库就退出。放在解析可信代理之前，避免为一次写操作
+// 等待 DNS 解析。
+if (process.argv.includes('--reset-password')) {
+  resetAdminPassword(freshState())
+  process.exit(0)
+}
 // 可信代理解析放到后台：它要等 DNS，而网关必须立刻开始监听（它是入口 auth_request
 // 的唯一后端）。解析完成前按「来源不可区分」处理，即不设 IP 维度。
 // 出错只记日志：解析失败的正确行为已经由 resolveTrustedProxies 内部处理（保持未解析），

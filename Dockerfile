@@ -153,6 +153,8 @@ COPY bin/dsh-auth-policy.mjs /usr/local/lib/dsh/dsh-auth-policy.mjs
 COPY bin/dsh-auth-store.mjs /usr/local/lib/dsh/dsh-auth-store.mjs
 COPY bin/dsh-auth-passkey.mjs /usr/local/lib/dsh/dsh-auth-passkey.mjs
 COPY bin/dsh-auth.mjs /usr/local/lib/dsh/dsh-auth.mjs
+# 插件开关面板的后端部分：纯文件操作，改 profile 的补丁层与 bundles，不需要 DSH 在跑。
+COPY bin/dsh-auth-plugins.mjs /usr/local/lib/dsh/dsh-auth-plugins.mjs
 COPY bin/dsh-instances-policy.mjs /usr/local/lib/dsh/dsh-instances-policy.mjs
 # 模型配置生成器：运行期（创建用户实例时）按该账户被开放的上游写 settings.yaml。
 # 它依赖 yaml 与 pi-ai 目录（镜像里已有），并用 DSH 自己的 schema 校验结果。

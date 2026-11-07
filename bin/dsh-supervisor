@@ -10,6 +10,9 @@ DSH_RESTART_DELAY=${DSH_RESTART_DELAY:-2}
 # 的 importLegacyDocument）。所以它再次出现就意味着有人改了模型供应商：必须重启 DSH
 # 才能生效，否则面板里保存成功、工作台里却看不到新供应商。
 DSH_SETTINGS_FILE=${DSH_SETTINGS_FILE:-/data/dsh/settings.yaml}
+# 插件面板（dsh-auth 网关里的页面）写在这里的重启请求。容器里没有 DSH 在跑时也能写，
+# 所以它和上面那个 /run 下的文件不是同一个位置：那个在同一次容器生命周期内。
+DSH_PANEL_RESTART_FILE=${DSH_PANEL_RESTART_FILE:-/data/dsh/plugin-panel/restart}
 DSH_PREPARE_EXECUTABLE=${DSH_PREPARE_EXECUTABLE:-}
 DSH_NGINX_EXECUTABLE=${DSH_NGINX_EXECUTABLE:-nginx}
 DSH_NGINX_CONFIG=${DSH_NGINX_CONFIG:-/usr/local/share/dsh/nginx.conf}
@@ -310,7 +313,7 @@ stop_all() {
 }
 
 cleanup() {
-  rm -f "$DSH_PID_FILE" "$DSH_SUPERVISOR_PID_FILE" "$DSH_RESTART_REQUEST_FILE"
+  rm -f "$DSH_PID_FILE" "$DSH_SUPERVISOR_PID_FILE" "$DSH_RESTART_REQUEST_FILE" "$DSH_PANEL_RESTART_FILE"
 }
 
 trap stop_all HUP INT TERM
@@ -393,6 +396,10 @@ while [ "$stopping" != true ]; do
   fi
 
   start_profile_watcher
+
+  # 走到这里说明这一轮本来就要重新拉起 DSH：补丁层会在启动时重新读取，面板先前写的
+  # 重启请求已经没有必要，先清掉，免得恢复之后再被它触发一次多余的重启。
+  rm -f "$DSH_PANEL_RESTART_FILE" 2>/dev/null || true
 
   # 先看有没有已经在服务的 DSH：插件的"自己重启"会 detach 一个替身进程重放启动命令行，
   # 那个进程是合法的 DSH，只是不是本 Shell 的孩子。接管它，别再起一个去抢端口 —— 两个
@@ -551,6 +558,15 @@ while [ "$stopping" != true ]; do
     # 复用已有的重启请求文件，走同一条收尾路径。
     if [ -f "$DSH_SETTINGS_FILE" ]; then
       echo '[dsh-supervisor] model settings changed; restarting DSH to apply them' >&2
+      : > "$DSH_RESTART_REQUEST_FILE" 2>/dev/null || true
+      kill -TERM "$dsh_pid" 2>/dev/null || true
+      break
+    fi
+    # 插件面板的重启请求。网关写的是宿主目录里的文件，与这条路径隔着一次 bind
+    # mount，所以在这里轮询；DSH 起不来的情况下页面是唯一能操作的地方。
+    if [ -f "$DSH_PANEL_RESTART_FILE" ]; then
+      rm -f "$DSH_PANEL_RESTART_FILE" 2>/dev/null || true
+      echo '[dsh-supervisor] plugin panel requested a restart' >&2
       : > "$DSH_RESTART_REQUEST_FILE" 2>/dev/null || true
       kill -TERM "$dsh_pid" 2>/dev/null || true
       break

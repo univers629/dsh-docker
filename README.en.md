@@ -104,6 +104,14 @@ The installer offers four access modes:
 
 Exposed or not, set `DSH_AUTH_INGRESS_TOKEN` (a shared secret between the entry point and the auth gateway, generated with `openssl rand -hex 32`). With it set, the gateway's `/__dsh_auth/verify` decision endpoint only accepts requests carrying the same value, so other components on the container network cannot trade a session cookie for identity headers; when it is empty only the network boundary protects it.
 
+### Single-admin login page (password mode)
+
+Set `DSH_ACCESS_MODE=password` and `DSH_MULTI_USER=off` in `.env`, then run `./install.sh upgrade -y --dir .` once: the entry point becomes a login page (`dsh-auth` plus `dsh-authgate`, same public port). The first password comes from `DSH_AUTH_INITIAL_PASSWORD`; when unset, one is generated and written to `data/auth/initial-password` (0600).
+
+- **Recovering the password**: `docker exec -u 1000 dsh-auth node /usr/local/lib/dsh/dsh-auth.mjs --reset-password` generates a new password that satisfies the policy, bumps `authVersion` so every old session dies, and writes the plaintext to `data/auth/reset-password` (0600). The login page shows this command at the bottom.
+- **Plugin panel**: after signing in and before entering the workspace, open `/plugins` (the account page links to it as well). It reads and writes the patch layer and `dsh.profile.bundles` of `data/dsh/profiles/web` directly, without going through the DSH process — the only place where configuration can still be changed when a plugin breaks startup and the workspace is stuck on 503. The page offers per-plugin switches, "safe mode" (disable every third-party plugin), and "restart workspace" (performed by the in-container supervisor).
+- **Trusted proxy**: `DSH_AUTH_TRUSTED_PROXIES` already defaults to `dsh-authgate`. Client addresses from `x-real-ip` / `x-forwarded-for` are only believed when the peer is in that list; when it cannot be resolved the per-IP login rate limit turns off after 30 seconds of retries and only the per-account bucket remains. Change it only when renaming the entry container.
+
 ### Multi-user mode
 
 Choosing the multi-user access mode in the installer (or passing `--multi-user`) deploys multi-user mode: **account registration plus one dedicated DSH container per account**. Sessions, files, and model context are isolated per account, and only the initial administrator can reach the admin panel and the model-key panel.

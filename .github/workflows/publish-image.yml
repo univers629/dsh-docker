@@ -195,7 +195,17 @@ jobs:
             const panelBody = await panel.json();
             ensure(panelBody.state === 'stopped' && panelBody.ports?.rfb === 5900 && panelBody.ports?.cdp === 9222, 'the browser panel must report its idle state and ports');
             ensure(panelBody.novnc !== false, 'the image must ship noVNC');
-            console.log('image health: Nginx 204; authenticated DSH index, boot graph, assets, docker-control status and browser panel status: ok');
+            phase = 'auth gateway assets';
+            const { existsSync } = await import('node:fs');
+            for (const file of [
+              '/usr/local/lib/dsh/dsh-auth.mjs',
+              '/usr/local/lib/dsh/dsh-auth-plugins.mjs',
+              '/usr/local/lib/dsh/dsh-auth-web/plugins.html',
+              '/usr/local/lib/dsh/dsh-auth-web/plugins-panel.js',
+            ]) {
+              ensure(existsSync(file), `the image must ship ${file}`);
+            }
+            console.log('image health: Nginx 204; authenticated DSH index, boot graph, assets, docker-control status, browser panel status and auth gateway assets: ok');
           } catch {
             console.error(`image health not ready: ${phase}`);
             process.exitCode = 1;

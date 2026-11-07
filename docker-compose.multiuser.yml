@@ -55,6 +55,14 @@ services:
       DSH_BROKER_TOKENS_FILE: "/data/auth/broker-tokens.json"
       # 入口↔网关共享密钥：与 dsh-ingress 同值（auth 层的 dsh-auth 已带同一变量的默认）。
       DSH_AUTH_INGRESS_TOKEN: "${DSH_AUTH_INGRESS_TOKEN:-}"
+      # 多用户模式的入口是 dsh-ingress（而不是单管理员的 dsh-authgate）：
+      # 改错这个名字，按 IP 的限速会在解析失败后关闭。
+      DSH_AUTH_TRUSTED_PROXIES: "${DSH_AUTH_TRUSTED_PROXIES:-dsh-ingress}"
+    # 多用户模式没有插件面板：每个用户是独立实例、独立 profile，网关这一侧没有
+    # 「唯一那份 profile」可开关。因此摘掉 auth 层为面板加的 profile 与重启目录，
+    # 只留认证状态目录。
+    volumes: !override
+      - ./data/auth:/data/auth
 
   # 增量覆盖 docker-compose.keys.yml 里的密钥代理：多用户模式下它还要接入实例
   # 网络——每个用户实例的模型请求都指向 http://dsh-key-broker:8080（代理按实例

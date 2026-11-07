@@ -2033,18 +2033,26 @@ get_compose_env() {
 # 工程里的那份反而保持 root 属主。
 align_writable_data_dirs() {
   local failed=0
-  mkdir -p data/auth data/secret data/broker data/egress
+  # data/dsh 自己归 DSH 运行时所有；这里只在它还没被创建时一并建出来，并跟着改属主，
+  # 否则 mkdir -p 会留下一个 root 属主的 data/dsh，容器里的 UID 1000 反而写不进去。
+  local created_dsh=0
+  [ -d data/dsh ] || created_dsh=1
+  mkdir -p data/auth data/secret data/broker data/egress data/dsh/plugin-panel
   # data/secret 由容器 root 使用，属主留 root。
-  for directory in data/auth data/broker data/egress; do
+  for directory in data/auth data/broker data/egress data/dsh/plugin-panel; do
+    [ -n "$directory" ] || continue
     chown 1000:1000 "$directory" 2>/dev/null || failed=1
   done
+  if [ "$created_dsh" = 1 ]; then
+    chown 1000:1000 data/dsh 2>/dev/null || failed=1
+  fi
   if [ "$failed" = 1 ]; then
     # 失败只警告：rootless、userns-remap 或非 Linux 宿主上 chown 本来就会失败，
     # 那不是安装失败。下面给出宿主上该执行的命令。
-    echo "[警告] 无法把 data/auth、data/broker、data/egress 的属主改成 1000:1000。" >&2
+    echo "[警告] 无法把 data/auth、data/broker、data/egress、data/dsh/plugin-panel 的属主改成 1000:1000。" >&2
     echo "       dsh-auth 与密钥管理面板以 UID 1000 运行，要在这些目录里新建临时文件。" >&2
     echo "       如果容器反复重启（EACCES）或面板保存时报错，请在宿主上执行：" >&2
-    echo "       sudo chown 1000:1000 data/auth data/broker data/egress" >&2
+    echo "       sudo chown 1000:1000 data/auth data/broker data/egress data/dsh/plugin-panel" >&2
   fi
   return 0
 }
