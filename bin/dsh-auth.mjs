@@ -635,7 +635,7 @@ function resolveSession(state, req) {
   return { session, user, token }
 }
 
-function issueSession(state, user, req) {
+function issueSession(state, user, req, loginMethod = 'password') {
   // 明文非回环不签发：签了也只是把令牌交到明面上（见 transportSecure）。
   if (!transportSecure(req)) return null
   const token = randomToken(32)
@@ -646,7 +646,7 @@ function issueSession(state, user, req) {
     csrfHash: tokenDigest(csrf),
     userId: user.id,
     authVersion: user.authVersion,
-    loginMethod: 'password',
+    loginMethod,
     ip: requestClientIp(req),
     userAgent: String(req.headers['user-agent'] ?? '').slice(0, 256),
     createdAt: at,
@@ -869,13 +869,21 @@ function createFlow(state, purpose, userId, payload = '', source = '') {
 }
 
 /** 取出并作废一个未消费、未过期的一次性凭据；不匹配返回 null。 */
-function consumeFlow(state, purpose, token) {
-  if (typeof token !== 'string' || token.length === 0 || token.length > 128) return null
+function locateFlow(state, purpose, token) {
+  if (typeof token !== 'string' || token.length === 0 || token.length > 128) return { reason: 'malformed' }
   const digest = flowDigest(flowSecret(), purpose, token)
-  const flow = (state.flows ?? []).find((f) => f.purpose === purpose && !f.consumedAt && f.expiresAt > now() && constantTimeEqual(f.digest, digest))
-  if (!flow) return null
-  flow.consumedAt = now()
-  return flow
+  const flow = (state.flows ?? []).find((f) => f.purpose === purpose && constantTimeEqual(f.digest, digest))
+  if (!flow) return { reason: 'unknown' }
+  if (flow.consumedAt) return { reason: 'consumed', flow }
+  if (!(flow.expiresAt > now())) return { reason: 'expired', flow }
+  return { reason: 'ok', flow }
+}
+
+function consumeFlow(state, purpose, token) {
+  const located = locateFlow(state, purpose, token)
+  if (located.reason !== 'ok') return null
+  located.flow.consumedAt = now()
+  return located.flow
 }
 
 /**
@@ -1175,8 +1183,14 @@ async function handleTotpLogin(state, req, res) {
   if (!sameOrigin(req.headers)) return fail(res, 403, 'origin_mismatch')
   const body = await readBody(req)
   if (!body || typeof body.challenge !== 'string' || typeof body.code !== 'string') return fail(res, 400, 'invalid_request')
-  const flow = consumeFlow(state, 'totp_login', body.challenge)
-  if (!flow) return fail(res, 401, 'invalid_challenge')
+  const located = locateFlow(state, 'totp_login', body.challenge)
+  if (located.reason !== 'ok') {
+    // 挑战被拒是可观测事件：不落状态（避免未认证请求放大写盘），只进容器日志。
+    console.warn(`[dsh-auth] totp challenge rejected: ${located.reason} request=${req.requestId ?? '-'} ip=${requestClientIp(req) ?? '-'}`)
+    return fail(res, 401, 'invalid_challenge')
+  }
+  const flow = located.flow
+  flow.consumedAt = now()
   const user = state.users.find((u) => u.id === flow.userId)
   if (!user || user.status !== 'enabled' || !user.totp?.enabled) return fail(res, 401, 'invalid_challenge')
 
@@ -1201,7 +1215,7 @@ async function handleTotpLogin(state, req, res) {
 
   user.totp.failedAttempts = 0
   user.totp.lockedUntil = null
-  await completeLogin(state, user, req, res, { secondFactor: result.usedRecovery ? 'recovery_code' : 'totp' })
+  await completeLogin(state, user, req, res, { secondFactor: result.usedRecovery ? 'recovery_code' : 'totp' }, flow.payload === 'passkey' ? 'passkey' : 'password')
 }
 
 /** 开通 TOTP 第一步：验当前密码 → 签发密钥与挑战（密钥此时尚未生效）。 */
@@ -1697,8 +1711,8 @@ async function handleRegister(state, req, res) {
  * @param {object} [auditChange] 审计补充信息。
  * @returns {Promise<void>} 无返回值。
  */
-async function completeLogin(state, user, req, res, auditChange = null) {
-  const issued = issueSession(state, user, req)
+async function completeLogin(state, user, req, res, auditChange = null, loginMethod = 'password') {
+  const issued = issueSession(state, user, req, loginMethod)
   if (!issued) return fail(res, 403, 'insecure_transport')
   const { token, csrf } = issued
   user.lastLoginAt = now()
@@ -2356,14 +2370,14 @@ async function handlePasskeyLoginFinish(state, req, res) {
 
   // 已启用 TOTP 的账户：passkey 只是第一因子，仍需第二因子
   if (found.user.totp?.enabled) {
-    const challenge = createFlow(state, 'totp_login', found.user.id, '', requestClientIp(req))
+    const challenge = createFlow(state, 'totp_login', found.user.id, 'passkey', requestClientIp(req))
     if (!challenge) return fail(res, 429, 'flow_capacity')
     appendAudit(state, { actorId: found.user.id, action: 'login.passkey', result: 'second_factor_required' })
     commitState(state)
     return send(res, 200, { ok: true, secondFactor: { challenge, method: 'totp' } })
   }
 
-  await completeLogin(state, found.user, req, res, { secondFactor: 'passkey' })
+  await completeLogin(state, found.user, req, res, { secondFactor: 'passkey' }, 'passkey')
 }
 
 /** 列出当前账户的 passkey（不含公钥等内部材料）。 */
@@ -2550,7 +2564,7 @@ async function handleLogin(state, req, res) {
 
     // 密码因子通过。若已启用 TOTP，则签发一次性挑战，等第二因子再建会话。
     if (user.totp?.enabled) {
-      const challenge = createFlow(state, 'totp_login', user.id, '', requestClientIp(req))
+      const challenge = createFlow(state, 'totp_login', user.id, 'password', requestClientIp(req))
       if (!challenge) return fail(res, 429, 'flow_capacity')
       appendAudit(state, { actorId: user.id, action: 'login', result: 'second_factor_required', ip: requestClientIp(req) })
       commitState(state)

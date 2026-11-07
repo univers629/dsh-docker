@@ -434,6 +434,12 @@
       step.style.display = step === el ? '' : 'none'
     }
     if (el !== stepWaking) clearInterval(wakeTimer)
+    // 每个挑战只对应一次输入；切到验证码步骤时清空上一次留下的数字，
+    // 避免旧值随新挑战一起提交。
+    if (el === stepTotp) {
+      const field = $('totp-code')
+      if (field) field.value = ''
+    }
   }
 
   const alertError = $('alert-error')
