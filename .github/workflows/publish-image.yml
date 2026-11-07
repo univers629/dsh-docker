@@ -2,6 +2,7 @@ name: publish-image
 
 # 在 GitHub 的原生 amd64 和 arm64 runner 上分别构建，再合并成一个多架构清单。
 # DSH 本体是 npm 上的预构建包，所以构建的主要成本是 apt 和 npm 下载，不再编译。
+# runner 固定到当前 GA 的 Ubuntu 26.04；用到的 action 主版本都以 node24 为运行时。
 on:
   workflow_dispatch:
     inputs:
@@ -25,7 +26,7 @@ jobs:
   # 先把 dist-tag 解析成确定的版本号：镜像因此固定安装一个确切版本，标签里也能
   # 直接看出 DSH 版本。
   resolve:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -52,10 +53,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             platform: linux/amd64
             slug: amd64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             platform: linux/arm64
             slug: arm64
     runs-on: ${{ matrix.runner }}
@@ -64,7 +65,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 镜像解包后仍有 1 GB 级别，先腾出预装的 SDK 免得 runner 磁盘不够。
       - name: Free disk space
@@ -73,9 +74,9 @@ jobs:
             /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
           df -h /
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -84,7 +85,7 @@ jobs:
       # push-by-digest 只推送单架构镜像，不占用 :latest 标签；合并作业负责打标签。
       # provenance 必须关闭，否则 imagetools 会把证明清单也当成一个平台。
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -230,7 +231,7 @@ jobs:
           mkdir -p /tmp/digests
           printf '%s' '${{ steps.build.outputs.digest }}' > "/tmp/digests/${{ matrix.slug }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.slug }}
           path: /tmp/digests/*
@@ -239,27 +240,27 @@ jobs:
 
   merge:
     needs: [resolve, build]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digest-*
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           # dsh-<版本> 让包页面直接显示镜像里装的是哪个 DSH 版本。
