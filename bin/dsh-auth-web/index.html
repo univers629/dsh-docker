@@ -92,8 +92,11 @@
         </div>
 
         <div class="auth-actions auth-actions--stack" id="recovery-hint" style="display:none">
-          <span class="muted-text" data-i18n="recovery.hint">忘记口令？在服务器上执行下面的命令重置，它会生成新口令并让旧会话全部失效。</span>
-          <code class="recovery-command">docker exec -u 1000 dsh-auth node /usr/local/lib/dsh/dsh-auth.mjs --reset-password</code>
+          <button class="button--link" type="button" id="toggle-recovery" aria-expanded="false" aria-controls="recovery-body" data-i18n="recovery.toggle">忘记口令？</button>
+          <div class="recovery-body" id="recovery-body" hidden>
+            <span class="muted-text" data-i18n="recovery.hint">在服务器上执行下面的命令重置，它会生成新口令并让旧会话全部失效。</span>
+            <code class="recovery-command">docker exec -u 1000 dsh-auth node /usr/local/lib/dsh/dsh-auth.mjs --reset-password</code>
+          </div>
         </div>
       </form>
 
@@ -232,7 +235,8 @@
       'form.verifying': '验证中…',
       'form.entering': '进入工作台…',
       'form.security': '支持通行密钥与两步验证（TOTP）',
-      'recovery.hint': '忘记口令？在服务器上执行下面的命令重置，它会生成新口令并让旧会话全部失效。',
+      'recovery.toggle': '忘记口令？',
+      'recovery.hint': '在服务器上执行下面的命令重置，它会生成新口令并让旧会话全部失效。',
       'notice.loopStopped': '入口暂时无法打开你的工作台，已停止自动跳转以免反复刷新。请点下方按钮重试。',
       'notice.sessionExpired': '登录状态已失效，请重新登录。',
       'notice.passwordChanged': '密码已修改，请用新密码登录。',
@@ -311,7 +315,8 @@
       'form.verifying': 'Verifying…',
       'form.entering': 'Entering workspace…',
       'form.security': 'Supports passkeys and two-step verification (TOTP)',
-      'recovery.hint': 'Forgot the password? Run the command below on the host to reset it; it issues a new password and ends every existing session.',
+      'recovery.toggle': 'Forgot the password?',
+      'recovery.hint': 'Run the command below on the host to reset it; it issues a new password and ends every existing session.',
       'notice.loopStopped': 'The entry point could not open your workspace, so automatic redirection stopped to avoid a refresh loop. Use the button below to retry.',
       'notice.sessionExpired': 'Your session has expired. Please sign in again.',
       'notice.passwordChanged': 'Your password has changed. Sign in with the new one.',
@@ -924,8 +929,14 @@
         $('register-link-wrap').style.display = ''
         if (capabilities.inviteRequired === true) $('invite-field').style.display = ''
       }
-      // 单管理员部署没有别的找回途径：口令丢了只能从服务器改库，命令就摆在登录卡片上。
+      // 单管理员部署没有其他找回途径：口令丢失后只能从服务器重置，命令收在折叠块里。
       if (capabilities.multiUser !== true) $('recovery-hint').style.display = ''
+      $('toggle-recovery').addEventListener('click', () => {
+        const body = $('recovery-body')
+        const opening = body.hidden
+        body.hidden = !opening
+        $('toggle-recovery').setAttribute('aria-expanded', String(opening))
+      })
       const session = await api('/api/auth/session')
       if (session.response.ok) {
         const target = redirectTarget()

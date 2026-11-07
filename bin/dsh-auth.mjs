@@ -158,6 +158,20 @@ const MAX_FAILURE_KEYS = 10000
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' }
 
+/**
+ * 登录页、账户页与插件面板页的安全响应头。
+ *
+ * frame-ancestors 'none' 与 X-Frame-Options 同时下发：前者是标准写法，后者覆盖尚未实现 CSP 的浏览器。
+ * 会话 Cookie 是 SameSite=Strict，跨站 iframe 带不上会话，这两条阻止其他站点嵌套登录页伪造界面。
+ * nosniff 阻止浏览器把未知类型当脚本执行，referrer-policy 避免把带查询串的地址带给第三方。
+ */
+const PAGE_SECURITY_HEADERS = {
+  'x-frame-options': 'DENY',
+  'content-security-policy': "frame-ancestors 'none'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'same-origin',
+}
+
 const store = openStore(CONFIG.stateFile)
 const totpKey = loadOrCreateTotpKey(CONFIG.totpKeyFile)
 CONFIG.dummyHash = hashPassword(randomToken(24))
@@ -2585,7 +2599,7 @@ function serveStatic(req, res, pathname) {
   // 绝不能把登录页当成 `/` 的内容：登录页会在检测到已登录时跳回 `/`，两者互为终点
   // 就成了无限重定向（浏览器表现为页面狂闪）。
   if (pathname === '/') {
-    res.writeHead(302, { location: '/login', 'cache-control': 'no-store', 'content-length': '0' })
+    res.writeHead(302, { location: '/login', 'cache-control': 'no-store', 'content-length': '0', ...PAGE_SECURITY_HEADERS })
     res.end()
     return
   }
@@ -2607,7 +2621,7 @@ function serveStatic(req, res, pathname) {
     res.end('not found')
     return
   }
-  res.writeHead(200, { 'content-type': MIME[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-store' })
+  res.writeHead(200, { 'content-type': MIME[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-store', ...PAGE_SECURITY_HEADERS })
   res.end(data)
 }
 
